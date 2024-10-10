@@ -1,46 +1,71 @@
-#! ~/.venv/bin/python
 from classes import DataWrangler
-import tkinter as tk
-import tkinter.ttk as ttk
-import sys 
+from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QFileDialog
+import sys
 from utility import DelayedKeyboardInterrupt
-from tkinter import filedialog as fd
-
-window = tk.Tk()
-instruction_frame = tk.Frame(master=window, relief=tk.RIDGE)
-data_entry_frame = tk.Frame(master=window)
-button_frame = tk.Frame(master=window)
-
+from loguru import logger
+# Initialize DataWrangler
 DATA = DataWrangler()
 
-def select_ticket_file() -> None:
-    filetypes = (
-        ('JSON files', '*.json'),
-    )
-
-    file = fd.askopenfile(
-        title='Path to Ticket Payload File',
-        initialdir='.',
-        filetypes=filetypes)
-    DATA.ticket_file = file
+def select_ticket_file():
+    file_dialog = QFileDialog()
+    file_dialog.setNameFilters(["JSON files (*.json)"])
+    if file_dialog.exec_():
+        file_path = file_dialog.selectedFiles()[0]
+        logger.info(f'Ticket File Selected: {file_path}')
+        DATA.ticket_file = file_path
 
 def select_comments_dir():
-    directory = fd.askdirectory()
-    DATA.comments_dir=directory
-    
-instructions = tk.Label(text="Welcome to the Data Wrangler. \n \n You will need to identify two file locations. \n The Tickets File Path represents the path to the ticket payload from the ZenDesk Tickets API.\n The Second is the path to the comments directory, which is the location of the directory that contains the comments for each ticket.", foreground="black", master=instruction_frame)
-warning = tk.Label(text="NOTE: The Ticket and the individual comment files must be in JSON Format.", foreground="Red", master=instruction_frame)
-process_button = ttk.Button(text="Process Data")
-comments_dir_location = ttk.Button( width=50, master=data_entry_frame)
-ticket_file_location_label = tk.Button(text="Select Path to Ticket File", master=data_entry_frame, command=select_ticket_file)
-comments_dir_location_label = tk.Button(text="Select Path to Comments Directory", master=data_entry_frame, 
-command=select_comments_dir)
+    if dir_path := QFileDialog.getExistingDirectory():
+        logger.info(f'Comments Dir Selected: {dir_path}')
+        DATA.comments_dir = dir_path
 
-instruction_frame.pack(fill=tk.BOTH, expand=True)
-data_entry_frame.pack(fill=tk.BOTH, expand=True)
-button_frame.pack(fill=tk.BOTH, expand=True)
+def process_data():
+    DATA.process()
+app = QApplication(sys.argv)
+ 
+# Create main window
+window = QWidget()
+window.setWindowTitle("Data Wrangler")
+window.setGeometry(100, 100, 600, 400)
+
+# Instruction frame (equivalent)
+instruction_layout = QVBoxLayout()
+instruction_label = QLabel("Welcome to the Data Wrangler. \n\n"
+                           "You will need to identify two file locations.\n"
+                           "The Tickets File Path represents the path to the ticket payload from the ZenDesk Tickets API.\n"
+                           "The second is the path to the comments directory, which is the location of the directory that contains the comments for each ticket.")
+warning_label = QLabel("NOTE: The Ticket and the individual comment files must be in JSON Format.")
+warning_label.setStyleSheet("color: red;")
+
+instruction_layout.addWidget(instruction_label)
+instruction_layout.addWidget(warning_label)
+ 
+# Data entry frame (equivalent)
+data_entry_layout = QVBoxLayout()
+
+# Buttons
+ticket_file_button = QPushButton("Select Path to Ticket File")
+ticket_file_button.clicked.connect(select_ticket_file)
+
+comments_dir_button = QPushButton("Select Path to Comments Directory")
+comments_dir_button.clicked.connect(select_comments_dir)
+
+process_button = QPushButton("Process Data")
+process_button.clicked.connect(process_data)
+
+data_entry_layout.addWidget(ticket_file_button)
+data_entry_layout.addWidget(comments_dir_button)
+data_entry_layout.addWidget(process_button)
+
+# Main layout
+main_layout = QVBoxLayout()
+main_layout.addLayout(instruction_layout)
+main_layout.addLayout(data_entry_layout)
+
+# Set layout and show window
+window.setLayout(main_layout)
+window.show()
 
 if __name__ == "__main__":
-    print("Initializing Wrangler...")
-    window.mainloop()
-
+    logger.info("Initializing Wrangler...")
+    sys.exit(app.exec_())
