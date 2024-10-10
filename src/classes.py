@@ -1,23 +1,25 @@
 import json
 import os
 import pathlib
+import random
 from datetime import datetime
 from enum import Enum
-from typing import List, TextIO
-import random
+from typing import List
 from loguru import logger
 
 logger.add(sink="./wrangle_log.log", colorize=True, serialize=True)
 
+
 class MyEncoder(json.JSONEncoder):
     def default(self, obj):
-       if isinstance(obj, TicketStatus): 
-           return { "status" : obj.name}
-       elif isinstance(obj,datetime):
-           return obj.isoformat() 
-       return json.JSONEncoder.default(self, obj)
+        if isinstance(obj, TicketStatus):
+            return {"status": obj.name}
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, Comment):
+            return obj.to_dict_format()
+        return json.JSONEncoder.default(self, obj)
 
-  
 
 class TicketStatus(Enum):
     OPEN = 1
@@ -25,6 +27,7 @@ class TicketStatus(Enum):
     PENDING = 3
     SOLVED = 4
     CLOSED = 5
+
 
 class Comment:
     def __init__(self, id: int, created_at: datetime, body: str) -> None:
@@ -93,7 +96,13 @@ class DataWrangler:
                         type_=ticket["fields"][0]["value"],
                         status=TicketStatus[ticket["status"].upper()],
                     )
-                    first_comment = Comment(id=random.randint(9999,9999999999), created_at=datetime.strptime(ticket["created_at"], "%Y-%m-%dT%H:%M:%SZ"), body=ticket["description"])
+                    first_comment = Comment(
+                        id=random.randint(9999, 9999999999),
+                        created_at=datetime.strptime(
+                            ticket["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        body=ticket["description"],
+                    )
                     reshaped_ticket.comments.append(first_comment)
 
                     self.wrangled_tickets.append(reshaped_ticket)
@@ -108,13 +117,13 @@ class DataWrangler:
         try:
             return Comment(
                 id=comment["id"],
-                created_at= comment["created_at"],
-                body=comment["plain_body"]
+                created_at=comment["created_at"],
+                body=comment["plain_body"],
             )
         except Exception as e:
             logger.exception(f"Failed to reshape comment: {e}")
             raise RuntimeError("Comment reshaping failed") from e
-            
+
     def comments_bound(self) -> bool:
         try:
             for ticket in self.wrangled_tickets:
@@ -128,15 +137,18 @@ class DataWrangler:
                             for key, value in comments_data.items():
                                 for comment in value:
                                     reshaped_comment = self.reshaped_comment(comment)
-                                    ticket.comments.append(reshaped_comment.to_dict_format())
+                                    ticket.comments.append(
+                                        reshaped_comment.to_dict_format()
+                                    )
                             logger.warning(f"No comments found for ticket {ticket.id}")
-                            for key,value in comments_data.items():
+                            for key, value in comments_data.items():
                                 print(f"key:{key}, value:{value}")
                         logger.success(f"Comments bound to ticket {ticket.id}")
             return True
         except Exception as e:
             logger.exception(f"Error while binding comments: {e}")
             return False
+
     def create_corpous(self):
         try:
             for ticket in self.wrangled_tickets:
@@ -150,26 +162,25 @@ class DataWrangler:
                     grouped_comments.append(comment["body"])
                     logger.success(f"Merged {comment['id']}")
             self.corpus = " ".join(grouped_comments)
-            logger.success('Corpus SUccessfully Created')
+            logger.success("Corpus SUccessfully Created")
             return True
         except Exception as e:
-            logger.exception('Failed to Create Corpus')
+            logger.exception("Failed to Create Corpus")
             return False
 
-    def process(self) -> None:
-        try:
-            if self.tickets_reshaped() and self.comments_bound() and self.create_corpous():
 
-                output_file = pathlib.Path(f"wrangled_data_{datetime.now().strftime('%Y-%m-%d')}.json")
-                with open(output_file, "w") as output:
-                    json.dump([ticket.__dict__ for ticket in self.wrangled_tickets], output, indent=4, cls=MyEncoder)
-                logger.success("Data successfully wrangled and saved")
-        except Exception as e:
-            logger.exception(f"Processing failed: {e}")
-            raise RuntimeError("Data processing failed") from e
 
     @staticmethod
     def clean(body: str) -> str:
         return body.strip().replace("\n", "")
-
-                                                
+    
+    def generate_json(self, filename:str):
+        if filename is None:
+            filename = os.path.join(f"{pathlib.Path.cwd()},processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json")
+        with open(filename, "w+") as output:
+                    json.dump(
+                        [ticket.__dict__ for ticket in self.wrangled_tickets],
+                        output,
+                        indent=4,
+                        cls=MyEncoder,
+                    )

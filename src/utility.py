@@ -6,14 +6,13 @@
 import os
 import signal
 
-
 __all__ = [
-    'SIGNAL_TRANSLATION_MAP',
+    "SIGNAL_TRANSLATION_MAP",
 ]
 
 SIGNAL_TRANSLATION_MAP = {
-    signal.SIGINT: 'SIGINT',
-    signal.SIGTERM: 'SIGTERM',
+    signal.SIGINT: "SIGINT",
+    signal.SIGTERM: "SIGTERM",
 }
 
 
@@ -63,17 +62,23 @@ class DelayedKeyboardInterrupt:
         #
         if os.getpid() != self._pid:
             if self._propagate_to_forked_processes is False:
-                print(f'!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; '
-                      f'PID mismatch: {os.getpid()=}, {self._pid=}, calling original handler')
+                print(
+                    f"!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; "
+                    f"PID mismatch: {os.getpid()=}, {self._pid=}, calling original handler"
+                )
                 self._old_signal_handler_map[self._sig](self._sig, self._frame)
             elif self._propagate_to_forked_processes is None:
-                print(f'!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; '
-                      f'PID mismatch: {os.getpid()=}, ignoring the signal')
+                print(
+                    f"!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; "
+                    f"PID mismatch: {os.getpid()=}, ignoring the signal"
+                )
                 return
             # elif self._propagate_to_forked_processes is True:
             #   ... passthrough
 
-        print(f'!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; delaying KeyboardInterrupt')
+        print(
+            f"!!! DelayedKeyboardInterrupt._handler: {SIGNAL_TRANSLATION_MAP[sig]} received; delaying KeyboardInterrupt"
+        )
 
 
 # =============================================================================
@@ -83,53 +88,55 @@ class DelayedKeyboardInterrupt:
 import asyncio
 import signal
 from concurrent.futures import Executor, ThreadPoolExecutor
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
 
 class AsyncService1:
     """
     Dummy service that does nothing.
     """
+
     def __init__(self):
         pass
 
     async def start(self):
-        print(f'AsyncService1: starting')
+        print(f"AsyncService1: starting")
         await asyncio.sleep(1)
-        print(f'AsyncService1: started')
+        print(f"AsyncService1: started")
 
     async def stop(self):
-        print(f'AsyncService1: stopping')
+        print(f"AsyncService1: stopping")
         await asyncio.sleep(1)
-        print(f'AsyncService1: stopped')
+        print(f"AsyncService1: stopped")
 
 
 class AsyncService2:
     """
     Dummy service that does nothing.
     """
+
     def __init__(self):
         pass
 
     async def start(self):
-        print(f'AsyncService2: starting')
+        print(f"AsyncService2: starting")
         await asyncio.sleep(1)
-        print(f'AsyncService2: started')
+        print(f"AsyncService2: started")
 
     async def stop(self):
-        print(f'AsyncService2: stopping')
+        print(f"AsyncService2: stopping")
         await asyncio.sleep(1)
-        print(f'AsyncService2: stopped')
+        print(f"AsyncService2: stopped")
 
 
 class AsyncApplication:
     def __init__(self):
-        self._loop = None                               # type: Optional[asyncio.AbstractEventLoop]
-        self._wait_event = None                         # type: Optional[asyncio.Event]
-        self._wait_task = None                          # type: Optional[asyncio.Task]
+        self._loop = None  # type: Optional[asyncio.AbstractEventLoop]
+        self._wait_event = None  # type: Optional[asyncio.Event]
+        self._wait_task = None  # type: Optional[asyncio.Task]
 
-        self._service1 = None                           # type: Optional[AsyncService1]
-        self._service2 = None                           # type: Optional[AsyncService2]
+        self._service1 = None  # type: Optional[AsyncService1]
+        self._service2 = None  # type: Optional[AsyncService2]
 
     def run(self):
         self._loop = asyncio.new_event_loop()
@@ -158,7 +165,7 @@ class AsyncApplication:
             #
 
             except KeyboardInterrupt:
-                print(f'!!! AsyncApplication.run: got KeyboardInterrupt during start')
+                print(f"!!! AsyncApplication.run: got KeyboardInterrupt during start")
                 raise
 
             #
@@ -166,9 +173,9 @@ class AsyncApplication:
             # Wait for a termination event infinitelly.
             #
 
-            print(f'AsyncApplication.run: entering wait loop')
+            print(f"AsyncApplication.run: entering wait loop")
             self._wait()
-            print(f'AsyncApplication.run: exiting wait loop')
+            print(f"AsyncApplication.run: exiting wait loop")
 
         except KeyboardInterrupt:
             #
@@ -178,7 +185,7 @@ class AsyncApplication:
                 with DelayedKeyboardInterrupt():
                     self._stop()
             except KeyboardInterrupt:
-                print(f'!!! AsyncApplication.run: got KeyboardInterrupt during stop')
+                print(f"!!! AsyncApplication.run: got KeyboardInterrupt during stop")
 
     async def _astart(self):
         self._service1 = AsyncService1()
@@ -254,12 +261,18 @@ class AsyncApplication:
         #
 
         def __loop_exception_handler(loop, context: Dict[str, Any]):
-            if type(context['exception']) == ConnectionResetError:
-                print(f'!!! AsyncApplication._stop.__loop_exception_handler: suppressing ConnectionResetError')
-            elif type(context['exception']) == OSError:
-                print(f'!!! AsyncApplication._stop.__loop_exception_handler: suppressing OSError')
+            if type(context["exception"]) == ConnectionResetError:
+                print(
+                    f"!!! AsyncApplication._stop.__loop_exception_handler: suppressing ConnectionResetError"
+                )
+            elif type(context["exception"]) == OSError:
+                print(
+                    f"!!! AsyncApplication._stop.__loop_exception_handler: suppressing OSError"
+                )
             else:
-                print(f'!!! AsyncApplication._stop.__loop_exception_handler: unhandled exception: {context}')
+                print(
+                    f"!!! AsyncApplication._stop.__loop_exception_handler: unhandled exception: {context}"
+                )
 
         self._loop.set_exception_handler(__loop_exception_handler)
 
@@ -282,7 +295,7 @@ class AsyncApplication:
             #
             # ... and close the loop.
             #
-            print(f'AsyncApplication._stop: closing event loop')
+            print(f"AsyncApplication._stop: closing event loop")
             self._loop.close()
 
     def _wait(self):
@@ -310,7 +323,9 @@ class AsyncApplication:
         #
 
         to_cancel = asyncio.tasks.all_tasks(self._loop)
-        print(f'AsyncApplication._cancel_all_tasks: cancelling {len(to_cancel)} tasks ...')
+        print(
+            f"AsyncApplication._cancel_all_tasks: cancelling {len(to_cancel)} tasks ..."
+        )
 
         if not to_cancel:
             return
@@ -327,19 +342,21 @@ class AsyncApplication:
                 continue
 
             if task.exception() is not None:
-                self._loop.call_exception_handler({
-                    'message': 'unhandled exception during Application.run() shutdown',
-                    'exception': task.exception(),
-                    'task': task,
-                })
+                self._loop.call_exception_handler(
+                    {
+                        "message": "unhandled exception during Application.run() shutdown",
+                        "exception": task.exception(),
+                        "task": task,
+                    }
+                )
 
 
 def main():
-    print(f'main: begin')
+    print(f"main: begin")
     app = AsyncApplication()
     app.run()
-    print(f'main: end')
+    print(f"main: end")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
