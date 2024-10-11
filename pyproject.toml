@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "ml-data-wrangler"
+version = "0.1.0"
+description = ""
+authors = ["Terry Arthur Brooks, Jr. <Terry.Arthur@BrooksJr.com>"]
+license = "MIT"
+readme = "README.md"
+package-mode = false 
+
+[tool.poetry.dependencies]
+python = "^3.10.0"
+gradio = "*"
+matplotlib = "*"
+gensim = "*"
+loguru = "*"
+nltk = "*"
+PyQt5 = "*"
+spacy = "*"
+seaborn = "^0.13.2"
+pyldavis = "^3.4.1"
+scipy = "1.12"
+
+[tool.poetry.group.dev.dependencies]
+isort = "*"
+black = "*"
+prospector = "*"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

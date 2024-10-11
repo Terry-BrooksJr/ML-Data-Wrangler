@@ -1,5 +1,4 @@
 import en_core_web_lg
-import gensim.corpora as corpora
 import matplotlib.pyplot as plt
 import nltk
 import pyLDAvis.gensim_models
@@ -10,14 +9,16 @@ from gensim.models import CoherenceModel, LdaMulticore
 from gensim.models.ldamodel import LdaModel
 from loguru import logger
 from nltk.corpus import stopwords
-
+from typing import List 
+from numpy.random import RandomState
+import random 
 nltk.download("stopwords")
 sns.set_theme()
 
 
 class LatentDirichletAllocator:
     def __init__(self, corpus: str, num_of_topics: int) -> None:
-        self.corpus = ""
+        self.corpus: List = []
         self.documents = ""
         self._tokens = []
         self.id2word = ""
@@ -25,6 +26,11 @@ class LatentDirichletAllocator:
         self.prelemma_corpus = corpus
         self.topics = []
         self.coherence_values = []
+
+
+    def _generate_random_state(self) -> RandomState:
+        random_seed = random.randint(1,999999999999999)
+        return RandomState(random_seed)
 
     def get_lda_model(
         self, iterations: int, workers: int, passes: int, num_of_topics: int = 0
@@ -38,7 +44,7 @@ class LatentDirichletAllocator:
             num_topics=num_of_topics,
             workers=workers,
             passes=passes,
-            random_state=100,
+            random_state=self._generate_random_state(),
         )
 
     def data_preprocessed(self):
@@ -104,7 +110,7 @@ class LatentDirichletAllocator:
             logger.exception("Failed to  Train Model")
             return False
 
-    def vizualize_results(self):
+    def visualize_results(self):
         try:
             lda_display = pyLDAvis.gensim_models.prepare(
                 self.get_lda_model(), self.corpus, self.id2word
@@ -119,4 +125,4 @@ class LatentDirichletAllocator:
             return None
 
     def get_top_5_topic(self):
-        return self.topics[:4]
+        return self.topics[:5]

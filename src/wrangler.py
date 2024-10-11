@@ -1,84 +1,187 @@
-import sys
-
+import json
+import os
+import pathlib
+import random
+from datetime import datetime
+from enum import Enum
+from typing import List
 from loguru import logger
-from PyQt5.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
-                             QPushButton, QVBoxLayout, QWidget)
-
-from classes import DataWrangler
-from utility import DelayedKeyboardInterrupt
-
-# Initialize DataWrangler
-DATA = DataWrangler()
 
 
-def select_ticket_file():
-    file_dialog = QFileDialog()
-    file_dialog.setNameFilters(["JSON files (*.json)"])
-    if file_dialog.exec_():
-        file_path = file_dialog.selectedFiles()[0]
-        logger.info(f"Ticket File Selected: {file_path}")
-        DATA.ticket_file = file_path
+logger.add(sink="./wrangle_log.log", colorize=True, serialize=True)
 
 
-def select_comments_dir():
-    if dir_path := QFileDialog.getExistingDirectory():
-        logger.info(f"Comments Dir Selected: {dir_path}")
-        DATA.comments_dir = dir_path
+class MyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, TicketStatus):
+            return {"status": obj.name}
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, Comment):
+            return obj.to_dict_format()
+        return json.JSONEncoder.default(self, obj)
 
 
-def process_data():
-    DATA.process()
+class TicketStatus(Enum):
+    OPEN = 1
+    HOLD = 2
+    PENDING = 3
+    SOLVED = 4
+    CLOSED = 5
 
 
-app = QApplication(sys.argv)
+class Comment:
+    def __init__(self, id: int, created_at: datetime, body: str) -> None:
+        self.id = id
+        self.created_at = created_at
+        self.body = body
 
-# Create main window
-window = QWidget()
-window.setWindowTitle("Data Wrangler")
-window.setGeometry(100, 100, 600, 400)
+    def to_dict_format(self) -> dict:
+        return {
+            "created_at": self.created_at,
+            "id": self.id,
+            "body": self.body,
+        }
 
-# Instruction frame (equivalent)
-instruction_layout = QVBoxLayout()
-instruction_label = QLabel(
-    "Welcome to the Data Wrangler. \n\n"
-    "You will need to identify two file locations.\n"
-    "The Tickets File Path represents the path to the ticket payload from the ZenDesk Tickets API.\n"
-    "The second is the path to the comments directory, which is the location of the directory that contains the comments for each ticket."
-)
-warning_label = QLabel(
-    "NOTE: The Ticket and the individual comment files must be in JSON Format."
-)
-warning_label.setStyleSheet("color: red;")
 
-instruction_layout.addWidget(instruction_label)
-instruction_layout.addWidget(warning_label)
+class Ticket:
+    def __init__(
+        self,
+        id: int,
+        created_at: datetime,
+        status: TicketStatus,
+        last_updated: datetime,
+        subject: str,
+        tags: List[str] = None,
+        outcome: str = None,
+        type_: str = None,
+    ) -> None:
+        self.id = id
+        self.created_at = created_at
+        self.last_updated = last_updated
+        self.status = status
+        self.subject = subject
+        self.tags = tags or []
+        self.outcome = outcome
+        self.type = type_
+        self.comments: List[Comment] = []
 
-# Data entry frame (equivalent)
-data_entry_layout = QVBoxLayout()
 
-# Buttons
-ticket_file_button = QPushButton("Select Path to Ticket File")
-ticket_file_button.clicked.connect(select_ticket_file)
+class DataWrangler:
+    def __init__(
+        self,
+        comments_dir: pathlib.Path = pathlib.Path.cwd(),
+        ticket_file: pathlib.Path = pathlib.Path.cwd() / "tickets.json",
+    ) -> None:
+        self.ticket_file = ticket_file
+        self.comments_dir = comments_dir
+        self.wrangled_tickets: List[Ticket] = []
+        self.corpus: str = ""
 
-comments_dir_button = QPushButton("Select Path to Comments Directory")
-comments_dir_button.clicked.connect(select_comments_dir)
+    def tickets_reshaped(self) -> bool:
+        try:
+            with open(self.ticket_file, "r") as tickets_file:
+                tickets_data = json.load(tickets_file)
+                for ticket in tickets_data:
+                    reshaped_ticket = Ticket(
+                        id=ticket["id"],
+                        created_at=datetime.strptime(
+                            ticket["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        last_updated=datetime.strptime(
+                            ticket["updated_at"], "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        subject=ticket["subject"],
+                        tags=ticket.get("tags", []),
+                        outcome=ticket["fields"][2]["value"],
+                        type_=ticket["fields"][0]["value"],
+                        status=TicketStatus[ticket["status"].upper()],
+                    )
+                    first_comment = Comment(
+                        id=random.randint(9999, 9999999999),
+                        created_at=datetime.strptime(
+                            ticket["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        body=ticket["description"],
+                    )
+                    reshaped_ticket.comments.append(first_comment)
 
-process_button = QPushButton("Process Data")
-process_button.clicked.connect(process_data)
+                    self.wrangled_tickets.append(reshaped_ticket)
+                    logger.success(f"Successfully reshaped ticket {ticket['id']}")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to reshape tickets: {e}")
+            return False
 
-data_entry_layout.addWidget(ticket_file_button)
-data_entry_layout.addWidget(comments_dir_button)
-data_entry_layout.addWidget(process_button)
+    @staticmethod
+    def reshaped_comment(comment) -> Comment:
+        try:
+            return Comment(
+                id=comment["id"],
+                created_at=comment["created_at"],
+                body=comment["plain_body"],
+            )
+        except Exception as e:
+            logger.exception(f"Failed to reshape comment: {e}")
+            raise RuntimeError("Comment reshaping failed") from e
 
-# Main layout
-main_layout = QVBoxLayout()
-main_layout.addLayout(instruction_layout)
-main_layout.addLayout(data_entry_layout)
+    def comments_bound(self) -> bool:
+        try:
+            for ticket in self.wrangled_tickets:
+                for filename in os.listdir(self.comments_dir):
+                    if filename.startswith(str(ticket.id)):
+                        comments_file_path = os.path.join(self.comments_dir, filename)
+                        logger.info(f"Binding comments for ticket {ticket.id}")
+                        with open(comments_file_path, "r") as comments_file:
+                            comments_data = json.load(comments_file)
+                            # Check if the ticket ID exists in comments_data
+                            for key, value in comments_data.items():
+                                for comment in value:
+                                    reshaped_comment = self.reshaped_comment(comment)
+                                    ticket.comments.append(
+                                        reshaped_comment.to_dict_format()
+                                    )
+                            logger.warning(f"No comments found for ticket {ticket.id}")
+                            for key, value in comments_data.items():
+                                print(f"key:{key}, value:{value}")
+                        logger.success(f"Comments bound to ticket {ticket.id}")
+            return True
+        except Exception as e:
+            logger.exception(f"Error while binding comments: {e}")
+            return False
 
-# Set layout and show window
-window.setLayout(main_layout)
-window.show()
+    def create_corpus(self):
+        try:
+            for ticket in self.wrangled_tickets:
+                grouped_comments = []
+                logger.info(f"Selecting {ticket .id} for Corpus Merge")
+                for comment in ticket.comments:
+                    print(type(comment))
+                    if not isinstance(comment, dict):
+                        comment = comment.__dict__
+                    logger.info(f"Selecting {comment['id']}")
+                    grouped_comments.append(comment["body"])
+                    logger.success(f"Merged {comment['id']}")
+            self.corpus = " ".join(grouped_comments)
+            logger.success("Corpus Successfully Created")
+            return True
+        except Exception as e:
+            logger.exception("Failed to Create Corpus")
+            return False
 
-if __name__ == "__main__":
-    logger.info("Initializing Wrangler...")
-    sys.exit(app.exec_())
+
+
+    @staticmethod
+    def clean(body: str) -> str:
+        return body.strip().replace("\n", "")
+    
+    def generate_json(self, filename:str):
+        if filename is None:
+            filename = os.path.join(f"{pathlib.Path.cwd()},processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json")
+        with open(filename, "w+") as output:
+                    json.dump(
+                        [ticket.__dict__ for ticket in self.wrangled_tickets],
+                        output,
+                        indent=4,
+                        cls=MyEncoder,
+                    )
