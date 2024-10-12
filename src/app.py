@@ -2,20 +2,12 @@ import os
 import pathlib
 import sys
 import warnings
-from typing import List
+from typing import List, Tuple
 
 import gradio as gr
 from gradio import HTML, Interface, LinePlot, Row
 from loguru import logger
-from PyQt5.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QLabel,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QFileDialog, QTextEdit, QLineEdit, QFormLayout, QMessageBox
 
 from LDA_logic import LatentDirichletAllocator
 from utility import QTextEditStream
@@ -220,6 +212,23 @@ def init_wrapper():
     """
     return init_start_process(wranglerInstance=wrangler, allocatorInstance=allocator)
  
+def validate_inputs(number_of_topics: in, iterations: int, passes:int ) -> Tuple[bool, str]:
+    # Validate that all fields are integers
+    try:
+        number_of_topics = int(number_of_topics)
+        iterations = int(iterations)
+        passes = int(passes)
+    except ValueError:
+        return False, "All inputs must be integers."
+
+    # Validate passes < 20 and iterations < 200
+    if passes >= 20:
+        return False, "Passes must be less than 20."
+    if iterations >= 200:
+        return False, "Iterations must be less than 200."
+
+    return True, ""
+
 
 def train_model(
     wranglerInstance: DataWrangler, allocatorInstance: LatentDirichletAllocator
@@ -238,7 +247,29 @@ def train_model(
     Returns:
         None
     """
+    # Get the user input values
+    number_of_topics = num_topics_input.text()
+    iterations = iterations_input.text()
+    passes = passes_input.text()
+
+    # Validate inputs
+    valid, error_message = validate_inputs(number_of_topics, iterations, passes)
     logger.opt(colors=True).info("Initiating Model Training...")
+        if not valid:
+        # Show an error message box if validation fails
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setText(f"Invalid input: {error_message}")
+        msg_box.setWindowTitle("Input Validation Error")
+        msg_box.exec_()
+        return
+
+    # Inputs are valid, continue with training
+    print("Training model with the following parameters:")
+    print(f"Number of Topics: {number_of_topics}")
+    print(f"Iterations: {iterations}")
+    print(f"Passes: {passes}")
+    # Finsih Edits here
     if allocatorInstance.model_trained(iterations=10, workers=4, passes=10, num_of_topics=30):
         logger.success(
             "Model successfully trained! Preparing Data for Reporting and Visualization..."
