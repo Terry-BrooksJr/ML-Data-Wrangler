@@ -3,8 +3,10 @@
         "corpous",
         "dtype",
         "ldamodel",
+        "lemmatization",
         "Multicore",
         "prelemma",
+        "qtextedit",
         "ufunc"
     ]
 }

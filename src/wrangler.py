@@ -4,15 +4,38 @@ import pathlib
 import random
 from datetime import datetime
 from enum import Enum
-from typing import List
-from loguru import logger
+from typing import List, TextIO
 
+from loguru import logger
 
 logger.add(sink="./wrangle_log.log", colorize=True, serialize=True)
 
 
 class MyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for serializing specific object types.
+
+    This encoder extends the default JSONEncoder to handle serialization of
+    custom objects such as TicketStatus, datetime, and Comment. It provides
+    a way to convert these objects into a JSON-compatible format.
+    """
+
     def default(self, obj):
+        """
+        Converts custom objects to a JSON-compatible format.
+
+        This method checks the ticket_type of the object and returns a corresponding
+        JSON representation. If the object ticket_type is not recognized, it falls
+        back to the default serialization method.
+
+        Args:
+            obj: The object to be serialized.
+
+        Returns:
+            A JSON-compatible representation of the object.
+
+        Raises:
+            TypeError: If the object ticket_type is not serializable.
+        """
         if isinstance(obj, TicketStatus):
             return {"status": obj.name}
         elif isinstance(obj, datetime):
@@ -23,6 +46,14 @@ class MyEncoder(json.JSONEncoder):
 
 
 class TicketStatus(Enum):
+    """
+    Enumeration representing the various statuses of a ticket.
+
+    This class defines the possible states a ticket can be in during its
+    lifecycle, including OPEN, HOLD, PENDING, SOLVED, and CLOSED. Each
+    status is associated with a unique integer value for easy identification.
+    """
+
     OPEN = 1
     HOLD = 2
     PENDING = 3
@@ -31,12 +62,39 @@ class TicketStatus(Enum):
 
 
 class Comment:
+    """
+    Represents a comment with an ID, creation timestamp, and body text.
+
+    This class is used to encapsulate the details of a comment, including
+    its unique identifier, the date and time it was created, and the content
+    of the comment. It provides a method to convert the comment into a
+    dictionary format for easier serialization or data manipulation.
+    """
+
     def __init__(self, id: int, created_at: datetime, body: str) -> None:
+        """
+        Initializes a Comment instance with an ID, creation time, and body.
+
+        Args:
+            id: A unique identifier for the comment.
+            created_at: The date and time when the comment was created.
+            body: The text content of the comment.
+        """
         self.id = id
         self.created_at = created_at
         self.body = body
 
     def to_dict_format(self) -> dict:
+        """
+        Converts the Comment instance to a dictionary format.
+
+        This method returns a dictionary representation of the comment,
+        including its ID, creation timestamp, and body text.
+
+        Returns:
+            A dictionary containing the comment's details.
+        """
+
         return {
             "created_at": self.created_at,
             "id": self.id,
@@ -45,6 +103,15 @@ class Comment:
 
 
 class Ticket:
+    """
+    Represents a support ticket with various attributes and associated comments.
+
+    This class encapsulates the details of a support ticket, including its
+    unique identifier, creation and last updated timestamps, status, subject,
+    tags, outcome, and ticket_type. It also maintains a list of comments related to
+    the ticket, allowing for comprehensive tracking of the ticket's progress.
+    """
+
     def __init__(
         self,
         id: int,
@@ -54,31 +121,74 @@ class Ticket:
         subject: str,
         tags: List[str] = None,
         outcome: str = None,
-        type_: str = None,
+        ticket_type: str = None,
     ) -> None:
+        """
+        Initializes a Ticket instance with the specified attributes.
+
+        Args:
+            id: A unique identifier for the ticket.
+            created_at: The date and time when the ticket was created.
+            status: The current status of the ticket, represented by a TicketStatus.
+            last_updated: The date and time when the ticket was last updated.
+            subject: The subject or title of the ticket.
+            tags: Optional list of tags associated with the ticket.
+            outcome: Optional outcome of the ticket resolution.
+            ticket_type: Optional ticket_type of the ticket.
+
+        """
         self.id = id
         self.created_at = created_at
         self.last_updated = last_updated
         self.status = status
         self.subject = subject
         self.tags = tags or []
-        self.outcome = outcome
-        self.type = type_
+        self.outcome:str = outcome
+        self.ticket_type: str = ticket_type
         self.comments: List[Comment] = []
 
 
 class DataWrangler:
+    """A class for processing and managing ticket data and associated comments.
+
+    This class provides methods to reshape ticket data from JSON files, bind
+    comments to tickets, create a text corpus from the tickets and comments,
+    clean text data, and generate JSON files containing processed ticket data.
+    It facilitates the organization and analysis of ticket-related information.
+    """
+
     def __init__(
         self,
         comments_dir: pathlib.Path = pathlib.Path.cwd(),
         ticket_file: pathlib.Path = pathlib.Path.cwd() / "tickets.json",
     ) -> None:
+        """Initializes the DataWrangler with specified directories for comments and tickets.
+
+        Args:
+            comments_dir: The directory where comment files are stored.
+            ticket_file: The path to the JSON file containing ticket data.
+        """
         self.ticket_file = ticket_file
         self.comments_dir = comments_dir
         self.wrangled_tickets: List[Ticket] = []
         self.corpus: str = ""
 
     def tickets_reshaped(self) -> bool:
+        """Reshapes ticket data from a JSON file into Ticket objects.
+
+        This method reads ticket data from a specified JSON file and converts
+        each ticket into a Ticket object, including associated comments. It
+        logs the success of each reshaping operation and returns a boolean
+        indicating the overall success of the process.
+
+        Returns:
+            True if all tickets are successfully reshaped and added to the
+            wrangled tickets list, False otherwise.
+
+        Raises:
+            Exception: If there is an error during the reading or reshaping
+            process.
+        """
         try:
             with open(self.ticket_file, "r") as tickets_file:
                 tickets_data = json.load(tickets_file)
@@ -94,11 +204,11 @@ class DataWrangler:
                         subject=ticket["subject"],
                         tags=ticket.get("tags", []),
                         outcome=ticket["fields"][2]["value"],
-                        type_=ticket["fields"][0]["value"],
+                        ticket_type=ticket["fields"][0]["value"],
                         status=TicketStatus[ticket["status"].upper()],
                     )
                     first_comment = Comment(
-                        id=random.randint(9999, 9999999999),
+                        id=random.randint(9999, 9999999999999),
                         created_at=datetime.strptime(
                             ticket["created_at"], "%Y-%m-%dT%H:%M:%SZ"
                         ),
@@ -115,6 +225,22 @@ class DataWrangler:
 
     @staticmethod
     def reshaped_comment(comment) -> Comment:
+        """Reshapes a comment dictionary into a Comment object.
+
+        This static method takes a dictionary representation of a comment and
+        converts it into a Comment object, extracting the relevant fields.
+        It raises an exception if the reshaping process encounters any issues.
+
+        Args:
+            comment: A dictionary containing the comment data, including
+                    'id', 'created_at', and 'plain_body'.
+
+        Returns:
+            A Comment object populated with the provided data.
+
+        Raises:
+            RuntimeError: If there is an error during the reshaping process.
+        """
         try:
             return Comment(
                 id=comment["id"],
@@ -126,6 +252,19 @@ class DataWrangler:
             raise RuntimeError("Comment reshaping failed") from e
 
     def comments_bound(self) -> bool:
+        """Binds comments from files to their corresponding tickets.
+
+        This method iterates through the wrangled tickets and attempts to match
+        comments stored in files within a specified directory. It loads the comments
+        associated with each ticket, reshapes them, and appends them to the ticket's
+        comments list, logging the process and any issues encountered.
+
+        Returns:
+            True if comments are successfully bound to the tickets, False otherwise.
+
+        Raises:
+            Exception: If there is an error during the binding process.
+        """
         try:
             for ticket in self.wrangled_tickets:
                 for filename in os.listdir(self.comments_dir):
@@ -151,37 +290,80 @@ class DataWrangler:
             return False
 
     def create_corpus(self):
+        """Creates a text corpus from the wrangled tickets and their comments.
+
+        This method iterates through the wrangled tickets, extracting and merging
+        the comments associated with each ticket into a single corpus string.
+        It logs the progress and success of the corpus creation process, providing
+        feedback on the comments being processed.
+
+        Returns:
+            True if the corpus is successfully created, False otherwise.
+
+        Raises:
+            Exception: If there is an error during the corpus creation process.
+        """
         try:
             for ticket in self.wrangled_tickets:
                 grouped_comments = []
-                logger.info(f"Selecting {ticket .id} for Corpus Merge")
+                logger.info(f"Selecting {ticket.id} for Corpus Merge")
                 for comment in ticket.comments:
-                    print(type(comment))
                     if not isinstance(comment, dict):
                         comment = comment.__dict__
-                    logger.info(f"Selecting {comment['id']}")
+                    logger.info(f"Selecting comment {comment['id']}")
                     grouped_comments.append(comment["body"])
-                    logger.success(f"Merged {comment['id']}")
+                    logger.success(f"Merged comment  {comment['id']} into corpus")
             self.corpus = " ".join(grouped_comments)
             logger.success("Corpus Successfully Created")
             return True
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to Create Corpus")
             return False
 
-
-
     @staticmethod
     def clean(body: str) -> str:
+        """
+
+        This static method processes the provided string by stripping any
+        whitespace from the beginning and end, and replacing newline characters
+        with an empty string. It is useful for preparing text data for further
+        processing or analysis.
+
+        Args:
+            body: The input string to be cleaned.
+
+        Returns:
+            A cleaned version of the input string with no leading or trailing
+            whitespace and no newline characters.
+        """
         return body.strip().replace("\n", "")
-    
-    def generate_json(self, filename:str):
-        if filename is None:
-            filename = os.path.join(f"{pathlib.Path.cwd()},processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json")
+
+    def generate_json(self, filename: str=f"processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json") -> TextIO:
+        """Generates a JSON file containing processed ticket data and returns the file object.
+
+        This method creates a JSON file that stores the details of the processed
+        tickets in a structured format. If no filename is provided, it defaults
+        to a generated filename based on the current date, and the method returns
+        the file object for further operations if needed.
+
+        Args:
+            filename: The name of the file to which the JSON data will be written.
+                    If None, a default filename will be generated.
+
+        Returns:
+            The file object of the created JSON file.
+
+        Raises:
+            IOError: If there is an error writing to the file.
+        """
+
+     
+        filename = os.path.join(pathlib.Path.cwd(),"completed",filename)
         with open(filename, "w+") as output:
-                    json.dump(
-                        [ticket.__dict__ for ticket in self.wrangled_tickets],
-                        output,
-                        indent=4,
-                        cls=MyEncoder,
-                    )
+            json.dump(
+                [ticket.__dict__ for ticket in self.wrangled_tickets],
+                output,
+                indent=4,
+                cls=MyEncoder,
+            )
+            return output
