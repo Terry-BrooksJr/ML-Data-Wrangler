@@ -51,7 +51,7 @@ class LatentDirichletAllocator:
         Returns:
             A RandomState object initialized with a random seed.
         """
-        random_seed = random.randint(1, (4294967296-1))
+        random_seed = random.randint(1, (4294967296 - 1))
         return RandomState(random_seed)
 
     def get_lda_model(
@@ -98,7 +98,6 @@ class LatentDirichletAllocator:
         removal = [
             "ADV",
             "PRON",
-            "CCONJ",
             "PUNCT",
             "PART",
             "DET",
@@ -135,23 +134,22 @@ class LatentDirichletAllocator:
         """
         try:
             for comment in nlp.pipe(self.prelemma_corpus):
-                print(comment.lemma.lower())
                 proj_tok = [
-                    comment.lemma_.lower()
-                    for comment in self.prelemma_corpus
-                    if comment.pos_ not in removal
-                    or comment.lemma_.lower() not in stopwords
-                    and not comment.is_stop
-                    and comment.is_alpha
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        token.lemma_.lower()
+                    for token in comment
+                    if (
+                        token.pos_ not in removal
+                        and token.lemma_.lower() not in stopwords
+                        and not token.is_stop
+                        and token.is_alpha
+                    )
                 ]
                 self._tokens.append(proj_tok)
-            print(self._tokens)    
-            print(self._tokens)    
-            print(self._tokens)    
-            print(self._tokens)    
+
             self.id2word = MappingDictionary(self._tokens)
             self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=1000)
-            self.corpus = [self.GDictionary.doc2bow(doc) for doc in self._tokens]
+            self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
+
             logger.success("Successfully Pre-Processed Data")
             return True
         except Exception:

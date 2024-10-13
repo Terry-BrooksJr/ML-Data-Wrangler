@@ -2,341 +2,452 @@ import os
 import pathlib
 import sys
 import warnings
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import gradio as gr
 from gradio import HTML, Interface, LinePlot, Row
 from loguru import logger
-from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QFileDialog, QTextEdit, QLineEdit, QFormLayout, QMessageBox
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+    
+)
 
 from LDA_logic import LatentDirichletAllocator
-from utility import QTextEditStream
+from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
 
-# SECTION - Instantiating Classes & Initializing Variables
 
-# SECTION - Start Program Classes & Variables
-wrangler: DataWrangler = DataWrangler()
-app: QApplication = QApplication(sys.argv)
-allocator: LatentDirichletAllocator = LatentDirichletAllocator(wrangler.corpus, 30)
-# !SECTION - End Program Classes & Variables
+class MainWindow(QMainWindow):
+    """
+    Represents the main application window for the Data Wrangler tool.
+    This class initializes the user interface and manages interactions for data processing and model training.
 
-# SECTION - Start GUI Classes & Variables
-# Layout
-window: QWidget = QWidget()
-instruction_layout: QVBoxLayout = QVBoxLayout()
-data_entry_layout: QVBoxLayout = QVBoxLayout()
-# GUI Elements and Components
-ticket_file_button = QPushButton("Select Path to Ticket File")
-comments_dir_button = QPushButton("Select Path to Comments Directory")
-process_button = QPushButton("Process Data")
-train_model_button = QPushButton("Train Model")
-
-# GUI Live Logging
-log_output = QTextEdit()
-sys.stdout = QTextEditStream(log_output)
-sys.stderr = QTextEditStream(log_output)
-# qtextedit_logger = QTextEditLogger(log_output)
-# !SECTION - End GUI Classes & Variables
-# !SECTION - Instantiating Classes & Initializing Variables
-
-
-# SECTION - Start Functions
-def select_ticket_file() -> None:
-    """Opens a file dialog to select a JSON ticket file.
-
-    This function displays a file dialog that allows the user to select a
-    JSON file. Upon selection, it logs the file path and updates the
-    ticket file in the wrangler.
+    The `MainWindow` class sets up the main application window, including layouts, buttons, and logging.
+    It provides methods for selecting files, processing data, and training models, while ensuring user inputs are validated.
 
     Args:
-        None
+        windowName (str): The title of the main application window.
 
-    Returns:
-        None
+    Attributes:
+        wrangler (DataWrangler): An instance of the DataWrangler class for managing ticket and comment data.
+        allocator (LatentDirichletAllocator): An instance of the LatentDirichletAllocator for topic modeling.
+        main_layout (QVBoxLayout): The main layout of the application.
+        instruction_layout (QVBoxLayout): Layout for displaying instructions and warnings.
+        data_entry_layout (QVBoxLayout): Layout for data entry components.
+        ticket_file_button (QPushButton): Button for selecting the ticket file.
+        comments_dir_button (QPushButton): Button for selecting the comments directory.
+        process_button (QPushButton): Button for processing the data.
+        train_model_button (QPushButton): Button for training the model.
+        num_topics_input (QLineEdit): Input field for the number of topics.
+        iterations_input (QLineEdit): Input field for the number of iterations.
+        passes_input (QLineEdit): Input field for the number of passes.
+        log_output (QTextEdit): Text area for displaying log output.
     """
-    file_dialog: QFileDialog = QFileDialog()
-    file_dialog.setNameFilters(["JSON files (*.json)"])
-    if file_dialog.exec_():
-        file_path: str = file_dialog.selectedFiles()[0]
-        logger.info(f"Ticket File Selected: {file_path}")
-        wrangler.ticket_file = file_path
 
+    def __init__(self, windowName: str) -> None:
+        """
+        Initializes the main application window for the Data Wrangler tool.
+        This constructor sets up the user interface, including layouts and components, and initializes necessary data handling objects.
 
-def select_comments_dir() -> None:
-    """Opens a dialog to select a directory for comments.
+        The `__init__` method configures the main window's title and size, creates instances of the data wrangler and allocator,
+        and initializes the user interface components and logging. It establishes the layout for the application, ensuring
+        that all elements are properly arranged for user interaction.
 
-    This function displays a directory selection dialog that allows the user
-    to choose a directory. Upon selection, it logs the directory path and
-    updates the comments directory in the wrangler.
+        Args:
+            windowName (str): The title to be displayed in the main application window.
 
-    Args:
-        None
+        Returns:
+            None
+        """
+        super().__init__()
+        self.wrangler = DataWrangler()
+        self.allocator = LatentDirichletAllocator(self.wrangler.corpus, 30)
 
-    Returns:
-        None
-    """
-    if dir_path := QFileDialog.getExistingDirectory():
-        logger.info(f"Comments Dir Selected: {dir_path}")
-        wrangler.comments_dir = dir_path
+        # Setting up the main application window
+        self.setWindowTitle(windowName)
+        self.setGeometry(100, 100, 600, 400)
 
+        # Main layout
+        self.main_layout = QVBoxLayout()
+        self.instruction_layout = QVBoxLayout()
+        self.data_entry_layout = QVBoxLayout()
 
-def present_results(allocatorInstance: LatentDirichletAllocator) -> None:
-    """Displays the results of the Latent Dirichlet Allocation (LDA) model.
+        # GUI Elements
+        self.init_ui_components()
+        self.init_logging()
 
-    This function creates a user interface to present the top five topics
-    identified by the LDA model and visualizes the coherence plot. It handles
-    potential errors in loading the topics and the LDA graph, providing
-    appropriate feedback in the gradio UI.
+        # Set up the main widget and layout
+        central_widget = QWidget()
+        central_widget.setLayout(self.main_layout)
+        self.setCentralWidget(central_widget)
 
-    Args:
-        allocatorInstance: An instance of LatentDirichletAllocator that contains
-            the results and methods for visualizing the LDA model.
+    def init_ui_components(self):
+        """
+        Initializes the user interface components for the Data Wrangler application.
+        This method sets up labels, buttons, input fields, and layouts to facilitate user interaction.
 
-    Returns:
-        None
-    """
-    results_UI: Interface = Interface(
-        fn=allocatorInstance.visualize_results(), inputs=None, outputs=["text"]
-    )
+        The `init_ui_components` function creates and configures various UI elements, including instruction labels,
+        buttons for file selection, and input fields for model parameters. It organizes these components into layouts
+        and connects button actions to their respective functions, ensuring a cohesive user experience.
 
-    with results_UI:
-        with Row():
-            try:
-                top_topics = HTML("""<h1> Top 5 Topics</h1> <br/><ul>""")
-                top_five_topics = allocator.get_top_5_topic()
-                topics1 = HTML(f"<li>{top_five_topics[0]}</li>")
-                topics2 = HTML(f"<li>{top_five_topics[1]}</li>")
-                topics3 = HTML(f"<li>{top_five_topics[2]}</li>")
-                topics4 = HTML(f"<li>{top_five_topics[3]}</li>")
-                topics5 = HTML(f"<li>{top_five_topics[4]}</li>")
-                end_list = HTML("</ul>")
-            except IndexError:
-                top_topics = HTML(
-                    """<h1> Top 5 Topics</h1>
-                                    <p>Error Loading Top Five</p>
-                                    """
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        # Instructions and warnings
+        instruction_label = QLabel(
+            "Welcome to the Data Wrangler. \n\n"
+            "Identify two file locations.\n"
+            "1. The Ticket File Path from the ZenDesk Tickets API.\n"
+            "2. The path to the comments directory with JSON comments for each ticket."
+        )
+        warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
+        warning_label.setStyleSheet("color: red;")
+
+        self.instruction_layout.addWidget(instruction_label)
+        self.instruction_layout.addWidget(warning_label)
+
+        # Buttons
+        self.ticket_file_button = QPushButton("Select Path to Ticket File")
+        self.comments_dir_button = QPushButton("Select Path to Comments Directory")
+        self.process_button = QPushButton("Process Data")
+        self.train_model_button = QPushButton("Train Model")
+
+        self.ticket_file_button.clicked.connect(self.select_ticket_file)
+        self.comments_dir_button.clicked.connect(self.select_comments_dir)
+        self.process_button.clicked.connect(self.init_wrapper)
+        self.train_model_button.clicked.connect(self.train_model_wrapper)
+        self.train_model_button.setEnabled(False)
+
+        # Form layout for inputs
+        self.form_layout = QFormLayout()
+        self.num_topics_input = QLineEdit()
+        self.iterations_input = QLineEdit()
+        self.passes_input = QLineEdit()
+
+        for input_field in [
+            self.num_topics_input,
+            self.iterations_input,
+            self.passes_input,
+        ]:
+            input_field.setClearButtonEnabled(True)
+            input_field.setEnabled(False)
+
+        disabled_notice = QLabel(
+            "The next three inputs are disabled until data is processed."
+        )
+        self.form_layout.addRow(disabled_notice)
+        self.form_layout.addRow("Number of Topics:", self.num_topics_input)
+        self.form_layout.addRow("Iterations:", self.iterations_input)
+        self.form_layout.addRow("Passes:", self.passes_input)
+
+        # Log output display
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.highlighter = LogHighlighter(self.log_output)
+        sys.stdout = QTextEditStream(self.log_output)
+        sys.stderr = QTextEditStream(self.log_output)
+
+        # Arrange layout
+        self.data_entry_layout.addWidget(self.ticket_file_button)
+        self.data_entry_layout.addWidget(self.comments_dir_button)
+        self.data_entry_layout.addWidget(self.process_button)
+        self.data_entry_layout.addLayout(self.form_layout)
+        self.data_entry_layout.addWidget(self.train_model_button)
+        self.data_entry_layout.addWidget(self.log_output)
+
+        # Main layout arrangement
+        self.main_layout.addLayout(self.instruction_layout)
+        self.main_layout.addLayout(self.data_entry_layout)
+
+    def init_logging(self) -> None:
+        """
+        Initializes the logging configuration for the application.
+        This method sets up the logger to output messages to the standard output with a specified format and log level.
+
+        The `init_logging` method configures the logger to display messages in a colorized format that includes the timestamp,
+        log level, and message content. The logging level is set to INFO, allowing informational messages and above to be logged.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        logger.add(
+            sys.stdout,
+            colorize=True,
+            format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
+            level="INFO",
+        )
+
+    def select_ticket_file(self):
+        """Opens a file dialog to select a JSON ticket file.
+
+        This function displays a file dialog that allows the user to select a
+        JSON file. Upon selection, it logs the file path and updates the
+        ticket file in the wrangler.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        file_dialog = QFileDialog()
+        file_dialog.setNameFilters(["JSON files (*.json)"])
+        if file_dialog.exec_():
+            file_path = file_dialog.selectedFiles()[0]
+            logger.info(f"Ticket File Selected: {file_path}")
+            self.wrangler.ticket_file = file_path
+
+    def select_comments_dir(self):
+        """
+        Opens a file dialog for the user to select a directory containing comment files.
+        This method updates the comments directory in the data wrangler with the selected path.
+
+        The `select_comments_dir` function utilizes a file dialog to allow the user to choose a directory.
+        Upon selection, it logs the chosen directory path and assigns it to the `comments_dir` attribute of the wrangler.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        if dir_path := QFileDialog.getExistingDirectory():
+            logger.info(f"Comments Dir Selected: {dir_path}")
+            self.wrangler.comments_dir = dir_path
+
+    def present_results(self, allocatorInstance: LatentDirichletAllocator) -> None:
+        """
+        Displays the results of the model training in a user interface.
+        This method visualizes the top topics and coherence plot, and attempts to load an LDA graph.
+
+        The `present_results` function creates an interface to show the results of the topic modeling.
+        It retrieves the top five topics from the allocator instance and displays them, along with a coherence plot.
+        If any errors occur during the retrieval of topics or loading of the graph, appropriate error messages are shown.
+
+        Args:
+            allocatorInstance (LatentDirichletAllocator): The allocator instance used to retrieve the results.
+
+        Returns:
+            None
+
+        Raises:
+            IndexError: If there are not enough topics to display.
+            FileNotFoundError: If the LDA graph file cannot be found.
+        """
+        results_UI = Interface(
+            fn=self.allocator.visualize_results(), inputs=None, outputs=["text"]
+        )
+        with results_UI:
+            with Row():
+                try:
+                    top_topics = HTML("""<h1> Top 5 Topics</h1> <br/><ul>""")
+                    top_five_topics = allocatorInstance.get_top_5_topic()
+                    topics1 = HTML(f"<li>{top_five_topics[0]}</li>")
+                    topics2 = HTML(f"<li>{top_five_topics[1]}</li>")
+                    topics3 = HTML(f"<li>{top_five_topics[2]}</li>")
+                    topics4 = HTML(f"<li>{top_five_topics[3]}</li>")
+                    topics5 = HTML(f"<li>{top_five_topics[4]}</li>")
+                    end_list = HTML("</ul>")
+                except IndexError:
+                    top_topics = HTML(
+                        """<h1> Top 5 Topics</h1>
+                                        <p>Error Loading Top Five</p>
+                                        """
+                    )
+
+            with Row():
+                coherencePlot = LinePlot(
+                    x_title="Number of Topics", y_title="Coherence"
                 )
 
-        with Row():
-            coherencePlot = LinePlot(x_title="Number of Topics", y_title="Coherence")
+            with Row():
+                try:
+                    chart_html = os.path.join(pathlib.Path.cwd(), "lda_model.html")
+                    with open(chart_html, "r") as LDA_Chart_data:
+                        LDA_Chart = HTML(f"{LDA_Chart_data.read()}")
+                except FileNotFoundError:
+                    LDA_Chart = HTML("""<h1>Error: Loading LDA Graph </h1>""")
 
-        with Row():
-            try:
-                chart_html = os.path.join(pathlib.Path.cwd(), "lda_model.html")
-                with open(chart_html, "r") as LDA_Chart_data:
-                    LDA_Chart = HTML(f"{LDA_Chart_data.read()}")
-            except FileNotFoundError:
-                LDA_Chart = HTML("""<h1>Error: Loading LDA Graph </h1>""")
+            results_UI.launch()
 
-        results_UI.launch()
+    def init_wrapper(self) -> None:
+        """
+        Wrapper function to initiate the data processing workflow.
+        This method calls the `init_start_process` function with the current wrangler and allocator instances.
 
+        The `init_wrapper` function serves as an interface to start the data wrangling and allocation process,
+        ensuring that the appropriate instances are passed for processing.
 
-def toggle_GUI_button_state(
-    train_button_instance: QPushButton, process_button_instance: QPushButton
-) -> None:
-    """Toggles the state of GUI buttons for data processing.
+        Args:
+            None
 
-    This function disables the process button and enables the train button,
-    indicating that the preprocessing steps have been completed. It also logs
-    a warning message to prompt the user to continue with the training process.
+        Returns:
+            None
+        """
+        self.init_start_process(self.wrangler, self.allocator)
 
-    Args:
-        train_button_instance: The QPushButton instance for the training button.
-        process_button_instance: The QPushButton instance for the processing button.
+    def validate_inputs(
+        self, number_of_topics, iterations, passes
+    ) -> Tuple[bool, Union[str, None]]:
+        """
+        ``        Validates the user inputs for model training parameters.
+                This method checks that the inputs are integers and within acceptable ranges.
 
-    Returns:
-        None
-    """
-    process_button_instance.setEnabled(False)
-    train_button_instance.setEnabled(True)
-    logger.opt(colors=True).warning(
-        "<bold>All Required Steps Needed to Preprocess the Data Have Successfully Completed.</bold>"
-    )
-    logger.opt(capture=False).info(
-        "<bold> <red>Please Click the 'Train Model' button to continue...</red></bold>"
-    )
+                The `validate_inputs` function ensures that the provided values for the number of topics, iterations,
+                and passes meet the specified criteria. It returns a boolean indicating the validity of the inputs
+                along with an error message if the inputs are invalid.
 
+                Args:
+                    number_of_topics (str): The number of topics to be used in the model.
+                    iterations (str): The number of iterations for the training process.
+                    passes (str): The number of passes for the training process.
 
-def init_start_process(
-    wranglerInstance: DataWrangler, allocatorInstance: LatentDirichletAllocator
-) -> None:
-    """Initializes the data wrangling and processing workflow.
+                Returns:
+                    tuple: A tuple containing a boolean indicating validity and an error message.
+        """
+        if not all(map(str.isdigit, [number_of_topics, iterations, passes])):
+            return False, "All inputs must be integers."
+        if int(passes) >= 20 or int(iterations) >= 200:
+            return False, "Passes should be < 20 and iterations < 200."
+        return True, ""
 
-    This function orchestrates the data wrangling and processing by checking
-    the necessary conditions on the provided wrangler and allocator instances.
-    If all conditions are met, it processes the data and presents the results;
-    otherwise, it logs an error and raises an exception.
+    def train_model_wrapper(self) -> None:
+        """
+        Wrapper function to initiate the model training process.
+        This method calls the `train_model` function with the current allocator instance.
 
-    Args:
-        wranglerInstance: An instance of DataWrangler responsible for data
-            manipulation and preparation.
-        allocatorInstance: An instance of LatentDirichletAllocator that handles
-            data allocation and model training.
+        The `train_model_wrapper` function serves as a simple interface to trigger the model training,
+        ensuring that the correct allocator instance is passed to the training method.
 
-    Returns:
-        None
+        Args:
+            None
 
-    Raises:
-        RuntimeError: If data processing fails due to any exception.
-    """
-    try:
-        if (
-            wranglerInstance.tickets_reshaped()
-            and wranglerInstance.comments_bound()
-            and wranglerInstance.create_corpus()
-        ):
-            if allocatorInstance.data_preprocessed():
-                wrangler.generate_json()
-                toggle_GUI_button_state(train_model_button, process_button)
-            logger.success("Data successfully wrangled and saved")
-    except Exception as e:
-        logger.exception(f"Processing failed: {e}")
-        raise RuntimeError("Data processing failed") from e
+        Returns:
+            None
+        """
+        self.train_model(allocatorInstance=self.allocator)
 
+    def train_model(self, allocatorInstance: LatentDirichletAllocator) -> None:
+        """
+        Trains the model using the specified parameters for topics, iterations, and passes.
+        This method validates the input values and initiates the training process if the inputs are valid.
 
-def init_wrapper():
-    """Initializes the start process with the specified instances.
+        The `train_model` function retrieves user input for the number of topics, iterations, and passes,
+        validates these inputs, and then calls the model training method on the allocator instance.
+        If the training is successful, it logs a success message and presents the results.
 
-    This function serves as a wrapper to initiate the start process using
-    the provided wrangler and allocator instances. It simplifies the
-    initialization by directly passing the instances to the underlying
-    initialization function.
+        Args:
+                allocatorInstance (LatentDirichletAllocator): The allocator instance used for training the model.
 
+            Returns:
+                None
 
-    Args:
-        None
+        Raises:
+            QMessageBox: Displays a warning if the input validation fails.
+        """
+        number_of_topics = self.num_topics_input.text()
+        iterations = self.iterations_input.text()
+        passes = self.passes_input.text()
 
-    Returns:
-        The result of the initialization process.
-    """
-    return init_start_process(wranglerInstance=wrangler, allocatorInstance=allocator)
- 
-def validate_inputs(number_of_topics: in, iterations: int, passes:int ) -> Tuple[bool, str]:
-    # Validate that all fields are integers
-    try:
-        number_of_topics = int(number_of_topics)
-        iterations = int(iterations)
-        passes = int(passes)
-    except ValueError:
-        return False, "All inputs must be integers."
-
-    # Validate passes < 20 and iterations < 200
-    if passes >= 20:
-        return False, "Passes must be less than 20."
-    if iterations >= 200:
-        return False, "Iterations must be less than 200."
-
-    return True, ""
-
-
-def train_model(
-    wranglerInstance: DataWrangler, allocatorInstance: LatentDirichletAllocator
-) -> None:
-    """Trains the LDA model using the provided wrangler and allocator instances.
-
-    This function initiates the model training process and logs the progress.
-    Upon successful training, it prepares the data for reporting and visualization,
-    and presents the results if available.
-
-    Args:
-        wranglerInstance: An instance of DataWrangler used for data manipulation.
-        allocatorInstance: An instance of LatentDirichletAllocator responsible for
-            model training and visualization.
-
-    Returns:
-        None
-    """
-    # Get the user input values
-    number_of_topics = num_topics_input.text()
-    iterations = iterations_input.text()
-    passes = passes_input.text()
-
-    # Validate inputs
-    valid, error_message = validate_inputs(number_of_topics, iterations, passes)
-    logger.opt(colors=True).info("Initiating Model Training...")
-        if not valid:
-        # Show an error message box if validation fails
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setText(f"Invalid input: {error_message}")
-        msg_box.setWindowTitle("Input Validation Error")
-        msg_box.exec_()
-        return
-
-    # Inputs are valid, continue with training
-    print("Training model with the following parameters:")
-    print(f"Number of Topics: {number_of_topics}")
-    print(f"Iterations: {iterations}")
-    print(f"Passes: {passes}")
-    # Finsih Edits here
-    if allocatorInstance.model_trained(iterations=10, workers=4, passes=10, num_of_topics=30):
-        logger.success(
-            "Model successfully trained! Preparing Data for Reporting and Visualization..."
+        valid, error_message = self.validate_inputs(
+            number_of_topics, iterations, passes
         )
-        if allocatorInstance.visualize_results is not None:
-            present_results(allocatorInstance)
+        if not valid:
+            QMessageBox.warning(self, "Input Validation Error", error_message)
+            return
 
-def train_model_wrapper():
-    return train_model(allocatorInstance=allocator, wranglerInstance=wrangler)
-# !SECTION - End Functions
+        if self.allocator.model_trained(
+            iterations=int(iterations),
+            workers=4,
+            passes=int(passes),
+            num_of_topics=int(number_of_topics),
+        ):
+            logger.success("Model successfully trained!")
+            self.present_results()
 
-# SECTION - Start Program GUI Configuration
+    def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
+        """
+        Displays a critical error message to the user. 
+        This method creates a message box that informs the user of an error and provides an option to abort the operation.
 
-# Create main program GUI window
-window.setWindowTitle("Data Wrangler")
-window.setGeometry(100, 100, 600, 400)
+        The `notify_user_of_error` function takes an error tuple, where the second element contains the error message. 
+        It then presents this message in a critical message box, allowing the user to acknowledge the error.
 
-# Instruction frame (equivalent) - Program GUI
-instruction_label: QLabel = QLabel(
-    "Welcome to the Data Wrangler. \n\n"
-    "You will need to identify two file locations.\n"
-    "The Tickets File Path represents the path to the ticket payload from the ZenDesk Tickets API.\n"
-    "The second is the path to the comments directory, which is the location of the directory that contains the comments for each ticket."
-)
-warning_label: QLabel = QLabel(
-    "NOTE: The Ticket and the individual comment files must be in JSON Format."
-)
-warning_label.setStyleSheet("color: red;")
-instruction_layout.addWidget(instruction_label)
-instruction_layout.addWidget(warning_label)
+        Args:
+            error (Tuple[bool, str]): A tuple containing a boolean status and an error message string.
 
-# Program GUI Interactive Components Configuration
-ticket_file_button.clicked.connect(select_ticket_file)
-comments_dir_button.clicked.connect(select_comments_dir)
-process_button.clicked.connect(init_wrapper)
-process_button.setEnabled(True)
-train_model_button.clicked.connect(train_model_wrapper)
-train_model_button.setEnabled(False)
-data_entry_layout.addWidget(ticket_file_button)
-data_entry_layout.addWidget(comments_dir_button)
-data_entry_layout.addWidget(process_button)
-data_entry_layout.addWidget(train_model_button)
+        Returns:
+            QMessageBox: The message box displayed to the user.
+        """
+        abort_button = QMessageBox.standardButton(button=QMessageBox.Abort)
+        return QMessageBox.critical(parent=self, title="Critical Error", text=error[1], buttons=abort_button) 
 
-# Log Output
-log_output.setReadOnly(True)
-data_entry_layout.addWidget(log_output)
+    def init_start_process(
+        self,
+        wranglerInstance: DataWrangler,
+        allocatorInstance: LatentDirichletAllocator,
+    ) -> None:
+        """
+            Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
+            This function enables the necessary UI elements and logs the success or failure of the process.
 
-# Main layout
-main_layout = QVBoxLayout()
-main_layout.addLayout(instruction_layout)
-main_layout.addLayout(data_entry_layout)
+            The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
+            and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
+            enables the training model button, and activates relevant input fields. If any step fails, it logs the error
+            and raises a RuntimeError.
 
-# Set layout and show window
-window.setLayout(main_layout)
-window.show()
-# !SECTION - End Program GUI Configuration
+            Args:
+                wrangler: An object responsible for data wrangling operations.
+                ```markdown
+        allocator: An def object responsible for data allocation and preprocessing.
 
-# SECTION -  Start Logging
+            Raises:
+                RuntimeError: If the data processing fails at any step.
+        """
+        try:
+            if (
+                wranglerInstance.tickets_reshaped()
+                and wranglerInstance.comments_bound()
+                and wranglerInstance.create_corpus()
+                and allocatorInstance.data_preprocessed()
+            ):
+                wranglerInstance.generate_json()
+                self.process_button.setEnabled(False)
+                self.train_model_button.setEnabled(True)
+                for input_field in [
+                    self.num_topics_input,
+                    self.iterations_input,
+                    self.passes_input,
+                ]:
+                    input_field.setEnabled(True)
+                logger.info("Data successfully wrangled and saved.")
+            else:
+                error = ve
+                self.notify_user_of_error()
+        except Exception as e:
+            self.notify_user_of_error([False, e])
+            logger.exception(f"Processing failed: {e}")
+            raise RuntimeError("Data processing failed") from e
 
-logger.add(
-    sys.stdout,
-    colorize=True,
-    format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
-    level="INFO",
-)
-# !SECTION - End Logging
 
 if __name__ == "__main__":
-    logger.info("Initializing Wrangler...")
+    app = QApplication(sys.argv)
+    window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
+    window.show()
     sys.exit(app.exec_())

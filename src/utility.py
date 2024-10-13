@@ -1,4 +1,8 @@
+import sys
+
 from loguru import logger
+from PyQt5.QtCore import QRegExp
+from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
 
 # Custom loguru handler to redirect logs to QTextEdit
@@ -71,3 +75,43 @@ class QTextEditStream:
         as flushing is not necessary for this implementation.
         """
         pass
+
+
+class LogHighlighter(QSyntaxHighlighter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Define log level formats
+        self.info_format = QTextCharFormat()
+        self.info_format.setForeground(QColor("blue"))
+        self.info_format.setFontWeight(QFont.Normal)
+
+        self.warning_format = QTextCharFormat()
+        self.warning_format.setForeground(QColor("orange"))
+        self.warning_format.setFontWeight(QFont.Bold)
+
+        self.error_format = QTextCharFormat()
+        self.error_format.setForeground(QColor("red"))
+        self.error_format.setFontWeight(QFont.Bold)
+
+        self.debug_format = QTextCharFormat()
+        self.debug_format.setForeground(QColor("green"))
+        self.debug_format.setFontWeight(QFont.Normal)
+
+        # Define highlighting rules for each log level
+        self.highlightingRules = [
+            (QRegExp(r"\bINFO\b"), self.info_format),
+            (QRegExp(r"\bWARNING\b"), self.warning_format),
+            (QRegExp(r"\bERROR\b"), self.error_format),
+            (QRegExp(r"\bDEBUG\b"), self.debug_format),
+        ]
+
+    def highlightBlock(self, text):
+        # Apply highlighting rules to each line of the log
+        for pattern, format in self.highlightingRules:
+            expression = QRegExp(pattern)
+            index = expression.indexIn(text)
+            while index >= 0:
+                length = expression.matchedLength()
+                self.setFormat(index, length, format)
+                index = expression.indexIn(text, index + length)

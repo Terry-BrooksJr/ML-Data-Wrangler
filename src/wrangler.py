@@ -2,9 +2,11 @@ import json
 import os
 import pathlib
 import random
+import unicodedata
 from datetime import datetime
 from enum import Enum
-from typing import List, TextIO
+from html import unescape
+from typing import List, TextIO, Tuple
 
 from loguru import logger
 
@@ -143,7 +145,7 @@ class Ticket:
         self.status = status
         self.subject = subject
         self.tags = tags or []
-        self.outcome:str = outcome
+        self.outcome: str = outcome
         self.ticket_type: str = ticket_type
         self.comments: List[Comment] = []
 
@@ -303,15 +305,17 @@ class DataWrangler:
         Raises:
             Exception: If there is an error during the corpus creation process.
         """
+        grouped_comments = []
+
         try:
             for ticket in self.wrangled_tickets:
-                grouped_comments = []
                 logger.info(f"Selecting {ticket.id} for Corpus Merge")
                 for comment in ticket.comments:
                     if not isinstance(comment, dict):
                         comment = comment.__dict__
                     logger.info(f"Selecting comment {comment['id']}")
-                    grouped_comments.append(comment["body"])
+                    clean_comment = self.cleanse(comment["body"])
+                    grouped_comments.append(clean_comment)
                     logger.success(f"Merged comment  {comment['id']} into corpus")
             self.corpus = " ".join(grouped_comments)
             logger.success("Corpus Successfully Created")
@@ -320,25 +324,35 @@ class DataWrangler:
             logger.exception("Failed to Create Corpus")
             return False
 
-    @staticmethod
-    def clean(body: str) -> str:
+    def cleanse(self, body_of_text: str) -> str:
         """
+        Cleanses the provided text by normalizing and unescaping each line.
+        This function processes the input text to ensure it is in a consistent format.
 
-        This static method processes the provided string by stripping any
-        whitespace from the beginning and end, and replacing newline characters
-        with an empty string. It is useful for preparing text data for further
-        processing or analysis.
+        The `cleanse` method iterates through each line of the input text, applying normalization
+        and unescaping to ensure that the text is properly formatted. The cleaned lines are then
+        concatenated and returned as a single string.
 
         Args:
-            body: The input string to be cleaned.
+            body_of_text (str): The text to be cleansed, consisting of multiple lines.
 
         Returns:
-            A cleaned version of the input string with no leading or trailing
-            whitespace and no newline characters.
+            str: The cleansed text, with all lines normalized and unescaped.
         """
-        return body.strip().replace("\n", "")
+        try:
+            cleaned_lines:List[str] = []
+            for line in body_of_text:
+                line = unicodedata.normalize("NFKC", unescape(line))
+                cleaned_lines.append(line)
+            logger.success("Successfully Cleansed Corpus")
+            return "".join(cleaned_lines)
+        except Exception:
+            logger.exception("Failed To Cleanse Corpus")
 
-    def generate_json(self, filename: str=f"processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json") -> TextIO:
+    def generate_json(
+        self,
+        filename: str = f"processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json",
+    ) -> Tuple[TextIO, TextIO]:
         """Generates a JSON file containing processed ticket data and returns the file object.
 
         This method creates a JSON file that stores the details of the processed
@@ -357,13 +371,23 @@ class DataWrangler:
             IOError: If there is an error writing to the file.
         """
 
-     
-        filename = os.path.join(pathlib.Path.cwd(),"completed",filename)
-        with open(filename, "w+") as output:
+        filename = os.path.join(pathlib.Path.cwd(), "completed", filename)
+        corpus_filename = os.path.join(
+            pathlib.Path.cwd(), "completed", f"corpus_{{datetime.now().strftime('%Y-%m-%d')}}"
+        )
+        with open(filename, "w+") as output1:
             json.dump(
                 [ticket.__dict__ for ticket in self.wrangled_tickets],
-                output,
+                output1,
                 indent=4,
                 cls=MyEncoder,
             )
-            return output
+
+            with open(corpus_filename, "w+") as output2:
+                json.dump(
+                    self.corpus,
+                    output2,
+                    indent=4,
+                    cls=MyEncoder,
+                )
+            return (output1, output2)

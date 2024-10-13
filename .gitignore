@@ -163,3 +163,4 @@ cython_debug/
 data/
 ./wrangled_data_*json
 completed_data/
+completed/
