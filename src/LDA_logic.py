@@ -135,7 +135,7 @@ class LatentDirichletAllocator:
         try:
             for comment in nlp.pipe(self.prelemma_corpus):
                 proj_tok = [
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        token.lemma_.lower()
+                    token.lemma_.lower()
                     for token in comment
                     if (
                         token.pos_ not in removal

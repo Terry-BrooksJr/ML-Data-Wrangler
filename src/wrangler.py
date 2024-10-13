@@ -2,6 +2,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import unicodedata
 from datetime import datetime
 from enum import Enum
@@ -10,7 +11,7 @@ from typing import List, TextIO, Tuple
 
 from loguru import logger
 
-logger.add(sink="./wrangle_log.log", colorize=True, serialize=True)
+from utility import remove_urls
 
 
 class MyEncoder(json.JSONEncoder):
@@ -339,10 +340,14 @@ class DataWrangler:
         Returns:
             str: The cleansed text, with all lines normalized and unescaped.
         """
+
         try:
-            cleaned_lines:List[str] = []
+            cleaned_lines: List[str] = []
             for line in body_of_text:
                 line = unicodedata.normalize("NFKC", unescape(line))
+                line = line.replace("\n", " ")
+                line = line.replace("\r", " ")
+                line = remove_urls(line)
                 cleaned_lines.append(line)
             logger.success("Successfully Cleansed Corpus")
             return "".join(cleaned_lines)
@@ -373,8 +378,10 @@ class DataWrangler:
 
         filename = os.path.join(pathlib.Path.cwd(), "completed", filename)
         corpus_filename = os.path.join(
-            pathlib.Path.cwd(), "completed", f"corpus_{{datetime.now().strftime('%Y-%m-%d')}}"
-        )
+            pathlib.Path.cwd(),
+            "completed",
+            f"corpus_{{datetime.now().strftime('%Y-%m-%d')}}",
+        )           
         with open(filename, "w+") as output1:
             json.dump(
                 [ticket.__dict__ for ticket in self.wrangled_tickets],

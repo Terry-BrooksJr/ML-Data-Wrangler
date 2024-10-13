@@ -1,4 +1,5 @@
 import sys
+import re
 
 from loguru import logger
 from PyQt5.QtCore import QRegExp
@@ -31,7 +32,7 @@ class QTextEditLogger:
         logger.remove()
         logger.add(
             self._write_to_text_edit,
-            format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
+            format="{time:w} | {level} | {message}",
             level="INFO",
         )
 
@@ -78,29 +79,73 @@ class QTextEditStream:
 
 
 class LogHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
+    """
+    Highlights log messages in a text editor based on their severity levels.
+    This class extends QSyntaxHighlighter to apply different formatting styles to log levels such as INFO, WARNING, ERROR, and DEBUG.
+
+    The `LogHighlighter` class defines specific text formats for each log level and applies these formats to the text
+    in a QTextEdit widget. It uses regular expressions to identify log levels and highlight them accordingly.
+
+    Args:
+        parent (QWidget, optional): The parent widget for the highlighter. Defaults to None.
+
+    Attributes:
+        info_format (QTextCharFormat): Format for INFO log messages.
+        warning_format (QTextCharFormat): Format for WARNING log messages.
+        error_format (QTextCharFormat): Format for ERROR log messages.
+        debug_format (QTextCharFormat): Format for DEBUG log messages.
+        highlightingRules (list): A list of tuples containing regex patterns and their corresponding formats.
+    """
+
+    def __init__(self, parent=None) -> None:
+        """
+        Initializes the LogHighlighter with specified formatting for different log levels.
+        This constructor sets up the text formats for INFO, WARNING, ERROR, and DEBUG log messages.
+
+        The `__init__` method defines the appearance of each log level by configuring the text color and weight.
+        It also establishes the highlighting rules that will be used to format log messages in the text editor.
+
+        Args:
+            parent (QWidget, optional): The parent widget for the highlighter. Defaults to None.
+
+        Returns:
+            None
+        """
         super().__init__(parent)
 
         # Define log level formats
         self.info_format = QTextCharFormat()
-        self.info_format.setForeground(QColor("blue"))
-        self.info_format.setFontWeight(QFont.Normal)
+        self.info_format.setForeground(QColor("yellow"))
+        self.info_format.setFontWeight(QFont.Weight.Normal)
 
         self.warning_format = QTextCharFormat()
         self.warning_format.setForeground(QColor("orange"))
-        self.warning_format.setFontWeight(QFont.Bold)
+        self.warning_format.setFontWeight(QFont.Weight.Bold)
 
         self.error_format = QTextCharFormat()
         self.error_format.setForeground(QColor("red"))
-        self.error_format.setFontWeight(QFont.Bold)
+        self.error_format.setFontWeight(QFont.Weight.Bold)
 
         self.debug_format = QTextCharFormat()
         self.debug_format.setForeground(QColor("green"))
-        self.debug_format.setFontWeight(QFont.Normal)
+        self.debug_format.setFontWeight(QFont.Weight.Normal)
 
+        self.time_format = QTextCharFormat()
+        self.time_format.setForeground(QColor("green"))
+        self.time_format.setFontWeight(QFont.Weight.Thin)
+  
+        self.success_format = QTextCharFormat()
+        self.success_format.setForeground(QColor("cyan"))
+        self.success_format.setFontWeight(QFont.Weight.ExtraBold)
+        self.success_format.setFontPointSize(15)
         # Define highlighting rules for each log level
         self.highlightingRules = [
+            (
+                QRegExp(r"[0-9]{4}-[0-9]{2}-[0-9]{2} at [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?"),
+                self.time_format,
+            ),
             (QRegExp(r"\bINFO\b"), self.info_format),
+            (QRegExp(r"\bSUCCESS\b"), self.success_format),
             (QRegExp(r"\bWARNING\b"), self.warning_format),
             (QRegExp(r"\bERROR\b"), self.error_format),
             (QRegExp(r"\bDEBUG\b"), self.debug_format),
@@ -115,3 +160,28 @@ class LogHighlighter(QSyntaxHighlighter):
                 length = expression.matchedLength()
                 self.setFormat(index, length, format)
                 index = expression.indexIn(text, index + length)
+
+
+def remove_urls(text: str) -> str:
+    """
+    Removes URLs from the provided text and replaces them with a placeholder.
+    This function uses a regular expression to identify and sQubstitute URLs in the input string.
+
+    The `remove_urls` function scans the input text for patterns that match URLs and replaces each occurrence
+    with the string "[URL REMOVED]". This is useful for sanitizing text data by removing potentially sensitive
+    or unwanted URL information.
+
+    Args:
+        text (str): The input string from which URLs will be removed.
+
+    Returns:
+        str: The modified string with URLs replaced by the placeholder.
+    """
+    replacement_text = "[URL REMOVED]"
+
+    # Define a regex pattern to match URLs
+    url_pattern = re.compile(
+        r"(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?\/[a-zA-Z0-9]{2,}|((https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?)|(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}(\.[a-zA-Z0-9]{2,})?"
+    )
+
+    return url_pattern.sub(replacement_text, text)

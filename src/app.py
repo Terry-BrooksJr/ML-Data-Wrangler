@@ -19,12 +19,12 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    
 )
 
 from LDA_logic import LatentDirichletAllocator
 from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
+import unicodedata
 
 
 class MainWindow(QMainWindow):
@@ -186,11 +186,24 @@ class MainWindow(QMainWindow):
         Returns:
             None
         """
+        logger.level(
+            "USER INPUT REQUIRED",
+            no=26,
+            color="<bold><blue>",
+            icon="🤦🏾‍♂️",
+        )
         logger.add(
             sys.stdout,
             colorize=True,
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="INFO",
+        )
+        logger.add(
+            sink="./wrangle_log.log",
+            colorize=True,
+            serialize=True,
+            format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
+            level="DEBUG",
         )
 
     def select_ticket_file(self):
@@ -383,10 +396,10 @@ class MainWindow(QMainWindow):
 
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
-        Displays a critical error message to the user. 
+        Displays a critical error message to the user.
         This method creates a message box that informs the user of an error and provides an option to abort the operation.
 
-        The `notify_user_of_error` function takes an error tuple, where the second element contains the error message. 
+        The `notify_user_of_error` function takes an error tuple, where the second element contains the error message.
         It then presents this message in a critical message box, allowing the user to acknowledge the error.
 
         Args:
@@ -395,55 +408,73 @@ class MainWindow(QMainWindow):
         Returns:
             QMessageBox: The message box displayed to the user.
         """
-        abort_button = QMessageBox.standardButton(button=QMessageBox.Abort)
-        return QMessageBox.critical(parent=self, title="Critical Error", text=error[1], buttons=abort_button) 
+        return QMessageBox.critical(
+            parent=self, title="Critical Error", text=error[1])
+        
 
-    def init_start_process(
+def init_start_process(
         self,
         wranglerInstance: DataWrangler,
         allocatorInstance: LatentDirichletAllocator,
     ) -> None:
-        """
-            Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
-            This function enables the necessary UI elements and logs the success or failure of the process.
+    """
+    Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
+    This function enables the necessary UI elements and logs the success or failure of the process.
 
-            The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
-            and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
-            enables the training model button, and activates relevant input fields. If any step fails, it logs the error
-            and raises a RuntimeError.
+    The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
+    and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
+    enables the training model button, and activates relevant input fields. If any step fails, it logs the error
+    and raises a RuntimeError.
 
-            Args:
-                wrangler: An object responsible for data wrangling operations.
-                ```markdown
-        allocator: An def object responsible for data allocation and preprocessing.
+    Args:
+        wranglerInstance: An object responsible for data wrangling operations.
+        allocatorInstance: An object responsible for data allocation and preprocessing.
 
-            Raises:
-                RuntimeError: If the data processing fails at any step.
-        """
-        try:
-            if (
-                wranglerInstance.tickets_reshaped()
-                and wranglerInstance.comments_bound()
-                and wranglerInstance.create_corpus()
-                and allocatorInstance.data_preprocessed()
-            ):
-                wranglerInstance.generate_json()
-                self.process_button.setEnabled(False)
-                self.train_model_button.setEnabled(True)
-                for input_field in [
-                    self.num_topics_input,
-                    self.iterations_input,
-                    self.passes_input,
-                ]:
-                    input_field.setEnabled(True)
-                logger.info("Data successfully wrangled and saved.")
-            else:
-                error = ve
-                self.notify_user_of_error()
-        except Exception as e:
-            self.notify_user_of_error([False, e])
-            logger.exception(f"Processing failed: {e}")
-            raise RuntimeError("Data processing failed") from e
+    Raises:
+        RuntimeError: If the data processing fails at any step.
+    """
+    try:
+        # Collect error messages
+        error_messages = [
+            (not wranglerInstance.tickets_reshaped(), "Error: Failed to reshape tickets."),
+            (not wranglerInstance.comments_bound(), "Error: Failed to bind comments."),
+            (not wranglerInstance.create_corpus(), "Error: Failed to create corpus."),
+            (not allocatorInstance.data_preprocessed(), "Error: Data preprocessing in allocator failed.")
+        ]
+
+        # Check for errors and notify user
+        for condition, message in error_messages:
+            if condition:
+                self.notify_user_of_error((False, message))
+                return
+
+        # If all checks pass, proceed with JSON generation and UI adjustments
+        wranglerInstance.generate_json()
+        self.process_button.setEnabled(False)
+        self.train_model_button.setEnabled(True)
+
+        # Enable input fields for training parameters using a loop
+        for input_field in [
+            self.num_topics_input,
+            self.iterations_input,
+            self.passes_input,
+        ]:
+            input_field.setEnabled(True)
+
+        success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
+        logger.success("Data successfully wrangled and saved.")
+        logger.log("USER INPUT REQUIRED", success_message)
+        QMessageBox.warning(
+            parent=self,
+            title="Data Has Successfully Processed",
+            text=success_message,
+        )
+    except Exception as e:
+        # Notify user and log unexpected errors
+        self.notify_user_of_error((False, f"Unexpected error: {str(e)}"))
+        logger.exception(f"Processing failed: {e}")
+        raise RuntimeError("Data processing failed") from e
+
 
 
 if __name__ == "__main__":
