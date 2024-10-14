@@ -1,8 +1,7 @@
 import os
 import pathlib
 import sys
-import warnings
-from typing import List, Tuple, Union
+from typing import Tuple, Union
 
 import gradio as gr
 from gradio import HTML, Interface, LinePlot, Row
@@ -24,7 +23,6 @@ from PyQt5.QtWidgets import (
 from LDA_logic import LatentDirichletAllocator
 from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
-import unicodedata
 
 
 class MainWindow(QMainWindow):
@@ -319,7 +317,7 @@ class MainWindow(QMainWindow):
         self, number_of_topics, iterations, passes
     ) -> Tuple[bool, Union[str, None]]:
         """
-        ``        Validates the user inputs for model training parameters.
+                Validates the user inputs for model training parameters.
                 This method checks that the inputs are integers and within acceptable ranges.
 
                 The `validate_inputs` function ensures that the provided values for the number of topics, iterations,
@@ -409,76 +407,78 @@ class MainWindow(QMainWindow):
             QMessageBox: The message box displayed to the user.
         """
         return QMessageBox.critical(
-            parent=self, title="Critical Error", text=error[1])
+            self, title="Critical Error", text=error[1])
         
 
-def init_start_process(
-        self,
-        wranglerInstance: DataWrangler,
-        allocatorInstance: LatentDirichletAllocator,
-    ) -> None:
-    """
-    Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
-    This function enables the necessary UI elements and logs the success or failure of the process.
+    def init_start_process(
+            self,
+            wranglerInstance: DataWrangler,
+            allocatorInstance: LatentDirichletAllocator,
+        ) -> None:
+        """
+        Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
+        This function enables the necessary UI elements and logs the success or failure of the process.
 
-    The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
-    and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
-    enables the training model button, and activates relevant input fields. If any step fails, it logs the error
-    and raises a RuntimeError.
+        The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
+        and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
+        enables the training model button, and activates relevant input fields. If any step fails, it logs the error
+        and raises a RuntimeError.
 
-    Args:
-        wranglerInstance: An object responsible for data wrangling operations.
-        allocatorInstance: An object responsible for data allocation and preprocessing.
+        Args:
+            wranglerInstance: An object responsible for data wrangling operations.
+            allocatorInstance: An object responsible for data allocation and preprocessing.
 
-    Raises:
-        RuntimeError: If the data processing fails at any step.
-    """
-    try:
-        # Collect error messages
-        error_messages = [
-            (not wranglerInstance.tickets_reshaped(), "Error: Failed to reshape tickets."),
-            (not wranglerInstance.comments_bound(), "Error: Failed to bind comments."),
-            (not wranglerInstance.create_corpus(), "Error: Failed to create corpus."),
-            (not allocatorInstance.data_preprocessed(), "Error: Data preprocessing in allocator failed.")
-        ]
+        Raises:
+            RuntimeError: If the data processing fails at any step.
+        """
+        try:
+            # Collect error messages
+            error_messages = [
+                (not wranglerInstance.tickets_reshaped(), "Error: Failed to reshape tickets."),
+                (not wranglerInstance.comments_bound(), "Error: Failed to bind comments."),
+                (not wranglerInstance.create_corpus(), "Error: Failed to create corpus."),
+                (not allocatorInstance.data_preprocessed(), "Error: Data preprocessing in allocator failed.")
+            ]
 
-        # Check for errors and notify user
-        for condition, message in error_messages:
-            if condition:
-                self.notify_user_of_error((False, message))
-                return
+            # Check for errors and notify user
+            for condition, message in error_messages:
+                if condition:
+                    self.notify_user_of_error((False, message))
+                    return
 
-        # If all checks pass, proceed with JSON generation and UI adjustments
-        wranglerInstance.generate_json()
-        self.process_button.setEnabled(False)
-        self.train_model_button.setEnabled(True)
+            # If all checks pass, proceed with JSON generation and UI adjustments
+            wranglerInstance.generate_json()
+            self.process_button.setEnabled(False)
+            self.train_model_button.setEnabled(True)
 
-        # Enable input fields for training parameters using a loop
-        for input_field in [
-            self.num_topics_input,
-            self.iterations_input,
-            self.passes_input,
-        ]:
-            input_field.setEnabled(True)
+            # Enable input fields for training parameters using a loop
+            for input_field in [
+                self.num_topics_input,
+                self.iterations_input,
+                self.passes_input,
+            ]:
+                input_field.setEnabled(True)
 
-        success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
-        logger.success("Data successfully wrangled and saved.")
-        logger.log("USER INPUT REQUIRED", success_message)
-        QMessageBox.warning(
-            parent=self,
-            title="Data Has Successfully Processed",
-            text=success_message,
-        )
-    except Exception as e:
-        # Notify user and log unexpected errors
-        self.notify_user_of_error((False, f"Unexpected error: {str(e)}"))
-        logger.exception(f"Processing failed: {e}")
-        raise RuntimeError("Data processing failed") from e
+            success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
+            logger.success("Data successfully wrangled and saved.")
+            logger.log("USER INPUT REQUIRED", success_message)
+            QMessageBox.warning(
+                self,
+                "Data Has Successfully Processed",
+                success_message,
+            )
+        except Exception as e:
+            # Notify user and log unexpected errors
+            self.notify_user_of_error((False, f"Unexpected error: {str(e)}"))
+            logger.exception(f"Processing failed: {e}")
+            raise RuntimeError("Data processing failed") from e
+    
 
+app = QApplication(sys.argv)
+
+window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
     window.show()
     sys.exit(app.exec_())
