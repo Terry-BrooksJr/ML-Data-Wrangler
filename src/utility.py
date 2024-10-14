@@ -133,7 +133,7 @@ class LogHighlighter(QSyntaxHighlighter):
         self.time_format = QTextCharFormat()
         self.time_format.setForeground(QColor("green"))
         self.time_format.setFontWeight(QFont.Weight.Thin)
-  
+
         self.success_format = QTextCharFormat()
         self.success_format.setForeground(QColor("cyan"))
         self.success_format.setFontWeight(QFont.Weight.ExtraBold)
@@ -141,7 +141,9 @@ class LogHighlighter(QSyntaxHighlighter):
         # Define highlighting rules for each log level
         self.highlightingRules = [
             (
-                QRegExp(r"[0-9]{4}-[0-9]{2}-[0-9]{2} at [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?"),
+                QRegExp(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2} at [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?"
+                ),
                 self.time_format,
             ),
             (QRegExp(r"\bINFO\b"), self.info_format),
