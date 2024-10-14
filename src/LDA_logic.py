@@ -145,9 +145,10 @@ class LatentDirichletAllocator:
                     )
                 ]
                 self._tokens.append(proj_tok)
-
+            logger.debug(f"Token Length:{len(self._tokens)}")
             self.id2word = MappingDictionary(self._tokens)
             self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=1000)
+            logger.debug(f"Pre-Lemma Corpus Length:{len(self.prelemma_corpus)}")
             self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
 
             logger.success("Successfully Pre-Processed Data")

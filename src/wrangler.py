@@ -383,7 +383,7 @@ class DataWrangler:
             f"corpus_{{datetime.now().strftime('%Y-%m-%d')}}",
         )           
         with open(filename, "w+") as output1:
-            json.dump(
+            json.dump(  
                 [ticket.__dict__ for ticket in self.wrangled_tickets],
                 output1,
                 indent=4,
