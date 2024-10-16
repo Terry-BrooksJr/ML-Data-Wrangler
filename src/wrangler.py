@@ -162,7 +162,7 @@ class DataWrangler:
 
     def __init__(
         self,
-        comments_dir: pathlib.Path = pathlib.Path.cwd(),
+        comments_dir: pathlib.Path = pathlib.Path.cwd() / "comments",
         ticket_file: pathlib.Path = pathlib.Path.cwd() / "tickets.json",
     ) -> None:
         """Initializes the DataWrangler with specified directories for comments and tickets.
@@ -318,9 +318,9 @@ class DataWrangler:
                     clean_comment = self.cleanse(comment["body"])
                     grouped_comments.append(clean_comment)
                     logger.success(f"Merged comment  {comment['id']} into corpus")
-            self.corpus = " ".join(grouped_comments)
+            group_comments = " ".join(grouped_comments)
             logger.success("Corpus Successfully Created")
-            return True
+            return group_comments
         except Exception:
             logger.exception("Failed to Create Corpus")
             return False

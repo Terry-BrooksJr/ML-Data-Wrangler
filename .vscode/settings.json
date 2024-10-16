@@ -8,5 +8,8 @@
         "prelemma",
         "qtextedit",
         "ufunc"
-    ]
+    ],
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.tabCompletion": "on",
+    "search.useIgnoreFiles": false
 }
