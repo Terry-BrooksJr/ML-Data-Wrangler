@@ -292,7 +292,7 @@ class DataWrangler:
             logger.exception(f"Error while binding comments: {e}")
             return False
 
-    def create_corpus(self):
+    def create_corpus(self) -> str:
         """Creates a text corpus from the wrangled tickets and their comments.
 
         This method iterates through the wrangled tickets, extracting and merging
@@ -306,7 +306,7 @@ class DataWrangler:
         Raises:
             Exception: If there is an error during the corpus creation process.
         """
-        grouped_comments = []
+        group_comments = []
 
         try:
             for ticket in self.wrangled_tickets:
@@ -318,12 +318,13 @@ class DataWrangler:
                     clean_comment = self.cleanse(comment["body"])
                     grouped_comments.append(clean_comment)
                     logger.success(f"Merged comment  {comment['id']} into corpus")
-            self.corpus = " ".join(grouped_comments)
+            grouped_comments = " ".join(group_comments)
             logger.success("Corpus Successfully Created")
-            return True
+            self.corpus = grouped_comments
+            return grouped_comments
         except Exception:
             logger.exception("Failed to Create Corpus")
-            return False
+            return None
 
     def cleanse(self, body_of_text: str) -> str:
         """
