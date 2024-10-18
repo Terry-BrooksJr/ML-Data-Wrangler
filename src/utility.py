@@ -191,3 +191,4 @@ def remove_urls(text: str) -> str:
     )
 
     return url_pattern.sub(replacement_text, text)
+

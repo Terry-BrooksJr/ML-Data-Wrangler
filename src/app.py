@@ -2,11 +2,15 @@ import os
 import pathlib
 import sys
 import warnings
+from datetime import datetime
 from typing import List, Tuple, Union
 
 import gradio as gr
 from gradio import HTML, Interface, LinePlot, Row
 from loguru import logger
+from PyQt5.QtCore import QRect, pyqtSignal, QThread, QCoreApplication
+from PyQt5.QtGui import QFont
+from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -18,7 +22,10 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QTextEdit,
     QVBoxLayout,
+    QTabWidget,
+    QToolButton,
     QWidget,
+    QGroupBox
 )
 
 from LDA_logic import LatentDirichletAllocator
@@ -26,8 +33,58 @@ from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
 import unicodedata
 
+class Ui_Dialog(object):
+    def setupUi(self, Dialog):
+        Dialog.setObjectName("Dialog")
+        Dialog.resize(713, 511)
+        self.tabWidget = QTabWidget(Dialog)
+        self.tabWidget.setGeometry(QtCore.QRect(20, 30, 671, 461))
+        self.tabWidget.setObjectName("tabWidget")
+        self.tab1 = QWidget()
+        self.tab1.setObjectName("tab1")
+        font = QtGui.QFont()
+        font.setPointSize(7)
+        self.groupBox_Carga = QGroupBox(self.tab1)
+        self.groupBox_Carga.setEnabled(True)
+        self.groupBox_Carga.setGeometry(QRect(10, 90, 641, 161))
+        self.groupBox_Carga.setObjectName("groupBox_Carga")
+        self.toolButton = QToolButton(self.groupBox_Carga)
+        self.toolButton.setGeometry(QRect(40, 30, 561, 31))
+        self.toolButton.setObjectName("toolButton")
+        self.groupBox_ConfMatcheo_4 = QGroupBox(self.tab1)
+        self.groupBox_ConfMatcheo_4.setEnabled(True)
+        self.groupBox_ConfMatcheo_4.setGeometry(QRect(10, 360, 641, 61))
+        self.groupBox_ConfMatcheo_4.setFont(font)
+        self.groupBox_ConfMatcheo_4.setObjectName("groupBox_ConfMatcheo_4")
+        self.label = QLabel(self.groupBox_ConfMatcheo_4)
+        self.label.setGeometry(QtCore.QRect(80, 20, 521, 31))
+        self.label.setObjectName("label")
+        self.tabWidget.addTab(self.tab1, "")
 
-class MainWindow(QMainWindow):
+        self.retranslateUi(Dialog)
+
+    def retranslateUi(self, Dialog):
+        _translate = QCoreApplication.translate
+        self.toolButton.setText(_translate("Dialog", "Load payments"))
+        self.label.setText(_translate("Dialog", ""))
+
+
+class Thread(QThread):                                         # +++
+    updateSignal = pyqtSignal(int)                             # <----
+
+    def __init__(self, value):                        
+        super().__init__()  
+        self.value = value
+
+    def run(self):
+        #it takes several minutes to execute this function
+        for i in range(self.value):
+            self.msleep(50)
+            self.updateSignal.emit(i+1)                                # <----
+
+
+
+class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
     """
     Represents the main application window for the Data Wrangler tool.
     This class initializes the user interface and manages interactions for data processing and model training.
@@ -70,7 +127,7 @@ class MainWindow(QMainWindow):
             None
         """
         super().__init__()
-        self.wrangler = DataWrangler()
+        self.wrangler: DataWrangler = DataWrangler()
         self.allocator:LatentDirichletAllocator = None
 
         # Setting up the main application window
@@ -159,7 +216,7 @@ class MainWindow(QMainWindow):
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
         sys.stderr = QTextEditStream(self.log_output)
-
+        self.log_output.setPlainText(f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Learnosity Data Wrangler on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!")
         # Arrange layout
         self.data_entry_layout.addWidget(self.ticket_file_button)
         self.data_entry_layout.addWidget(self.comments_dir_button)
@@ -205,6 +262,8 @@ class MainWindow(QMainWindow):
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="DEBUG",
         )
+    def update_progressBar(self, value):                           # <----     
+            self.progressBar.setValue(value)
 
     def select_ticket_file(self):
         """Opens a file dialog to select a JSON ticket file.
@@ -399,14 +458,12 @@ class MainWindow(QMainWindow):
         Raises:
             RuntimeError: If the data processing fails at any step.
         """
+  
         try:
-            corpus_task = not self.self.wrangler.create_corpus()
             # Collect error messages
             error_messages = [
-                (not self.self.wrangler.tickets_reshaped(), "Error: Failed to reshape tickets."),
-                (not self.self.wrangler.comments_bound(), "Error: Failed to bind comments."),
-                (corpus_task is None or corpus_task == "", "Error: Failed to create corpus."),
-                # (not self.self.allocator.data_preprocessed(), "Error: Data preprocessing in allocator failed.")
+                (not self.wrangler.tickets_reshaped(), "Error: Failed to reshape tickets."),
+                (not self.wrangler.comments_bound(), "Error: Failed to bind comments."),
             ]
 
             # Check for errors and notify user
@@ -416,10 +473,16 @@ class MainWindow(QMainWindow):
                     return
 
             # If all checks pass, proceed with JSON generation and UI adjustments
-            self.self.wrangler.generate_json()
-            self.allocator = LatentDirichletAllocator(corpus=corpus_task, num_of_topics=30)
-            if not self.self.allocator.data_preprocessed():
+            self.wrangler.generate_json()
+            self.allocator = LatentDirichletAllocator(num_of_topics=30)
+            corpus_task = self.wrangler.create_corpus()
+
+            if corpus_task is None or corpus_task == "":
+                self.notify_user_of_error((False, f"Error: Failed to create corpus. \n Corpus Length: {len(corpus_task)} \n Corpus Type: {type(corpus_task)}"))
+
+            if not self.allocator.data_preprocessed(wranglerInstance=self.wrangler):
                 self.notify_user_of_error((False, "Error: Data preprocessing in allocator failed." ))
+            self.allocator.prelemma_corpus = corpus_task
             self.process_button.setEnabled(False)
             self.train_model_button.setEnabled(True)
 
@@ -434,10 +497,9 @@ class MainWindow(QMainWindow):
             success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
             logger.success("Data successfully wrangled and saved.")
             logger.log("USER INPUT REQUIRED", success_message)
-            QMessageBox.warning(
-                self,
-                title="Data Has Successfully Processed",
-                text=success_message,
+            QMessageBox.warning(self,
+               "Data Has Successfully Processed",
+                success_message,
             )
         except Exception as e:
             # Notify user and log unexpected errors

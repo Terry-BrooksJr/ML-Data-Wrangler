@@ -87,6 +87,13 @@ class Comment:
         self.created_at = created_at
         self.body = body
 
+
+    def __getitem__(self, key):
+        return key
+    
+    def __setitem__(self, key, value):
+        self.detail[key] = value
+            
     def to_dict_format(self) -> dict:
         """
         Converts the Comment instance to a dictionary format.
@@ -150,7 +157,11 @@ class Ticket:
         self.ticket_type: str = ticket_type
         self.comments: List[Comment] = []
 
-
+    def __str__(self):
+        return f"Ticket {self.id} ({self.status.name})"
+    
+    def __getitem__(self, key):
+         return key
 class DataWrangler:
     """A class for processing and managing ticket data and associated comments.
 
@@ -176,6 +187,9 @@ class DataWrangler:
         self.wrangled_tickets: List[Ticket] = []
         self.corpus: str = ""
 
+    def __getitem__(self, item):
+         return self.DataWrangler[item]
+    
     def tickets_reshaped(self) -> bool:
         """Reshapes ticket data from a JSON file into Ticket objects.
 
@@ -218,9 +232,10 @@ class DataWrangler:
                         body=ticket["description"],
                     )
                     reshaped_ticket.comments.append(first_comment)
-
-                    self.wrangled_tickets.append(reshaped_ticket)
                     logger.success(f"Successfully reshaped ticket {ticket['id']}")
+                    self.wrangled_tickets.append(reshaped_ticket)
+                    logger.info(f"Appended ticket {ticket['id']} to wrangled_tickets property on the caller object")
+                    logger.debug(f" Length of Wrangled Tickets: {len(self.wrangled_tickets)} \n Wrangled Tickets: {[ticket.__str__() for ticket in self.wrangled_tickets]}")
             return True
         except Exception as e:
             logger.exception(f"Failed to reshape tickets: {e}")
@@ -257,133 +272,84 @@ class DataWrangler:
     def comments_bound(self) -> bool:
         """Binds comments from files to their corresponding tickets.
 
-        This method iterates through the wrangled tickets and attempts to match
-        comments stored in files within a specified directory. It loads the comments
-        associated with each ticket, reshapes them, and appends them to the ticket's
-        comments list, logging the process and any issues encountered.
+            This method iterates through the wrangled tickets and attempts to match
+            comments stored in files within a specified directory. It loads the comments
+            associated with each ticket, reshapes them, and appends them to the ticket's
+            comments list, logging the process and any issues encountered.
 
-        Returns:
-            True if comments are successfully bound to the tickets, False otherwise.
+            Returns:
+                True if comments are successfully bound to the tickets, False otherwise.
 
-        Raises:
-            Exception: If there is an error during the binding process.
-        """
+            Raises:
+                Exception: If there is an error during the binding process.
+            """
         try:
             for ticket in self.wrangled_tickets:
+                comments_found = False
                 for filename in os.listdir(self.comments_dir):
                     if filename.startswith(str(ticket.id)):
                         comments_file_path = os.path.join(self.comments_dir, filename)
                         logger.info(f"Binding comments for ticket {ticket.id}")
                         with open(comments_file_path, "r") as comments_file:
                             comments_data = json.load(comments_file)
-                            # Check if the ticket ID exists in comments_data
                             for key, value in comments_data.items():
                                 for comment in value:
                                     reshaped_comment = self.reshaped_comment(comment)
                                     ticket.comments.append(
                                         reshaped_comment.to_dict_format()
                                     )
-                            logger.warning(f"No comments found for ticket {ticket.id}")
-                            for key, value in comments_data.items():
-                                print(f"key:{key}, value:{value}")
-                        logger.success(f"Comments bound to ticket {ticket.id}")
+                                    comments_found = True
+                if not comments_found:
+                    logger.warning(f"No comments found for ticket {ticket.id}")
+                else:
+                    logger.success(f"Comments bound to ticket {ticket.id}")
             return True
-        except Exception as e:
+        except (FileNotFoundError, json.JSONDecodeError) as e:
             logger.exception(f"Error while binding comments: {e}")
             return False
 
-    def create_corpus(self):
-        """Creates a text corpus from the wrangled tickets and their comments.
+    def create_corpus(self) -> str:
+        # sourcery skip: inline-immediately-returned-variable, move-assign-in-block
+            """Creates a text corpus from the wrangled tickets and their comments."""
+            grouped_comments = []
 
-        This method iterates through the wrangled tickets, extracting and merging
-        the comments associated with each ticket into a single corpus string.
-        It logs the progress and success of the corpus creation process, providing
-        feedback on the comments being processed.
-
-        Returns:
-            True if the corpus is successfully created, False otherwise.
-
-        Raises:
-            Exception: If there is an error during the corpus creation process.
-        """
-        grouped_comments = []
-
-        try:
             for ticket in self.wrangled_tickets:
                 logger.info(f"Selecting {ticket.id} for Corpus Merge")
                 for comment in ticket.comments:
-                    if not isinstance(comment, dict):
-                        comment = comment.__dict__
                     logger.info(f"Selecting comment {comment['id']}")
                     clean_comment = self.cleanse(comment["body"])
                     grouped_comments.append(clean_comment)
-                    logger.success(f"Merged comment  {comment['id']} into corpus")
+                    logger.success(f"Merged comment {comment['id']} into corpus")
+            
             group_comments = " ".join(grouped_comments)
+            self.corpus = group_comments
             logger.success("Corpus Successfully Created")
             return group_comments
-        except Exception:
-            logger.exception("Failed to Create Corpus")
-            return False
 
     def cleanse(self, body_of_text: str) -> str:
-        """
-        Cleanses the provided text by normalizing and unescaping each line.
-        This function processes the input text to ensure it is in a consistent format.
-
-        The `cleanse` method iterates through each line of the input text, applying normalization
-        and unescaping to ensure that the text is properly formatted. The cleaned lines are then
-        concatenated and returned as a single string.
-
-        Args:
-            body_of_text (str): The text to be cleansed, consisting of multiple lines.
-
-        Returns:
-            str: The cleansed text, with all lines normalized and unescaped.
-        """
-
-        try:
-            cleaned_lines: List[str] = []
-            for line in body_of_text:
-                line = unicodedata.normalize("NFKC", unescape(line))
-                line = line.replace("\n", " ")
-                line = line.replace("\r", " ")
-                line = remove_urls(line)
-                cleaned_lines.append(line)
-            logger.success("Successfully Cleansed Corpus")
-            return "".join(cleaned_lines)
-        except Exception:
-            logger.exception("Failed To Cleanse Corpus")
+        """Cleanses the provided text by normalizing and unescaping each line."""
+        cleaned_lines = [
+            unicodedata.normalize("NFKC", unescape(line)).replace("\n", " ").replace("\r", " ")
+            for line in body_of_text
+        ]
+        cleaned_lines = [remove_urls(line) for line in cleaned_lines]
+        logger.success("Successfully Cleansed Corpus")
+        return "".join(cleaned_lines)
 
     def generate_json(
         self,
         filename: str = f"processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json",
     ) -> Tuple[TextIO, TextIO]:
-        """Generates a JSON file containing processed ticket data and returns the file object.
+        """Generates a JSON file containing processed ticket data and returns the file object."""
+        
+        def construct_path(filename):
+            return os.path.join(pathlib.Path.cwd(), "completed", filename)
 
-        This method creates a JSON file that stores the details of the processed
-        tickets in a structured format. If no filename is provided, it defaults
-        to a generated filename based on the current date, and the method returns
-        the file object for further operations if needed.
-
-        Args:
-            filename: The name of the file to which the JSON data will be written.
-                    If None, a default filename will be generated.
-
-        Returns:
-            The file object of the created JSON file.
-
-        Raises:
-            IOError: If there is an error writing to the file.
-        """
-
-        filename = os.path.join(pathlib.Path.cwd(), "completed", filename)
-        corpus_filename = os.path.join(
-            pathlib.Path.cwd(),
-            "completed",
-            f"corpus_{{datetime.now().strftime('%Y-%m-%d')}}",
-        )           
+        filename = construct_path(filename)
+        corpus_filename = construct_path(f"corpus_{datetime.now().strftime('%Y-%m-%d')}.json")
+        
         with open(filename, "w+") as output1:
-            json.dump(  
+            json.dump(
                 [ticket.__dict__ for ticket in self.wrangled_tickets],
                 output1,
                 indent=4,
@@ -398,3 +364,4 @@ class DataWrangler:
                     cls=MyEncoder,
                 )
             return (output1, output2)
+        

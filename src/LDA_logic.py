@@ -13,7 +13,8 @@ from loguru import logger
 from nltk.corpus import stopwords
 from numpy.random import RandomState
 from spacy.tokens import Doc
-
+from spacy.language import Language
+from wrangler import DataWrangler
 nltk.download("stopwords")
 sns.set_theme()
 
@@ -27,7 +28,7 @@ class LatentDirichletAllocator:
     coherence values, enabling effective topic modeling on the provided corpus.
     """
 
-    def __init__(self, corpus: str, num_of_topics: int) -> None:
+    def __init__(self, num_of_topics: int) -> None:
         """
         Initializes the LatentDirichletAllocator with a corpus and number of topics.
 
@@ -40,10 +41,12 @@ class LatentDirichletAllocator:
         self._tokens: List[Doc] = []
         self.id2word: MappingDictionary = ""
         self.num_of_topics: int = num_of_topics
-        self.prelemma_corpus: str = corpus
+        self.prelemma_corpus: str = None
+
         self.topics: List[str] = []
         self.coherence_values: List[float] = []
-
+    def __getitem__(self, item):  
+         return self.LatentDirichletAllocator[item]
     def _generate_random_state(self) -> RandomState:
         """
         Generates a random state for model training.
@@ -82,16 +85,20 @@ class LatentDirichletAllocator:
             random_state=self._generate_random_state(),
         )
 
-    def data_preprocessed(self) -> bool:
+    def data_preprocessed(self, wranglerInstance:DataWrangler=None) -> bool:
         """
-        Prepossesses the corpus data for LDA modeling.
+        Prepares the data for further processing by configuring the necessary NLP model and stopwords.
 
-        This method cleans the text data and prepares it for analysis by removing
-        stop words and applying lemmatization. It returns a boolean indicating
-        success or failure.
+        This function initializes the SpaCy language model and defines a list of parts of speech to remove during data cleansing. It then calls the `data_reshaped` method to perform the actual data reshaping and tokenization, handling any exceptions that may occur during the process.
+
+        Args:
+            wranglerInstance (DataWrangler, optional): An instance of DataWrangler used for data handling, defaults to None.
 
         Returns:
-            True if preprocessing is successful, False otherwise.
+            bool: True if the data was successfully preprocessed, False otherwise.
+
+        Raises:
+            Exception: Logs an error if data preprocessing fails.
         """
         nlp = en_core_web_lg.load()
         stop_words: List[str] = stopwords.words("english")
@@ -110,41 +117,45 @@ class LatentDirichletAllocator:
             "Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictonary Creation"
         )
         try:
-            return self.data_reshaped(nlp, removal)
+            return self.data_reshaped(nlp, removal, wranglerInstance)
         except Exception:
             logger.exception("Failed to Preprocess Data")
             return False
 
-    def data_reshaped(self, nlp, removal) -> bool:
-        """Processes the prelemma corpus to reshape it for LDA modeling.
+    def data_reshaped(self, nlp:Language, removal:List[str],wranglerInstance:DataWrangler ) -> bool:
+        """
+        Preprocesses the data by reshaping the corpus and generating tokens from the input text.
 
-        This method takes a natural language processing model and a list of
-        part-of-speech tags to remove, then iterates through the prelemma corpus
-        to generate a list of processed tokens. It creates a mapping dictionary
-        and a corpus suitable for LDA analysis, filtering out infrequent and
-        overly common tokens.
+        This function takes a natural language processing model and a list of parts of speech to remove, processes the prelemma corpus to extract lemmatized tokens, and constructs a bag-of-words representation. It handles the case where the prelemma corpus is empty by attempting to regenerate it using a provided DataWrangler instance.
 
         Args:
-            nlp: The NLP model used for processing the text.
-            removal: A list of part-of-speech tags to be excluded from the
-                tokenization process.
+            nlp (Language): The natural language processing model used for tokenization and lemmatization.
+            removal (List[str]): A list of part-of-speech tags to be excluded from the tokenization process.
+            wranglerInstance (DataWrangler): An instance of DataWrangler used to regenerate the corpus if necessary.
 
         Returns:
-            True if the data was successfully reshaped, False otherwise.
+            bool: True if the data was successfully pre-processed, False otherwise.
+
+        Raises:
+            Exception: Logs an error if data processing fails.
         """
-        try:
-            for comment in nlp.pipe(self.prelemma_corpus):
-                proj_tok = [
-                    token.lemma_.lower()
-                    for token in comment
-                    if (
-                        token.pos_ not in removal
-                        and token.lemma_.lower() not in stopwords
-                        and not token.is_stop
-                        and token.is_alpha
-                    )
-                ]
-                self._tokens.append(proj_tok)
+        try: 
+            if self.prelemma_corpus is not None:
+                for comment in nlp.pipe(self.prelemma_corpus):
+                    proj_tok = [
+                        token.lemma_.lower()
+                        for token in comment
+                        if (
+                            token.pos_ not in removal
+                            and token.lemma_.lower() not in stopwords
+                            and not token.is_stop
+                            and token.is_alpha
+                        )
+                    ]
+                    self._tokens.append(proj_tok)
+            else:
+                logger.error("Prelemma Corpus is Empty...attempting to regenerate Corpus...")
+                self.prelemma_corpus = wranglerInstance.create_corpus()
             logger.debug(f"Token Length:{len(self._tokens)}")
             self.id2word = MappingDictionary(self._tokens)
             self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=1000)
@@ -153,7 +164,7 @@ class LatentDirichletAllocator:
 
             logger.success("Successfully Pre-Processed Data")
             return True
-        except Exception:
+        except Exception as e:
             logger.exception("Unable to Massage Data")
             return False
 
