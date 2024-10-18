@@ -1,16 +1,15 @@
 import os
 import pathlib
 import sys
-import warnings
-from datetime import datetime
+import time
 from typing import List, Tuple, Union
-
+from datetime import datetime
 import gradio as gr
 from gradio import HTML, Interface, LinePlot, Row
 from loguru import logger
-from PyQt5.QtCore import QRect, pyqtSignal, QThread, QCoreApplication
+from PyQt5.QtCore import QRect, pyqtSignal, QThread, QCoreApplication, QObject, QMutex
 from PyQt5.QtGui import QFont
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -22,69 +21,23 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QTextEdit,
     QVBoxLayout,
-    QTabWidget,
-    QToolButton,
     QWidget,
-    QGroupBox
+    QProgressDialog,
+    QProgressBar,
+    QDialog,
 )
 
-from LDA_logic import LatentDirichletAllocator
+from LDA_logic import LatentDirichletAllocator, stopwords
 from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
-import unicodedata
-
-class Ui_Dialog(object):
-    def setupUi(self, Dialog):
-        Dialog.setObjectName("Dialog")
-        Dialog.resize(713, 511)
-        self.tabWidget = QTabWidget(Dialog)
-        self.tabWidget.setGeometry(QtCore.QRect(20, 30, 671, 461))
-        self.tabWidget.setObjectName("tabWidget")
-        self.tab1 = QWidget()
-        self.tab1.setObjectName("tab1")
-        font = QtGui.QFont()
-        font.setPointSize(7)
-        self.groupBox_Carga = QGroupBox(self.tab1)
-        self.groupBox_Carga.setEnabled(True)
-        self.groupBox_Carga.setGeometry(QRect(10, 90, 641, 161))
-        self.groupBox_Carga.setObjectName("groupBox_Carga")
-        self.toolButton = QToolButton(self.groupBox_Carga)
-        self.toolButton.setGeometry(QRect(40, 30, 561, 31))
-        self.toolButton.setObjectName("toolButton")
-        self.groupBox_ConfMatcheo_4 = QGroupBox(self.tab1)
-        self.groupBox_ConfMatcheo_4.setEnabled(True)
-        self.groupBox_ConfMatcheo_4.setGeometry(QRect(10, 360, 641, 61))
-        self.groupBox_ConfMatcheo_4.setFont(font)
-        self.groupBox_ConfMatcheo_4.setObjectName("groupBox_ConfMatcheo_4")
-        self.label = QLabel(self.groupBox_ConfMatcheo_4)
-        self.label.setGeometry(QtCore.QRect(80, 20, 521, 31))
-        self.label.setObjectName("label")
-        self.tabWidget.addTab(self.tab1, "")
-
-        self.retranslateUi(Dialog)
-
-    def retranslateUi(self, Dialog):
-        _translate = QCoreApplication.translate
-        self.toolButton.setText(_translate("Dialog", "Load payments"))
-        self.label.setText(_translate("Dialog", ""))
+import en_core_web_lg
 
 
-class Thread(QThread):                                         # +++
-    updateSignal = pyqtSignal(int)                             # <----
-
-    def __init__(self, value):                        
-        super().__init__()  
-        self.value = value
-
-    def run(self):
-        #it takes several minutes to execute this function
-        for i in range(self.value):
-            self.msleep(50)
-            self.updateSignal.emit(i+1)                                # <----
+nlp = en_core_web_lg.load()
+stop_words: List[str] = stopwords.words("english")
 
 
-
-class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
+class MainWindow(QMainWindow, QDialog):
     """
     Represents the main application window for the Data Wrangler tool.
     This class initializes the user interface and manages interactions for data processing and model training.
@@ -128,7 +81,7 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         """
         super().__init__()
         self.wrangler: DataWrangler = DataWrangler()
-        self.allocator:LatentDirichletAllocator = None
+        self.allocator: LatentDirichletAllocator = None
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
@@ -177,15 +130,24 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         self.instruction_layout.addWidget(warning_label)
 
         # Buttons
+        self.wrangling_input_form = QFormLayout()
         self.ticket_file_button = QPushButton("Select Path to Ticket File")
+        self.ticket_file = QLineEdit()
+
         self.comments_dir_button = QPushButton("Select Path to Comments Directory")
+        self.comments_dir = QLineEdit()
+
         self.process_button = QPushButton("Process Data")
         self.train_model_button = QPushButton("Train Model")
 
+        self.comments_dir.setReadOnly(True)
+        self.ticket_file.read(True)
+
+        self.ticket_file_button.fileSelected.connect(self.confirm_file_change)
         self.ticket_file_button.clicked.connect(self.select_ticket_file)
         self.comments_dir_button.clicked.connect(self.select_comments_dir)
         self.process_button.clicked.connect(self.init_start_process)
-        self.train_model_button.clicked.connect(self.train_model)
+        self.train_model_button.clicked.connect(self.start_allocator_worker)
         self.train_model_button.setEnabled(False)
 
         # Form layout for inputs
@@ -216,7 +178,9 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
         sys.stderr = QTextEditStream(self.log_output)
-        self.log_output.setPlainText(f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Learnosity Data Wrangler on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!")
+        self.log_output.setPlainText(
+            f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Learnosity Data Wrangler on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
+        )
         # Arrange layout
         self.data_entry_layout.addWidget(self.ticket_file_button)
         self.data_entry_layout.addWidget(self.comments_dir_button)
@@ -228,6 +192,133 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         # Main layout arrangement
         self.main_layout.addLayout(self.instruction_layout)
         self.main_layout.addLayout(self.data_entry_layout)
+
+    def confirm_file_change(self, type: str) -> None:
+
+        warningMsg = QMessageBox(self, title="Update to File Selection!")
+        warningMsg.setIcon("SP_FileIcon")
+        warningMsg.setInformativeText(
+            "You Are about To update the file path to a previously selected file"
+        )
+        warningMsg.setText("Would You Like to Continue?")
+        warningMsg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        warningMsg.setDefaultButton(QMessageBox.Cancel)
+
+        response = warningMsg.exec_()
+
+        # Handle the user's response
+        if response == QMessageBox.Yes:
+            if type == "dir":
+                self.select_comments_dir()
+            else:
+                self.select_ticket_file()
+
+    def show_progress_bar(self, label: str = "Processing..."):
+        """
+        Displays a progress dialog with a progress bar to track the progress of long-running tasks.
+
+        Args:
+            label (str): The label to be displayed in the progress dialog.
+        """
+        # Create the progress dialog
+        self.pdialog = QProgressDialog(label, "Cancel", 0, 100, self)
+        self.pdialog.setWindowTitle("Progress")
+        self.pdialog.setWindowModality(QtCore.Qt.WindowModal)
+        self.pdialog.setMinimumDuration(0)  # Ensure it appears immediately
+        self.pdialog.setAutoClose(False)  # Keep it open until we close it manually
+
+        # Create the progress bar and add it to the dialog
+        self.pbar = QProgressBar(self)
+        self.pbar.setMaximum(100)
+        self.pdialog.setBar(self.pbar)
+
+        # Initialize the progress to 0
+        self.pbar.setValue(0)
+
+    def update_training_progress_bar(self, progress: int):
+        """
+        Updates the progress bar value in the progress dialog.
+
+        Args:
+            progress (int): The current progress value to be set.
+        """
+        if self.pdialog is not None:
+            self.pdialog.setValue(progress)
+            self.pbar.setValue(progress)
+
+            # Close the dialog if progress is complete
+            if progress >= 100:
+                self.pdialog.close()
+
+    def update_training_status(self, progress: str):
+        """
+        Updates the progress dialog label status in the progress dialog.
+
+        Args:
+            progress (str): The current progress value to be set.
+        """
+        if self.pdialog is not None:
+            self.pdialog.setLabelText(progress)
+            self.pdialog.setValue(self.pdialog.value + 5)
+            self.pbar.setValue(self.pbar.value + 5)
+
+    def start_allocator_worker(self):
+        """
+        Starts the LDAModelWorker in a separate thread and connects signals to update progress.
+        """
+        # Initialize and display the progress bar
+        self.show_progress_bar("Training LDA Model...")
+
+        # Create a thread for the worker
+        self.thread = QThread()
+        self.modeler = self.allocator.LDAModelWorker()
+        self.modeler.moveToThread(self.thread)
+
+        # Connect signals
+        self.thread.started.connect(
+            lambda: self.modeler.process_corpus(
+                nlp=nlp, stopwords=stop_words, wranglerInstance=self.wrangler
+            )
+        )
+        self.modeler.preprocess_progress.connect(
+            self.update_progress_bar
+        )  # Update the progress bar with progress signals
+        self.modeler.worker_status.connect(
+            self.update_progress_status
+        )  # Update the progress bar with progress signals
+        self.modeler.preprocess_finished.connect(
+            self.on_worker_finished
+        )  # Handle when the worker finishes
+
+        # Start the thread
+        self.thread.start()
+
+    def on_worker_finished(self):
+        """
+        Handles the completion of the worker process, cleaning up the thread and closing the progress dialog.
+        """
+        self.pdialog.close()
+        self.thread.quit()
+        self.thread.wait()
+        self.modeler.deleteLater()
+        self.thread.deleteLater()
+
+        QMessageBox.information(
+            self, "Process Complete", "LDA Model training has finished successfully."
+        )
+
+    def start_allocator_worker(self):
+        self.thread = QThread()
+        self.modeler = self.allocator.LDAModelWorker()
+        self.modeler.moveToThread(self.thread)
+
+        self.thread.started.connect(
+            lambda: self.modeler.data_reshaped(nlp=nlp, wranglerInstance=self.wrangler)
+        )
+        self.worker.preprocess_finished.connect(self.thread.quit)
+        self.worker.preprocess_finished.connect(self.worker.deleteLater)
+        self.thread.preprocess_finished.connect(self.thread.deleteLater)
+        self.worker.preprocess_progress.connect(self.reportProgress)
 
     def init_logging(self) -> None:
         """
@@ -262,8 +353,9 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="DEBUG",
         )
-    def update_progressBar(self, value):                           # <----     
-            self.progressBar.setValue(value)
+
+    def update_progressBar(self, value):
+        self.progressBar.setValue(value)
 
     def select_ticket_file(self):
         """Opens a file dialog to select a JSON ticket file.
@@ -303,7 +395,7 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
             logger.info(f"Comments Dir Selected: {dir_path}")
             self.wrangler.comments_dir = dir_path
 
-    def present_results(self) -> None:
+    def present_results(self) -> None:  # sourcery skip: extract-method
         """
         Displays the results of the model training in a user interface.
         This method visualizes the top topics and coherence plot, and attempts to load an LDA graph.
@@ -358,70 +450,6 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
 
             results_UI.launch()
 
-    def validate_inputs(
-        self, number_of_topics, iterations, passes
-    ) -> Tuple[bool, Union[str, None]]:
-        """
-        ``        Validates the user inputs for model training parameters.
-                This method checks that the inputs are integers and within acceptable ranges.
-
-                The `validate_inputs` function ensures that the provided values for the number of topics, iterations,
-                and passes meet the specified criteria. It returns a boolean indicating the validity of the inputs
-                along with an error message if the inputs are invalid.
-
-                Args:
-                    number_of_topics (str): The number of topics to be used in the model.
-                    iterations (str): The number of iterations for the training process.
-                    passes (str): The number of passes for the training process.
-
-                Returns:
-                    tuple: A tuple containing a boolean indicating validity and an error message.
-        """
-        if not all(map(str.isdigit, [number_of_topics, iterations, passes])):
-            return False, "All inputs must be integers."
-        if int(passes) >= 20 or int(iterations) >= 200:
-            return False, "Passes should be < 20 and iterations < 200."
-        return True, ""
-
-
-    def train_model(self) -> None:
-        """
-        Trains the model using the specified parameters for topics, iterations, and passes.
-        This method validates the input values and initiates the training process if the inputs are valid.
-
-        The `train_model` function retrieves user input for the number of topics, iterations, and passes,
-        validates these inputs, and then calls the model training method on the allocator instance.
-        If the training is successful, it logs a success message and presents the results.
-
-        Args:
-                self.allocator (LatentDirichletAllocator): The allocator instance used for training the model.
-
-            Returns:
-                None
-
-        Raises:
-            QMessageBox: Displays a warning if the input validation fails.
-        """
-        number_of_topics = self.num_topics_input.text()
-        iterations = self.iterations_input.text()
-        passes = self.passes_input.text()
-
-        valid, error_message = self.validate_inputs(
-            number_of_topics, iterations, passes
-        )
-        if not valid:
-            QMessageBox.warning(self, "Input Validation Error", error_message)
-            return
-
-        if self.allocator.model_trained(
-            iterations=int(iterations),
-            workers=4,
-            passes=int(passes),
-            num_of_topics=int(number_of_topics),
-        ):
-            logger.success("Model successfully trained!")
-            self.present_results()
-
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
         Displays a critical error message to the user.
@@ -436,12 +464,9 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         Returns:
             QMessageBox: The message box displayed to the user.
         """
-        return QMessageBox.critical(
-            self, "Critical Error", error[1])
-        
+        return QMessageBox.critical(self, "Critical Error", error[1])
 
-    def init_start_process(
-            self) -> None:
+    def init_start_process(self) -> None:
         """
         Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
         This function enables the necessary UI elements and logs the success or failure of the process.
@@ -458,11 +483,14 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
         Raises:
             RuntimeError: If the data processing fails at any step.
         """
-  
+
         try:
             # Collect error messages
             error_messages = [
-                (not self.wrangler.tickets_reshaped(), "Error: Failed to reshape tickets."),
+                (
+                    not self.wrangler.tickets_reshaped(),
+                    "Error: Failed to reshape tickets.",
+                ),
                 (not self.wrangler.comments_bound(), "Error: Failed to bind comments."),
             ]
 
@@ -478,10 +506,17 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
             corpus_task = self.wrangler.create_corpus()
 
             if corpus_task is None or corpus_task == "":
-                self.notify_user_of_error((False, f"Error: Failed to create corpus. \n Corpus Length: {len(corpus_task)} \n Corpus Type: {type(corpus_task)}"))
+                self.notify_user_of_error(
+                    (
+                        False,
+                        f"Error: Failed to create corpus. \n Corpus Length: {len(corpus_task)} \n Corpus Type: {type(corpus_task)}",
+                    )
+                )
 
             if not self.allocator.data_preprocessed(wranglerInstance=self.wrangler):
-                self.notify_user_of_error((False, "Error: Data preprocessing in allocator failed." ))
+                self.notify_user_of_error(
+                    (False, "Error: Data preprocessing in allocator failed.")
+                )
             self.allocator.prelemma_corpus = corpus_task
             self.process_button.setEnabled(False)
             self.train_model_button.setEnabled(True)
@@ -497,9 +532,10 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
             success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
             logger.success("Data successfully wrangled and saved.")
             logger.log("USER INPUT REQUIRED", success_message)
-            QMessageBox.warning(self,
-               "Data Has Successfully Processed",
-                success_message,
+            QMessageBox.warning(
+                self,
+                "Data Has Successfully Processed",
+                "The Data Located in the Provided Paths Has been Wrangled and Massaged... \n\nPlease select Number of Topics, Iterations and Passes. \n Then Click Train Model to continue.",
             )
         except Exception as e:
             # Notify user and log unexpected errors
@@ -507,9 +543,10 @@ class MainWindow(QMainWindow, QtWidgets.QDialog, Ui_Dialog):
             logger.exception(f"Processing failed: {e}")
             raise RuntimeError("Data processing failed") from e
 
+
 app = QApplication(sys.argv)
 window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
 
 if __name__ == "__main__":
-        window.show()
-        sys.exit(app.exec_())
+    window.show()
+    sys.exit(app.exec_())

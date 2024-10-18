@@ -19,6 +19,7 @@ spacy = "*"
 seaborn = "^0.13.2"
 pyldavis = "^3.4.1"
 scipy = "1.12"
+validators = "^0.34.0"
 
 [tool.poetry.group.dev.dependencies]
 isort = "*"

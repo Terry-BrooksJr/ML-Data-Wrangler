@@ -1,6 +1,7 @@
-import sys
 import re
+import sys
 
+import validators
 from loguru import logger
 from PyQt5.QtCore import QRegExp
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
@@ -133,7 +134,7 @@ class LogHighlighter(QSyntaxHighlighter):
         self.time_format = QTextCharFormat()
         self.time_format.setForeground(QColor("green"))
         self.time_format.setFontWeight(QFont.Weight.Thin)
-  
+
         self.success_format = QTextCharFormat()
         self.success_format.setForeground(QColor("cyan"))
         self.success_format.setFontWeight(QFont.Weight.ExtraBold)
@@ -141,13 +142,22 @@ class LogHighlighter(QSyntaxHighlighter):
 
         self.user_input_required_format = QTextCharFormat()
         self.user_input_required_format.setForeground(QColor("blue"))
-        self.user_input_required_format.setFontCapitalization(QFont.Capitalization.AllUppercase)
+        self.user_input_required_format.setFontCapitalization(
+            QFont.Capitalization.AllUppercase
+        )
         self.user_input_required_format.fontUnderline()
         # asserting rules for each log level
         self.highlightingRules = [
-            (QRegExp(r'[0-9]{4}-[0-9]{2}-[0-9]{2} ([A-Za-z0-9]+(:[A-Za-z0-9]+)+)\.[0-9]+ \| (TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL)\| ([A-Za-z0-9]+( [A-Za-z0-9]+)+)\.\.\.[A-Za-z0-9]+(\s+([A-Za-z]+\s+)+)[A-Za-z0-9]+'), self.user_input_required_format),
             (
-                QRegExp(r"[0-9]{4}-[0-9]{2}-[0-9]{2} at [0-9]{2}:[0-9]{2}:+[0-9]{2}(\.[0-9]{1,3})?"),
+                QRegExp(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2} ([A-Za-z0-9]+(:[A-Za-z0-9]+)+)\.[0-9]+ \| (TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|SEVERE|FATAL)\| ([A-Za-z0-9]+( [A-Za-z0-9]+)+)\.\.\.[A-Za-z0-9]+(\s+([A-Za-z]+\s+)+)[A-Za-z0-9]+"
+                ),
+                self.user_input_required_format,
+            ),
+            (
+                QRegExp(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2} at [0-9]{2}:[0-9]{2}:+[0-9]{2}(\.[0-9]{1,3})?"
+                ),
                 self.time_format,
             ),
             (QRegExp(r"\bINFO\b"), self.info_format),
@@ -168,27 +178,34 @@ class LogHighlighter(QSyntaxHighlighter):
                 index = expression.indexIn(text, index + length)
 
 
-def remove_urls(text: str) -> str:
+def remove_useless_data(text: str) -> str:
     """
-    Removes URLs from the provided text and replaces them with a placeholder.
-    This function uses a regular expression to identify and sQubstitute URLs in the input string.
+    Filters out unhelpful data from the input text by removing specific patterns.
 
-    The `remove_urls` function scans the input text for patterns that match URLs and replaces each occurrence
-    with the string "[URL REMOVED]". This is useful for sanitizing text data by removing potentially sensitive
-    or unwanted URL information.
+    This function takes a string input, splits it into individual words, and removes any words that match certain validation criteria, such as emails, URLs, UUIDs, MD5 hashes, and IPv4 addresses. The remaining words are then combined back into a single string and returned.
 
     Args:
-        text (str): The input string from which URLs will be removed.
+        text (str): The input string containing text to be processed.
 
     Returns:
-        str: The modified string with URLs replaced by the placeholder.
+        str: A string with unhelpful data removed.
+
+    Raises:
+        None
     """
-    replacement_text = "[URL REMOVED]"
+    scrubbed = [
+        word
+        for word in text
+        if not (
+            validators.email(word)
+            or validators.url(word)
+            or validators.uuid(word)
+            or validators.hashes.md5(word)
+            or validators.ip_address.ipv4(word)
+        )
+    ]
+    logger.success("Removed Unhelpful and Descriptive Text")
+    return " ".join(scrubbed)
 
-    # Define a regex pattern to match URLs
-    url_pattern = re.compile(
-        r"(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?\/[a-zA-Z0-9]{2,}|((https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?)|(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}(\.[a-zA-Z0-9]{2,})?"
-    )
 
-    return url_pattern.sub(replacement_text, text)
-
+5
