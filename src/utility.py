@@ -1,6 +1,6 @@
 import re
 import sys
-
+from enum import Enum
 import validators
 from loguru import logger
 from PyQt5.QtCore import QRegExp
@@ -208,4 +208,12 @@ def remove_useless_data(text: str) -> str:
     return " ".join(scrubbed)
 
 
-5
+class WORKER_STATUS(Enum):
+    CREATED = 1
+    AVAILABLE = 2
+    BUSY = 3
+    FINISHED = 4
+    FAILED = 5
+
+    def __call__(self, *args, **kwargs):
+        return None

@@ -1,6 +1,7 @@
 import random
-from typing import List, Tuple, Union
-
+from typing import List, Tuple, Union, Callable
+from PyQt5.QtWidgets import QMessageBox
+from tqdm import tqdm
 import en_core_web_lg
 import matplotlib.pyplot as plt
 import nltk
@@ -12,13 +13,12 @@ from gensim.models.ldamodel import LdaModel
 from loguru import logger
 from nltk.corpus import stopwords
 from numpy.random import RandomState
-from PyQt5.QtCore import pyqtSignal, QMutex, QObject
-from PyQt5.QtWidgets import QMessageBox
-from spacy.language import Language
+
 from spacy.tokens import Doc
-
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from wrangler import DataWrangler
-
+import gradio as gr
 nltk.download("stopwords")
 sns.set_theme()
 
@@ -32,7 +32,7 @@ class LatentDirichletAllocator:
     coherence values, enabling effective topic modeling on the provided corpus.
     """
 
-    def __init__(self, num_of_topics: int) -> None:
+    def __init__(self,  num_of_topics: int, prelemma_corpus:str=None,) -> None:
         """
         Initializes the LatentDirichletAllocator with a corpus and number of topics.
 
@@ -45,8 +45,9 @@ class LatentDirichletAllocator:
         self._tokens: List[Doc] = []
         self.id2word: MappingDictionary = ""
         self.num_of_topics: int = num_of_topics
-        self.prelemma_corpus: str = None
-
+        self.prelemma_corpus: str = prelemma_corpus
+        self.passes: int = None
+        self.iterations = None
         self.topics: List[str] = []
         self.coherence_values: List[float] = []
 
@@ -133,25 +134,32 @@ class LatentDirichletAllocator:
         """
         return self.topics[:5]
 
-    class LDAModelWorker(QObject):
-        preprocess_finished = pyqtSignal()
-        preprocess_progress = pyqtSignal(int)
-        train_finished = pyqtSignal()
-        train_progress = pyqtSignal(int)
-        _mutex = QMutex()
-        error = pyqtSignal(str)
-        worker_status = pyqtSignal(str)
+ 
+    class LDAModelWorker:
+        """
+        A class for managing the training of a Latent Dirichlet Allocation (LDA) model.
+        This class handles input validation, data preprocessing, and model training, allowing for asynchronous operations through callbacks.
 
-        def _validate_inputs(
-            self, number_of_topics, iterations, passes
-        ) -> Tuple[bool, Union[str, None]]:
+        Attributes:
+            _tokens (list): A list to store tokenized data.
+            prelemma_corpus (list): The corpus before lemmatization.
+            id2word (MappingDictionary): A mapping from word IDs to words.
+            corpus (list): The bag-of-words representation of the corpus.
+            topics (list): A list to store the number of topics evaluated.
+            coherence_values (list): A list to store coherence values for each topic count.
+        """
+        def __init__(self, on_status: Callable[[str], None]):
+            """
+            Initializes the LDAModelWorker with empty attributes for tokens, corpus, and model evaluation metrics.
+            """
+            self.lock = threading.Lock()
+            self.on_status = on_status  # A callback to report status or progress
+            self.executor = ThreadPoolExecutor(max_workers=4)
+
+        def _validate_inputs(self, number_of_topics, iterations, passes):
             """
             Validates the user inputs for model training parameters.
             This method checks that the inputs are integers and within acceptable ranges.
-
-            The `validate_inputs` function ensures that the provided values for the number of topics, iterations,
-            and passes meet the specified criteria. It returns a boolean indicating the validity of the inputs
-            along with an error message if the inputs are invalid.
 
             Args:
                 number_of_topics (str): The number of topics to be used in the model.
@@ -167,191 +175,164 @@ class LatentDirichletAllocator:
                 return False, "Passes should be < 20 and iterations < 200."
             return True, ""
 
-        def train_model(
-            self, passes: int, iterations: int, number_of_topics: int
-        ) -> None:
+        def train_model(self, passes: int, iterations: int, number_of_topics: int, callback=None):
             """
             Trains the model using the specified parameters for topics, iterations, and passes.
-            This method validates the input values and initiates the training process if the inputs are valid.
-
-            The `train_model` function retrieves user input for the number of topics, iterations, and passes,
-            validates these inputs, and then calls the model training method on the allocator instance.
-            If the training is successful, it logs a success message and presents the results.
+            This method validates the input values and initiates the training process in a separate thread.
 
             Args:
-                    allocator (LatentDirichletAllocator): The allocator instance used for training the model.
-                Returns:
-                    None
+                passes (int): The number of passes for the training process.
+                iterations (int): The number of iterations for the training process.
+                number_of_topics (int): The number of topics to be used in the model.
+                callback (function, optional): A callback function to handle success or error messages.
 
-            Raises:
-                QMessageBox: Displays a warning if the input validation fails.
+            Returns:
+                None
             """
-            logger.info("Starting the Model Training.. ")
-            number_of_topics = number_of_topics
-            iterations = iterations
-            passes = passes
+            logger.info("Starting the Model Training..")
 
             valid, error_message = self._validate_inputs(
                 number_of_topics, iterations, passes
             )
             if not valid:
                 logger.error(error_message)
-                QMessageBox.warning(self, "Input Validation Error", error_message)
+                if callback:
+                    callback(error=error_message)
                 return
 
-            if self.allocator.model_trained(
-                iterations=iterations,
-                workers=4,
-                passes=passes,
-                num_of_topics=number_of_topics,
-            ):
-                logger.success("Model successfully trained!")
-                self.present_results()
+            def train():
+                if self.model_trained(iterations=iterations, workers=4, passes=passes, num_of_topics=number_of_topics):
+                    logger.success("Model successfully trained!")
+                    if callback:
+                        callback(success=True)
 
-        def process_corpus(
-            self, nlp: Language, stopwords: List[str], wranglerInstance: DataWrangler
-        ) -> bool:
+            thread = threading.Thread(target=train)
+            thread.start()
+
+        def process_corpus(self, nlp, stopwords, wrangler_instance, progress=gr.Progress(track_tqdm=True)):
             """
             Pre-processes the data by reshaping the corpus and generating tokens from the input text.
-
-            This function takes a natural language processing model and a list of parts of speech to remove, processes the prelemma corpus to extract lemmatized tokens, and constructs a bag-of-words representation. It handles the case where the prelemma corpus is empty by attempting to regenerate it using a provided DataWrangler instance.
-
-            Args:
-                nlp (Language): The natural language processing model used for tokenization and lemmatization.
-                removal (List[str]): A list of part-of-speech tags to be excluded from the tokenization process.
-                wranglerInstance (DataWrangler): An instance of DataWrangler used to regenerate the corpus if necessary.
-
-            Returns:
-                bool: True if the data was successfully pre-processed, False otherwise.
-
-            Raises:
-                Exception: Logs an error if data processing fails.
             """
-            removal = [
-                "ADV",
-                "PRON",
-                "PUNCT",
-                "PART",
-                "DET",
-                "ADP",
-                "SPACE",
-                "NUM",
-                "SYM",
-            ]
-            logger.info(
-                "Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictonary Creation"
-            )
-            self.worker_status.emit("Configured SpaCy Model..")
+            logger.info("Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictionary Creation")
+
             try:
-                if self.prelemma_corpus is not None:
-                    self.worker_status.emit("Lemmitizing Corpus...")
+                if self.prelemma_corpus:
+                    logger.info("Lemmatizing Corpus...")
                     unprocessed_corpus = nlp.pipe(self.prelemma_corpus)
-                    for i in range(len(unprocessed_corpus)):
-                        for comment in unprocessed_corpus:
-                            proj_tok = [
-                                token.lemma_.lower()
-                                for token in comment
-                                if (
-                                    token.pos_ not in removal
-                                    and token.lemma_.lower() not in stopwords
-                                    and not token.is_stop
-                                    and token.is_alpha
-                                )
-                            ]
-                            self._tokens.append(proj_tok)
-                            self.preprocess_progress.emit(i + 1)
-                    self.worker_status.emit("Lemmatization Completed")
+                    for i, comment in tqdm(enumerate(unprocessed_corpus)):
+                        proj_tok = [
+                            token.lemma_.lower()
+                            for token in comment
+                            if (
+                                token.pos_ not in ["ADV", "PRON", "PUNCT", "PART", "DET", "ADP", "SPACE", "NUM", "SYM"]
+                                and token.lemma_.lower() not in stopwords
+                                and not token.is_stop
+                                and token.is_alpha
+                            )
+                        ]
+                        self._tokens.append(proj_tok)
+    
+                    logger.info("Lemmatization Completed")
                 else:
-                    logger.info(
-                        "Prelemma Corpus is empty. Regenerating Corpus using DataWrangler"
-                    )
-                    self.prelemma_corpus = wranglerInstance.create_corpus()
+                    logger.info("Prelemma Corpus is empty. Regenerating Corpus using DataWrangler")
+                    self.prelemma_corpus = wrangler_instance.create_corpus()
+
                 logger.debug(f"Token Length:{len(self._tokens)}")
-                logger.info("Successfully Regenerated Corpus!...")
-                self.worker_status.emit(
-                    f"Preparing Mapping Dictonary for {len(self._tokens)} tokens... "
-                )
                 self.id2word = MappingDictionary(self._tokens)
-                self.worker_status.emit("Finally, Filtering Out Extremes...")
                 self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=5000)
                 self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
-                logger.debug(
-                    f"Pre-Lemma Corpus Length:{len(self.prelemma_corpus)} \n Mapping Dict: {self.id2word} \n Post Processing Corpus: {len(self.corpus)}"
-                )
+
                 logger.success("Successfully Processed Corpus")
-                self.preprocess_finished.emit()
-                return True
+                if callback:
+                    callback(success=True)
             except Exception as e:
                 logger.exception("FAILED to Process Data")
-                return False
+                if callback:
+                    callback(error=str(e))
 
-        def preprocess_input_data(
-            self, nlp, wranglerInstance: DataWrangler = None
-        ) -> bool:
+        def preprocess_input_data(self, nlp, wrangler_instance=None, callback=None):
             """
-            Prepares the data for further processing by configuring the necessary NLP model and stopwords.
-
-            This function initializes the SpaCy language model and defines a list of parts of speech to remove during data cleansing. It then calls the `data_reshaped` method to perform the actual data reshaping and tokenization, handling any exceptions that may occur during the process.
+            Prepares the data for further processing.
+            This method calls the process_corpus function and handles any exceptions that may occur.
 
             Args:
-                wranglerInstance (DataWrangler, optional): An instance of DataWrangler used for data handling, defaults to None.
+                nlp: The natural language processing model used for tokenization and lemmatization.
+                wrangler_instance: An instance of DataWrangler used to regenerate the corpus if necessary.
+                callback (function, optional): A callback function to handle progress updates or errors.
 
             Returns:
-                bool: True if the data was successfully preprocessed, False otherwise.
-
-            Raises:
-                Exception: Logs an error if data preprocessing fails.
-            """
-
-            try:
-                return self.process_corpus(
-                    nlp=nlp,
-                    removal=removal,
-                    wranglerInstance=wranglerInstance,
-                    stopwords=stopwords,
-                )
-            except Exception:
-                logger.exception("Failed to Preprocess Data")
-                return False
-
-        def model_trained(
-            self, iterations: int, workers: int, passes: int, num_of_topics: int
-        ) -> bool:
-            """Trains the LDA model and evaluates coherence for a range of topic counts.
-
-            This method iteratively trains the LDA model for a specified number of
-            topics and records the coherence values for each topic count. It helps
-            in determining the optimal number of topics for the model based on
-            coherence scores.
-
-            Args:
-                iterations: The number of iterations for the LDA model training.
-                workers: The number of worker threads to use during training.
-                passes: The number of passes through the corpus during training.
-                num_of_topics: The number of topics to evaluate during training.
-
-            Returns:
-                True if the model is successfully trained and coherence values are
-                recorded, False otherwise.
+                None
             """
             try:
-                for i in range(1, 20):
-                    lda_model = self.get_lda_model(
-                        iterations=iterations, workers=4, passes=passes, num_of_topics=i
-                    )
-                    cm = CoherenceModel(
-                        model=lda_model,
-                        corpus=self.corpus,
-                        dictionary=self.id2word,
-                        coherence="c_v",
-                    )
-                    self.topics.append(i)
-                    self.coherence_values.append(cm.get_coherence())
-                    self.train_progress.emit(i + 1)
-
-                logger.success("Successfully Trained Model")
-                self.train_finished.emit()
-                return True
+                self.process_corpus(nlp, stopwords, wrangler_instance, callback=callback)
             except Exception as e:
-                logger.exception("Failed to  Train Model")
-                return False
+                logger.exception("Failed to Preprocess Data")
+                if callback:
+                    callback(error=str(e))
+
+        def model_trained(self, callback=None):
+            def train( progress=gr.Progress(track_tqdm=True)):
+                """
+                    Trains the LDA model concurrently for a specified range of topic counts.
+                    This function utilizes a thread pool to train multiple models simultaneously and collects their coherence values.
+
+                    Args:
+                        workers (int): The number of worker threads to use during training.
+                        num_of_topics (int): The number of topics to evaluate during training.
+                        iterations (int): The number of iterations for the LDA model training.
+                        passes (int): The number of passes through the corpus during training.
+                        callback (function, optional): A callback function to handle progress updates or errors.
+
+                    Returns:
+                        None
+
+                    Raises:
+                        Exception: Logs an error if the training process fails.
+                """
+                try:
+                    with self.executor as executor:
+                        futures = []
+                        for i in tqdm(range(1, self.num_topics + 1)):
+                            futures.append(executor.submit(self._train_single_model, i, self.iterations, self.passes))
+
+                        for future in futures:
+                            result = future.result()  # Blocks until the result is ready
+                            self.topics.append(result['topics'])
+                            self.coherence_values.append(result['coherence'])
+                            if callback:
+                                callback(progress=result['topics'])
+
+                    if callback:
+                        callback(success=True)
+                    logger.success("Successfully Trained Model")
+                except Exception as e:
+                    logger.exception("Failed to Train Model")
+                    if callback:
+                        callback(error=str(e))
+
+            thread = threading.Thread(target=train)
+            thread.start()
+
+        def _train_single_model(self, i, iterations, passes, ):
+            lda_model = self.get_lda_model(
+                iterations=iterations, workers=4, passes=passes, num_of_topics=i
+            )
+            """
+            Trains a single LDA model for a specified number of topics and evaluates its coherence.
+            This method is called by model_trained to train individual models concurrently.
+
+            Args:
+                i (int): The number of topics for the model.
+                iterations (int): The number of iterations for the LDA model training.
+                passes (int): The number of passes through the corpus during training.
+
+            Returns:
+                dict: A dictionary containing the number of topics and the corresponding coherence value.
+            """
+            cm = CoherenceModel(
+            model=lda_model,
+            corpus=self.corpus,
+            dictionary=self.id2word,
+            coherence="c_v",
+        )
+            return {'topics': i, 'coherence': cm.get_coherence()}

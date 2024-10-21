@@ -8,11 +8,17 @@
         "Matcheo",
         "msleep",
         "Multicore",
+        "pbar",
+        "pdialog",
         "prelemma",
+        "PUNCT",
         "qtextedit",
         "ufunc"
     ],
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.tabCompletion": "on",
-    "search.useIgnoreFiles": false
+    "search.useIgnoreFiles": false,
+    "cSpell.ignoreWords": [
+        "Lemmitizing"
+    ]
 }
