@@ -13,7 +13,10 @@
         "prelemma",
         "PUNCT",
         "qtextedit",
-        "ufunc"
+        "tqdm",
+        "ufunc",
+        "xlabel",
+        "ylabel"
     ],
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.tabCompletion": "on",

@@ -5,7 +5,7 @@ import validators
 from loguru import logger
 from PyQt5.QtCore import QRegExp
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
-
+import json
 
 # Custom loguru handler to redirect logs to QTextEdit
 class QTextEditLogger:
@@ -207,6 +207,18 @@ def remove_useless_data(text: str) -> str:
     logger.success("Removed Unhelpful and Descriptive Text")
     return " ".join(scrubbed)
 
+
+def serialize(record):
+    subset = {
+        "timestamp": record["time"].timestamp(),
+        "message": record["message"],
+        "level": record["level"].name,
+    }
+    return json.dumps(subset)
+
+def patching(record):
+    record["human_readable"] = serialize(record)
+    print(record)
 
 class WORKER_STATUS(Enum):
     CREATED = 1

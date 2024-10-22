@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import pathlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,8 @@ from utility import WORKER_STATUS
 from loguru import logger
 import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
-from tqdm import tqdm
+from tqdm_loggable.auto import tqdm
+import gradio as gr
 
 
 class MyEncoder(json.JSONEncoder):
@@ -222,10 +224,10 @@ class DataWrangler:
             logger.exception(f"Failed to reshape comment: {e}")
             raise RuntimeError("Comment reshaping failed") from e
 
-    def generate_json(
+    def generate_processed_tickets_json(
         self,
         filename: str = f"processed_tickets{datetime.now().strftime('%Y-%m-%d')}.json",
-    ) -> Tuple[TextIO, TextIO]:
+    ) -> str:
         """
         Generates JSON files for processed tickets and the associated corpus.
 
@@ -235,30 +237,11 @@ class DataWrangler:
             filename (str, optional): The name of the output file for processed tickets. Defaults to "processed_tickets" followed by the current date.
 
         Returns:
-            Tuple[TextIO, TextIO]: A tuple containing the file handles for the processed tickets and the corpus JSON files.
+            str: A tuple containing the paths to the processed tickets and the corpus JSON files.
 
         Raises:
             IOError: If there is an issue opening or writing to the output files.
         """
-
-        def construct_path(filename):
-            """
-            Constructs a file path for a given filename in the 'completed' directory.
-
-            This function takes a filename as input and returns the full path by joining the current working directory with the 'completed' directory and the provided filename. This ensures that the file is correctly located within the specified directory structure.
-
-            Args:
-                filename (str): The name of the file for which the path is to be constructed.
-
-            Returns:
-                str: The full path to the specified file in the 'completed' directory.
-            """
-            return os.path.join(pathlib.Path.cwd(), "completed", filename)
-
-        filename = construct_path(filename)
-        corpus_filename = construct_path(
-            f"corpus_{datetime.now().strftime('%Y-%m-%d')}.json"
-        )
 
         with open(filename, "w+") as output1:
             json.dump(
@@ -267,16 +250,33 @@ class DataWrangler:
                 indent=4,
                 cls=MyEncoder,
             )
+            logger.success(f"JSON output successfully generated for Processed Tickets located at {filename}")
+            return output1
+    
+    def generate_corpus_json(
+        self,ui_download_element, 
+        filename: str = f"corpus_{datetime.now().strftime('%Y-%m-%d')}.json", 
+    ) -> str:
+        """
+        Generates JSON files for corpus.
 
-            with open(corpus_filename, "w+") as output2:
-                json.dump(
-                    self.corpus,
-                    output2,
-                    indent=4,
-                    cls=MyEncoder,
-                )
-            return (output1, output2)
+        This function creates one JSON files containing the corpus data. The filenames are constructed based on the current date, and the function returns path for both files.
 
+        Args:
+            filename (str, optional): The name of the output file for processed tickets. Defaults to "corpus" followed by the current date.
+
+        Returns:
+            Tuple[TextIO, TextIO]: A tuple containing the paths to the processed tickets and the corpus JSON files.
+
+        Raises:
+            IOError: If there is an issue opening or writing to the output files.
+        """
+
+        with open(filename, "w+") as output2:
+            json.dump(self.corpus, output2, indent=4,cls=MyEncoder)
+            logger.success(f"JSON output successfully generated for Corpus located at {filename}")
+            ui_download_element.visible = True
+            return  output2.read()
     class WranglerWorker:
         """
         Represents a worker class for async processing tickets and their associated comments.
@@ -302,15 +302,13 @@ class DataWrangler:
             return f"{self.on_status} - {status}"
         def _cleanse(self, body_of_text: str) -> List[str]:
             """Cleanses the provided text by normalizing and unescaping each line."""
-            check_body = body_of_text.splitlines()
-            cleaned_lines = [
-                unicodedata.normalize("NFKC", unescape(line))
-                .replace("\n", " ")
-                .replace("\r", " ")
-                for line in check_body
-            ]
+            # check_body = [check_line for check_line in body_of_text.splitlines() if not re.search(r"^\"\"$",check_line) ]
+            # cleaned_lines = [
+            check_body = unicodedata.normalize("NFKC", unescape(body_of_text)).replace("\n", " ", -1).replace("\r", " ", -1).replace("  ", " ").split()
+            #     for line  in check_body if line != "\'\'"
+            # ]
             scrubbed = [
-                word for word in cleaned_lines
+                word for word in check_body
                 if not any(
                     [
                         validators.email(word),
@@ -321,103 +319,110 @@ class DataWrangler:
                     ]
                 )
             ]
-            logger.success("Successfully Cleansed Corpus")
-            return scrubbed
+            logger.debug("Successfully Cleansed Comment Data For Corpus")
 
-        def _bind_comments(self, ticket: Ticket,wranglerInstance):
+            return " ".join(scrubbed)
+
+        def _bind_comments(self, ticket: Ticket,wranglerInstance, progress=gr.Progress(track_tqdm=True)):
 
             """Helper method to bind comments to a single ticket."""
-            self.on_status = WORKER_STATUS.BUSY
             comments_found = False
-            for filename in wranglerInstance.comments_dir:
-                if filename.split()[-2] == ticket.id:       
-                    logger.info(f"Binding comments for ticket {ticket.id}")
+            no_comments_processed = 0 
+            for filename in tqdm(wranglerInstance.comments_dir):
+                file_ticket_no = filename.split("/")[-1]
+                file_ticket_no = int(file_ticket_no.split(".")[0])
+                if file_ticket_no == ticket.id:       
+
                     with open(filename, "r") as comments_file:
                         comments_data = json.load(comments_file)
                         for key, value in comments_data.items():
-                            for comment in value:
+                            for comment in tqdm(value):
+                                logger.debug(f"Binding {len(value)} comments for ticket {ticket.id}")
                                 reshaped_comment = self._reshaped_comment(comment)
-                                ticket.comments.append(reshaped_comment.to_dict_format())
+                                ticket.comments.append(reshaped_comment)
                                 comments_found = True
+                                no_comments_processed += 1
             if not comments_found:
                 logger.warning(f"No comments found for ticket {ticket.id}")
             self.on_status = WORKER_STATUS.FINISHED
-            return ticket
+            return (ticket, no_comments_processed)
 
-        def comments_bound(self, wranglerInstance) -> bool:
+        def comments_bound(self, wranglerInstance, progress=gr.Progress(track_tqdm=True)) -> bool:
             """Binds comments to the wrangled tickets asynchronously."""
             try:
-                futures = []
-                for ticket in wranglerInstance.wrangled_tickets:
-                    future = self.executor.submit(self._bind_comments, ticket)
-                    futures.append(future)
-                for future in futures:
-                    result = future.result()  # Wait for the result
-                    logger.info(f"Finished binding comments for ticket {result.id}")
-                logger.success("All comments bound successfully.")
+                total_comments_bound = 0
+                for ticket in tqdm(wranglerInstance.wrangled_tickets):
+                    future = self.executor.submit(lambda: self._bind_comments(ticket=ticket, wranglerInstance=wranglerInstance))
+                    total_comments_bound += future.result()[1]
+                    logger.debug(f"Finished binding comments for ticket {future.result()[0]['id']}")
+                logger.success(f"All {total_comments_bound} comments bound successfully.")
                 return True
             except Exception as e:
                 logger.exception(f"Error while binding comments: {e}")
                 return False
 
-        def tickets_reshaped(self, wranglerInstance) -> bool:
+        def tickets_reshaped(self, wranglerInstance, progress=gr.Progress(track_tqdm=True)) -> bool:
             """Reshapes ticket data from a JSON file into Ticket objects."""
             try:
                 with open(wranglerInstance.ticket_file, "r") as tickets_file:
                     tickets_data = json.load(tickets_file)
-                    for ticket_data in tickets_data:
+                    for ticket_data in tqdm(tickets_data):
                         reshaped_ticket = self._reshape_ticket(ticket_data)
                         wranglerInstance.wrangled_tickets.append(reshaped_ticket)
-                        logger.info(f"Appended ticket {reshaped_ticket.id} to wrangled tickets.")
+                        logger.debug(f"Appended ticket {reshaped_ticket.id} to wrangled tickets.")
                 logger.success(f"All {len(wranglerInstance.wrangled_tickets)} tickets reshaped successfully - {len(wranglerInstance.wrangled_tickets)/len(tickets_data) * 100} Success Rate")
                 return True
             except Exception as e:
                 logger.exception(f"Failed to reshape tickets: {e}")
                 return False
 
-        def create_corpus(self, wranglerInstance) -> List[str]:
+        def create_corpus(self, wranglerInstance,ui_download_element,  progress=gr.Progress(track_tqdm=True)) -> List[str]:
             """Creates a text corpus from the wrangled tickets and their comments."""
             corpus = []
             try:
-                for filename in wranglerInstance.comments_dir:
+                for filename in tqdm(wranglerInstance.comments_dir):
                     with open(filename, 'r') as file:
                         file = json.loads(file.read())
                         ticket_no = filename.split("/")[-1]
                         ticket_no = ticket_no.split(".")[0]
-                        for comment in file[ticket_no]:
+                        for comment in tqdm(file[ticket_no]):
                             cleansed_comment = self._cleanse(comment['plain_body'])
-                            corpus.extend(cleansed_comment)
-                logger.success("Corpus created successfully.")
-                wranglerInstance.generate_json()
-                return corpus
+                            corpus.append(cleansed_comment)
+                logger.debug("Corpus created successfully.")
+                final_corpus = " ".join(corpus)
+                wranglerInstance.corpus = final_corpus
+                wranglerInstance.generate_corpus_json(ui_download_element=ui_download_element)
+                return final_corpus
             except Exception as e:
                 logger.exception(f"Failed to create corpus: {e}")
-                return []
+                return " "
 
-        def run_async(self, wranglerInstance):
+        def run_async(self, wranglerInstance, ui_download_element):
             """Run the complete wrangling process asynchronously."""
             try:
-                self.on_status("Starting ticket reshaping...")
+                logger.log("APPLICATION MESSAGE", "Starting ticket reshaping...")
                 future_tickets = self.executor.submit(lambda: self.tickets_reshaped(wranglerInstance))
-                corpus_task = self.create_corpus(wranglerInstance=wranglerInstance)
-                if corpus_task:
-                    wranglerInstance.corpus = corpus_task
-                    self.on_status(f"Corpus created with {len(wranglerInstance.corpus)} entries.", task_complete=True)
+
+
+                if task := self.create_corpus(
+                    wranglerInstance=wranglerInstance, ui_download_element=ui_download_element
+                ):
+                    wranglerInstance.corpus = task
+                    logger.log("APPLICATION MESSAGE", f"Corpus created with {len(wranglerInstance.corpus)} entries. {str(task)}")
                 if future_tickets.result():
-                    self.on_status("Tickets reshaped successfully.", task_complete=True)
-                    self.on_status("Starting comment binding...")
+                    logger.log("APPLICATION MESSAGE", "Tickets reshaped successfully.")
+                    logger.log("APPLICATION MESSAGE", "Starting comment binding...")
                     future_comments = self.executor.submit(lambda: self.comments_bound(wranglerInstance=wranglerInstance))
                     if future_comments.result():
-                        self.on_status("Comments bound successfully.", task_complete=True)
-                        self.on_status("Creating corpus...")
-                 
+                        logger.log("APPLICATION MESSAGE", "Comments bound successfully.")
+
                     else:
-                        self.on_status("Failed to bind comments.", is_failure=True)
+                        logger.log("APPLICATION MESSAGE", "Failed to bind comments.")
                 else:
-                    self.on_status("Failed to reshape tickets.", is_failure=True)
+                    logger.log("APPLICATION MESSAGE", "Failed to reshape tickets.")
             except Exception as e:
                 logger.exception(f"Error in async processing: {e}")
-                self.on_status(f"Error: {e}", is_failure=True)
+                logger.log("APPLICATION MESSAGE", f"Error: {e}")
 
         def _reshape_ticket(self, ticket_data: dict):
             """Helper method to reshape ticket data into a Ticket object."""
@@ -441,9 +446,10 @@ class DataWrangler:
 
         def _reshaped_comment(self, comment_data: dict):
             """Helper method to reshape comment data."""
-            reshaped_comment = Comment(
+            return Comment(
                 id=comment_data.get("id", 0),
-                created_at=datetime.strptime(comment_data["created_at"], "%Y-%m-%dT%H:%M:%SZ"),
-                body=comment_data["body"]
+                created_at=datetime.strptime(
+                    comment_data["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                body=self._cleanse(comment_data["plain_body"]),
             )
-            return reshaped_comment

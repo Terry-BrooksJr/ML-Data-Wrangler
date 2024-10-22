@@ -1,0 +1,11 @@
+cleaned_lines
+Raised from https://learnositysupport.zendesk.com/agent/tickets/12249
+""
+We allow the user to attempt a question multiple times which is functionality the default API provides. We need to be able to record every attempt the student makes. Learnosity only records the most recent attempt so we use the metadata to store the information. We also had issues around questions backed by a data table so we store that data in the question response metadata.
+""
+As a feature request would it be possible to store all the student responses by default rather than us using the metadata?
+""
+""
+"  Kind Regards,"
+""
+Dmitry Kochnev

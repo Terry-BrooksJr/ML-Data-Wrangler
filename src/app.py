@@ -7,26 +7,34 @@ from typing import List, Tuple, Union
 from uuid import uuid4
 import en_core_web_lg
 import gradio as gr
-from gradio import HTML, Interface, LinePlot, Row
 from loguru import logger
 from utility import WORKER_STATUS
+import warnings
 
 from LDA_logic import LatentDirichletAllocator, stopwords
-from utility import LogHighlighter, QTextEditStream
+from utility import patching, serialize
 from wrangler import DataWrangler
-
+from tqdm_loggable.auto import tqdm
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
 
+logger.remove(0)
+fmt = "<green>{time}</> |<bold> {level: <8}</bold> |<white> {message}</white>"
 
-import os
-import pathlib
-import sys
-import warnings
-from typing import List, Tuple
+showwarning_ = warnings.showwarning
+def log_filter(record):
+    return record["level"].no >= logger.level("INFO").no
+ 
+def showwarning(message, *args, **kwargs):
+    logger.warning(message)
+    showwarning_(message, *args, **kwargs)
 
-import gradio as gr
-from utility import QTextEditStream
+warnings.showwarning = showwarning
+# logger = logger.patch(patching)
+# logger.add(sys.stderr, serialize=True, )
+logger.add(sys.stdout, colorize=True, format = fmt, filter=log_filter)
+# logger.add(os.path.join(pathlib.Path.cwd(), "logs", "wrangle_logs.log"),  level="DEBUG", serialize=True, )
+logger.level("APPLICATION MESSAGE", no=26)
 
 
 # Wrangling and Allocator initialization
@@ -44,7 +52,7 @@ def select_ticket_file(ticket_file:str) -> str:
 
 
 # Function to select comments directory
-def select_comments_dir(comments_dir:list[str]) -> List[str]:
+def select_comments_dir(comments_dir:List[str]) -> List[str]:
     wrangler.comments_dir = comments_dir
     logger.info(f"Comments Directory Selected: {comments_dir}")
     return comments_dir
@@ -84,12 +92,12 @@ def train_model(num_topics, iterations, passes):
 
 # Function to present the results
 def present_results():
-    top_topics = allocator.get_top_5_topic()
-    if top_topics:
+    if top_topics := allocator.get_top_5_topic():
         return f"Top 5 Topics: {top_topics}"
     else:
         return "Error loading top five topics."
-
+def download_corpus(output):
+    return output
 
 
 theme = gr.themes.Ocean(
@@ -123,8 +131,13 @@ with gr.Blocks(theme=theme) as demo:
                 process_output = gr.Textbox( interactive=False, placeholder=f'Hello, {os.getenv("USER", "Learnosity Support Engineer")}! Status updates, overall progress and errors  for the Data preparation stage will show here.', lines=15, container=True)
         with gr.Row():
             process_button = gr.Button("Prepare Data For Training", interactive=True)
+            certify_corpus = gr.Button("Certify Corpus 🗂️", interactive=True)
+            output_file = gr.File(label="Download your file here:", visible=False)
+
             
-            process_button.click(fn=lambda:wrangle_worker.run_async(wrangler), inputs=None, outputs=[process_output])
+            process_button.click(fn=lambda:wrangle_worker.run_async(wranglerInstance=wrangler, ui_download_element=output_file), inputs=None, outputs=[process_output])
+
+            certify_corpus.click(fn=lambda:wrangler.generate_corpus_json(ui_download_element=output_file), inputs=None, outputs=output_file)
     
 
     

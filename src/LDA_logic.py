@@ -1,7 +1,7 @@
 import random
 from typing import List, Tuple, Union, Callable
 from PyQt5.QtWidgets import QMessageBox
-from tqdm import tqdm
+from tqdm_loggable.auto import tqdm
 import en_core_web_lg
 import matplotlib.pyplot as plt
 import nltk
@@ -217,7 +217,7 @@ class LatentDirichletAllocator:
 
             try:
                 if self.prelemma_corpus:
-                    logger.info("Lemmatizing Corpus...")
+                    logger.info("Lemmatized Corpus...")
                     unprocessed_corpus = nlp.pipe(self.prelemma_corpus)
                     for i, comment in tqdm(enumerate(unprocessed_corpus)):
                         proj_tok = [
@@ -243,12 +243,9 @@ class LatentDirichletAllocator:
                 self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
 
                 logger.success("Successfully Processed Corpus")
-                if callback:
-                    callback(success=True)
+
             except Exception as e:
                 logger.exception("FAILED to Process Data")
-                if callback:
-                    callback(error=str(e))
 
         def preprocess_input_data(self, nlp, wrangler_instance=None, callback=None):
             """
