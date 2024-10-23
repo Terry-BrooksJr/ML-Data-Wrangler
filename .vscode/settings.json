@@ -5,6 +5,7 @@
         "dtype",
         "ldamodel",
         "lemmatization",
+        "loggable",
         "Matcheo",
         "msleep",
         "Multicore",

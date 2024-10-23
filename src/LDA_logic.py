@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from wrangler import DataWrangler
 import gradio as gr
+
 nltk.download("stopwords")
 sns.set_theme()
 
@@ -32,7 +33,11 @@ class LatentDirichletAllocator:
     coherence values, enabling effective topic modeling on the provided corpus.
     """
 
-    def __init__(self,  num_of_topics: int, prelemma_corpus:str=None,) -> None:
+    def __init__(
+        self,
+        num_of_topics: int,
+        prelemma_corpus: str = None,
+    ) -> None:
         """
         Initializes the LatentDirichletAllocator with a corpus and number of topics.
 
@@ -134,7 +139,6 @@ class LatentDirichletAllocator:
         """
         return self.topics[:5]
 
- 
     class LDAModelWorker:
         """
         A class for managing the training of a Latent Dirichlet Allocation (LDA) model.
@@ -148,6 +152,7 @@ class LatentDirichletAllocator:
             topics (list): A list to store the number of topics evaluated.
             coherence_values (list): A list to store coherence values for each topic count.
         """
+
         def __init__(self, on_status: Callable[[str], None]):
             """
             Initializes the LDAModelWorker with empty attributes for tokens, corpus, and model evaluation metrics.
@@ -175,7 +180,9 @@ class LatentDirichletAllocator:
                 return False, "Passes should be < 20 and iterations < 200."
             return True, ""
 
-        def train_model(self, passes: int, iterations: int, number_of_topics: int, callback=None):
+        def train_model(
+            self, passes: int, iterations: int, number_of_topics: int, callback=None
+        ):
             """
             Trains the model using the specified parameters for topics, iterations, and passes.
             This method validates the input values and initiates the training process in a separate thread.
@@ -201,7 +208,12 @@ class LatentDirichletAllocator:
                 return
 
             def train():
-                if self.model_trained(iterations=iterations, workers=4, passes=passes, num_of_topics=number_of_topics):
+                if self.model_trained(
+                    iterations=iterations,
+                    workers=4,
+                    passes=passes,
+                    num_of_topics=number_of_topics,
+                ):
                     logger.success("Model successfully trained!")
                     if callback:
                         callback(success=True)
@@ -209,11 +221,19 @@ class LatentDirichletAllocator:
             thread = threading.Thread(target=train)
             thread.start()
 
-        def process_corpus(self, nlp, stopwords, wrangler_instance, progress=gr.Progress(track_tqdm=True)):
+        def process_corpus(
+            self,
+            nlp,
+            stopwords,
+            wrangler_instance,
+            progress=gr.Progress(track_tqdm=True),
+        ):
             """
             Pre-processes the data by reshaping the corpus and generating tokens from the input text.
             """
-            logger.info("Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictionary Creation")
+            logger.info(
+                "Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictionary Creation"
+            )
 
             try:
                 if self.prelemma_corpus:
@@ -224,17 +244,30 @@ class LatentDirichletAllocator:
                             token.lemma_.lower()
                             for token in comment
                             if (
-                                token.pos_ not in ["ADV", "PRON", "PUNCT", "PART", "DET", "ADP", "SPACE", "NUM", "SYM"]
+                                token.pos_
+                                not in [
+                                    "ADV",
+                                    "PRON",
+                                    "PUNCT",
+                                    "PART",
+                                    "DET",
+                                    "ADP",
+                                    "SPACE",
+                                    "NUM",
+                                    "SYM",
+                                ]
                                 and token.lemma_.lower() not in stopwords
                                 and not token.is_stop
                                 and token.is_alpha
                             )
                         ]
                         self._tokens.append(proj_tok)
-    
+
                     logger.info("Lemmatization Completed")
                 else:
-                    logger.info("Prelemma Corpus is empty. Regenerating Corpus using DataWrangler")
+                    logger.info(
+                        "Prelemma Corpus is empty. Regenerating Corpus using DataWrangler"
+                    )
                     self.prelemma_corpus = wrangler_instance.create_corpus()
 
                 logger.debug(f"Token Length:{len(self._tokens)}")
@@ -261,43 +294,52 @@ class LatentDirichletAllocator:
                 None
             """
             try:
-                self.process_corpus(nlp, stopwords, wrangler_instance, callback=callback)
+                self.process_corpus(
+                    nlp, stopwords, wrangler_instance, callback=callback
+                )
             except Exception as e:
                 logger.exception("Failed to Preprocess Data")
                 if callback:
                     callback(error=str(e))
 
         def model_trained(self, callback=None):
-            def train( progress=gr.Progress(track_tqdm=True)):
+            def train(progress=gr.Progress(track_tqdm=True)):
                 """
-                    Trains the LDA model concurrently for a specified range of topic counts.
-                    This function utilizes a thread pool to train multiple models simultaneously and collects their coherence values.
+                Trains the LDA model concurrently for a specified range of topic counts.
+                This function utilizes a thread pool to train multiple models simultaneously and collects their coherence values.
 
-                    Args:
-                        workers (int): The number of worker threads to use during training.
-                        num_of_topics (int): The number of topics to evaluate during training.
-                        iterations (int): The number of iterations for the LDA model training.
-                        passes (int): The number of passes through the corpus during training.
-                        callback (function, optional): A callback function to handle progress updates or errors.
+                Args:
+                    workers (int): The number of worker threads to use during training.
+                    num_of_topics (int): The number of topics to evaluate during training.
+                    iterations (int): The number of iterations for the LDA model training.
+                    passes (int): The number of passes through the corpus during training.
+                    callback (function, optional): A callback function to handle progress updates or errors.
 
-                    Returns:
-                        None
+                Returns:
+                    None
 
-                    Raises:
-                        Exception: Logs an error if the training process fails.
+                Raises:
+                    Exception: Logs an error if the training process fails.
                 """
                 try:
                     with self.executor as executor:
                         futures = []
                         for i in tqdm(range(1, self.num_topics + 1)):
-                            futures.append(executor.submit(self._train_single_model, i, self.iterations, self.passes))
+                            futures.append(
+                                executor.submit(
+                                    self._train_single_model,
+                                    i,
+                                    self.iterations,
+                                    self.passes,
+                                )
+                            )
 
                         for future in futures:
                             result = future.result()  # Blocks until the result is ready
-                            self.topics.append(result['topics'])
-                            self.coherence_values.append(result['coherence'])
+                            self.topics.append(result["topics"])
+                            self.coherence_values.append(result["coherence"])
                             if callback:
-                                callback(progress=result['topics'])
+                                callback(progress=result["topics"])
 
                     if callback:
                         callback(success=True)
@@ -310,7 +352,12 @@ class LatentDirichletAllocator:
             thread = threading.Thread(target=train)
             thread.start()
 
-        def _train_single_model(self, i, iterations, passes, ):
+        def _train_single_model(
+            self,
+            i,
+            iterations,
+            passes,
+        ):
             lda_model = self.get_lda_model(
                 iterations=iterations, workers=4, passes=passes, num_of_topics=i
             )
@@ -327,9 +374,9 @@ class LatentDirichletAllocator:
                 dict: A dictionary containing the number of topics and the corresponding coherence value.
             """
             cm = CoherenceModel(
-            model=lda_model,
-            corpus=self.corpus,
-            dictionary=self.id2word,
-            coherence="c_v",
-        )
-            return {'topics': i, 'coherence': cm.get_coherence()}
+                model=lda_model,
+                corpus=self.corpus,
+                dictionary=self.id2word,
+                coherence="c_v",
+            )
+            return {"topics": i, "coherence": cm.get_coherence()}

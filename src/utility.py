@@ -7,6 +7,7 @@ from PyQt5.QtCore import QRegExp
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 import json
 
+
 # Custom loguru handler to redirect logs to QTextEdit
 class QTextEditLogger:
     """A logger that outputs messages to a QTextEdit widget using Loguru.
@@ -177,7 +178,21 @@ class LogHighlighter(QSyntaxHighlighter):
                 self.setFormat(index, length, format)
                 index = expression.indexIn(text, index + length)
 
+class Logger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
 
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
+    def isatty(self):
+        return False    
 def remove_useless_data(text: str) -> str:
     """
     Filters out unhelpful data from the input text by removing specific patterns.
@@ -216,9 +231,11 @@ def serialize(record):
     }
     return json.dumps(subset)
 
+
 def patching(record):
     record["human_readable"] = serialize(record)
     print(record)
+
 
 class WORKER_STATUS(Enum):
     CREATED = 1

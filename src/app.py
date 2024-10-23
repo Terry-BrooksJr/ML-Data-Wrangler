@@ -8,7 +8,7 @@ from uuid import uuid4
 import en_core_web_lg
 import gradio as gr
 from loguru import logger
-from utility import WORKER_STATUS
+from utility import WORKER_STATUS, Logger
 import warnings
 
 from LDA_logic import LatentDirichletAllocator, stopwords
@@ -20,7 +20,7 @@ stop_words: List[str] = stopwords.words("english")
 
 logger.remove(0)
 fmt = "<green>{time}</> |<bold> {level: <8}</bold> |<white> {message}</white>"
-
+logfile = os.path.join(pathlib.Path.cwd(), "output.log")
 showwarning_ = warnings.showwarning
 def log_filter(record):
     return record["level"].no >= logger.level("INFO").no
@@ -29,6 +29,8 @@ def showwarning(message, *args, **kwargs):
     logger.warning(message)
     showwarning_(message, *args, **kwargs)
 
+sys.stdout = Logger(logfile)
+
 warnings.showwarning = showwarning
 # logger = logger.patch(patching)
 # logger.add(sys.stderr, serialize=True, )
@@ -36,7 +38,7 @@ logger.add(sys.stdout, colorize=True, format = fmt, filter=log_filter)
 # logger.add(os.path.join(pathlib.Path.cwd(), "logs", "wrangle_logs.log"),  level="DEBUG", serialize=True, )
 logger.level("APPLICATION MESSAGE", no=26)
 
-
+logger.log("APPLICATION MESSAGE", "Starting Data Wrangler..")
 # Wrangling and Allocator initialization
 wrangler = DataWrangler()
 wrangle_worker = wrangler.WranglerWorker(on_status=WORKER_STATUS.CREATED)
@@ -57,7 +59,11 @@ def select_comments_dir(comments_dir:List[str]) -> List[str]:
     logger.info(f"Comments Directory Selected: {comments_dir}")
     return comments_dir
 
-
+def read_logs():
+    sys.stdout.flush()
+    with open(logfile, "w+") as f:
+        return f.read()
+    
 # Function to process the data
 def process_data():
     try:
@@ -109,14 +115,15 @@ with gr.Blocks(theme=theme) as demo:
     with gr.Row():
         gr.Markdown("## Zendesk Ticket Data Wrangler and LDA Processor")
 
-        gr.Markdown("""
+        gr.Markdown(
+            """
             ### Instructions:
             1. Select the ticket file from the ZenDesk Tickets API.
             2. Select the comments directory with JSON comments for each ticket.
             3. Configure the number of topics, iterations, and passes.
             4. Train the LDA model.
-        """)
-    with gr.Tab("Data Perpetration"):
+            """)
+    with gr.Tab("Data Perpetration 🤼‍♀️"):
         with gr.Row():
             ticket_file = gr.FileExplorer(glob="*/**.json", file_count="single", label="Select Path to Ticket File")
             comments_dir = gr.FileExplorer(glob="*/**.json", label="Select Path to Comments Directory",  interactive=True, )
@@ -131,21 +138,21 @@ with gr.Blocks(theme=theme) as demo:
                 process_output = gr.Textbox( interactive=False, placeholder=f'Hello, {os.getenv("USER", "Learnosity Support Engineer")}! Status updates, overall progress and errors  for the Data preparation stage will show here.', lines=15, container=True)
         with gr.Row():
             process_button = gr.Button("Prepare Data For Training", interactive=True)
-            certify_corpus = gr.Button("Certify Corpus 🗂️", interactive=True)
-            output_file = gr.File(label="Download your file here:", visible=False)
+            certify_corpus = gr.Button("Certify Corpus 🗂️", interactive=False)
+        with gr.Row():
+            output_file = gr.File(label="Download your file here", visible=False)
 
             
-            process_button.click(fn=lambda:wrangle_worker.run_async(wranglerInstance=wrangler, ui_download_element=output_file), inputs=None, outputs=[process_output])
-
+        
             certify_corpus.click(fn=lambda:wrangler.generate_corpus_json(ui_download_element=output_file), inputs=None, outputs=output_file)
     
 
     
-    with gr.Tab("Model Training"):
+    with gr.Tab("Model Training 🏋️‍♀️"):
         # Form inputs for model training
         with gr.Row():
             num_topics_input = gr.Number(label="Number of Topics")
-            iterations_input = gr.Number(label="Iterations")
+            iterations_input = gr.Number(label="📊Iterations")
             workers_input = gr.Number(label="CPU Workers", interactive=False, value=2, info="This is not configurable")
             passes_input = gr.Number(label="Passes")
         with gr.Row():
@@ -163,7 +170,10 @@ with gr.Blocks(theme=theme) as demo:
             outputs=train_output
         )
 
+    process_button.click(fn=lambda:wrangle_worker.run_async(wranglerInstance=wrangler, ui_download_element=output_file, training_btn_ui_element=train_button, certify_corpus_element=certify_corpus), inputs=None, outputs=[process_output])
 
+    demo.load(read_logs, None, process_output)
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch()
 
+0

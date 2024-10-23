@@ -254,7 +254,7 @@ class DataWrangler:
             return output1
     
     def generate_corpus_json(
-        self,ui_download_element, 
+        self,ui_download_element, certify_corpus_element,
         filename: str = f"corpus_{datetime.now().strftime('%Y-%m-%d')}.json", 
     ) -> str:
         """
@@ -275,7 +275,8 @@ class DataWrangler:
         with open(filename, "w+") as output2:
             json.dump(self.corpus, output2, indent=4,cls=MyEncoder)
             logger.success(f"JSON output successfully generated for Corpus located at {filename}")
-            ui_download_element.visible = True
+            gr.update(visible=ui_download_element)
+            gr.update(interactive=certify_corpus_element)
             return  output2.read()
     class WranglerWorker:
         """
@@ -376,7 +377,7 @@ class DataWrangler:
                 logger.exception(f"Failed to reshape tickets: {e}")
                 return False
 
-        def create_corpus(self, wranglerInstance,ui_download_element,  progress=gr.Progress(track_tqdm=True)) -> List[str]:
+        def create_corpus(self, wranglerInstance,certify_corpus_element,ui_download_element,  progress=gr.Progress(track_tqdm=True)) -> List[str]:
             """Creates a text corpus from the wrangled tickets and their comments."""
             corpus = []
             try:
@@ -391,13 +392,13 @@ class DataWrangler:
                 logger.debug("Corpus created successfully.")
                 final_corpus = " ".join(corpus)
                 wranglerInstance.corpus = final_corpus
-                wranglerInstance.generate_corpus_json(ui_download_element=ui_download_element)
+                wranglerInstance.generate_corpus_json(ui_download_element=ui_download_element, certify_corpus_element=certify_corpus_element)
                 return final_corpus
             except Exception as e:
                 logger.exception(f"Failed to create corpus: {e}")
                 return " "
 
-        def run_async(self, wranglerInstance, ui_download_element):
+        def run_async(self, wranglerInstance, ui_download_element, training_btn_ui_element, certify_corpus_element):
             """Run the complete wrangling process asynchronously."""
             try:
                 logger.log("APPLICATION MESSAGE", "Starting ticket reshaping...")
@@ -405,7 +406,7 @@ class DataWrangler:
 
 
                 if task := self.create_corpus(
-                    wranglerInstance=wranglerInstance, ui_download_element=ui_download_element
+                    wranglerInstance=wranglerInstance, ui_download_element=ui_download_element, certify_corpus_element=certify_corpus_element
                 ):
                     wranglerInstance.corpus = task
                     logger.log("APPLICATION MESSAGE", f"Corpus created with {len(wranglerInstance.corpus)} entries. {str(task)}")
@@ -415,6 +416,8 @@ class DataWrangler:
                     future_comments = self.executor.submit(lambda: self.comments_bound(wranglerInstance=wranglerInstance))
                     if future_comments.result():
                         logger.log("APPLICATION MESSAGE", "Comments bound successfully.")
+                        gr.update(interactive=training_btn_ui_element)
+                        logger.log("APPLICATION MESSAGE", "All Data Preparation steps have successfully completed. Please either select below to certify the contents of the corpus, or click the 'Model Training' tab at the top to continue")
 
                     else:
                         logger.log("APPLICATION MESSAGE", "Failed to bind comments.")
