@@ -12,7 +12,6 @@ from typing import List, TextIO, Tuple, Union, Callable
 from utility import WORKER_STATUS
 from loguru import logger
 import validators
-from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from tqdm_loggable.auto import tqdm
 import gradio as gr
 
@@ -184,8 +183,8 @@ class DataWrangler:
                 comments_dir: The directory where comment files are stored.
                 ticket_file: The path to the JSON file containing ticket data.
             """
-            self.ticket_file = None
-            self.comments_dir = None
+            self.ticket_file: str = None
+            self.comments_dir: str = None
             self.wrangled_tickets: List[Ticket] = []
             self.corpus: str = ""
 
@@ -278,6 +277,18 @@ class DataWrangler:
             gr.update(visible=ui_download_element)
             gr.update(interactive=certify_corpus_element)
             return  output2.read()
+        
+    def is_ready(self) -> bool:
+        return (
+            self.comments_dir is not None
+            and self.comments_dir != ""
+            and isinstance(self.comments_dir, str)
+            and (
+                self.ticket_file is not None
+                and self.ticket_file != ""
+                and isinstance(self.ticket_file, str)
+            )
+        )
     class WranglerWorker:
         """
         Represents a worker class for async processing tickets and their associated comments.
@@ -377,7 +388,7 @@ class DataWrangler:
                 logger.exception(f"Failed to reshape tickets: {e}")
                 return False
 
-        def create_corpus(self, wranglerInstance,certify_corpus_element,ui_download_element,  progress=gr.Progress(track_tqdm=True)) -> List[str]:
+        def create_corpus(self, wranglerInstance, progress=gr.Progress(track_tqdm=True)) -> List[str]:
             """Creates a text corpus from the wrangled tickets and their comments."""
             corpus = []
             try:
@@ -392,37 +403,34 @@ class DataWrangler:
                 logger.debug("Corpus created successfully.")
                 final_corpus = " ".join(corpus)
                 wranglerInstance.corpus = final_corpus
-                wranglerInstance.generate_corpus_json(ui_download_element=ui_download_element, certify_corpus_element=certify_corpus_element)
+                wranglerInstance.generate_corpus_json()
                 return final_corpus
             except Exception as e:
                 logger.exception(f"Failed to create corpus: {e}")
                 return " "
 
-        def run_async(self, wranglerInstance, ui_download_element, training_btn_ui_element, certify_corpus_element):
+        def run_async(self, wranglerInstance):
             """Run the complete wrangling process asynchronously."""
             try:
                 logger.log("APPLICATION MESSAGE", "Starting ticket reshaping...")
                 future_tickets = self.executor.submit(lambda: self.tickets_reshaped(wranglerInstance))
-
-
-                if task := self.create_corpus(
-                    wranglerInstance=wranglerInstance, ui_download_element=ui_download_element, certify_corpus_element=certify_corpus_element
-                ):
-                    wranglerInstance.corpus = task
-                    logger.log("APPLICATION MESSAGE", f"Corpus created with {len(wranglerInstance.corpus)} entries. {str(task)}")
                 if future_tickets.result():
-                    logger.log("APPLICATION MESSAGE", "Tickets reshaped successfully.")
-                    logger.log("APPLICATION MESSAGE", "Starting comment binding...")
-                    future_comments = self.executor.submit(lambda: self.comments_bound(wranglerInstance=wranglerInstance))
-                    if future_comments.result():
-                        logger.log("APPLICATION MESSAGE", "Comments bound successfully.")
-                        gr.update(interactive=training_btn_ui_element)
-                        logger.log("APPLICATION MESSAGE", "All Data Preparation steps have successfully completed. Please either select below to certify the contents of the corpus, or click the 'Model Training' tab at the top to continue")
+                   ( corpus_task := self.executor.submit(lambda: self.create_corpus(wranglerInstance=wranglerInstance  )))
+                   if corpus_task.result():
+                        wranglerInstance.corpus = corpus_task
+                        logger.log("APPLICATION MESSAGE", f"Corpus created with {len(wranglerInstance.corpus)} entries.")
+                        if future_comments := self.executor.submit(lambda: self.comments_bound(wranglerInstance=wranglerInstance)):
+                            logger.log("APPLICATION MESSAGE", "Tickets reshaped successfully.")
+                            logger.log("APPLICATION MESSAGE", "Starting comment binding...")
+                            logger.log("APPLICATION MESSAGE", "Comments bound successfully.")
+                            return True
 
-                    else:
-                        logger.log("APPLICATION MESSAGE", "Failed to bind comments.")
+                        else:
+                            logger.log("APPLICATION MESSAGE", "Failed to bind comments.")
+                            return False
                 else:
                     logger.log("APPLICATION MESSAGE", "Failed to reshape tickets.")
+                    return False
             except Exception as e:
                 logger.exception(f"Error in async processing: {e}")
                 logger.log("APPLICATION MESSAGE", f"Error: {e}")

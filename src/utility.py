@@ -34,7 +34,6 @@ class QTextEditLogger:
         logger.remove()
         logger.add(
             self._write_to_text_edit,
-            format="{time:w} | {level} | {message}",
             level="INFO",
         )
 
@@ -78,6 +77,7 @@ class QTextEditStream:
         as flushing is not necessary for this implementation.
         """
         pass
+
 
 
 class LogHighlighter(QSyntaxHighlighter):

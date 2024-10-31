@@ -21,6 +21,7 @@ pyldavis = "^3.4.1"
 scipy = "1.12"
 validators = "^0.34.0"
 tqdm-loggable = "^0.2"
+gradio-log = "^0.0.4"
 
 [tool.poetry.group.dev.dependencies]
 isort = "*"

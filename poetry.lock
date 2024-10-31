@@ -985,13 +985,13 @@ test = ["coverage[toml]", "ddt (>=1.1.1,!=1.4.3)", "mock", "mypy", "pre-commit",
 
 [[package]]
 name = "gradio"
-version = "5.0.1"
+version = "4.44.1"
 description = "Python library for easily interacting with trained machine learning models"
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.8"
 files = [
-    {file = "gradio-5.0.1-py3-none-any.whl", hash = "sha256:db731c154372599760ba55cc885872da8fee6029cc2cf16099e1471840dbede4"},
-    {file = "gradio-5.0.1.tar.gz", hash = "sha256:fb05b2286eda447d9750864049bf1af8f6d835137629c41735ab2d24c4cf7cca"},
+    {file = "gradio-4.44.1-py3-none-any.whl", hash = "sha256:c908850c638e4a176b22f95a758ce6a63ffbc2a7a5a74b23186ceeeedc23f4d9"},
+    {file = "gradio-4.44.1.tar.gz", hash = "sha256:a68a52498ac6b63f8864ef84bf7866a70e7d07ebe913edf921e1d2a3708ad5ae"},
 ]
 
 [package.dependencies]
@@ -999,11 +999,13 @@ aiofiles = ">=22.0,<24.0"
 anyio = ">=3.0,<5.0"
 fastapi = "<1.0"
 ffmpy = "*"
-gradio-client = "1.4.0"
+gradio-client = "1.3.0"
 httpx = ">=0.24.1"
-huggingface-hub = ">=0.25.1"
+huggingface-hub = ">=0.19.3"
+importlib-resources = ">=1.3,<7.0"
 jinja2 = "<4.0"
 markupsafe = ">=2.0,<3.0"
+matplotlib = ">=3.0,<4.0"
 numpy = ">=1.0,<3.0"
 orjson = ">=3.0,<4.0"
 packaging = "*"
@@ -1018,7 +1020,7 @@ semantic-version = ">=2.0,<3.0"
 tomlkit = "0.12.0"
 typer = {version = ">=0.12,<1.0", markers = "sys_platform != \"emscripten\""}
 typing-extensions = ">=4.0,<5.0"
-urllib3 = {version = ">=2.0,<3.0", markers = "sys_platform == \"emscripten\""}
+urllib3 = ">=2.0,<3.0"
 uvicorn = {version = ">=0.14.0", markers = "sys_platform != \"emscripten\""}
 
 [package.extras]
@@ -1026,13 +1028,13 @@ oauth = ["authlib", "itsdangerous"]
 
 [[package]]
 name = "gradio-client"
-version = "1.4.0"
+version = "1.3.0"
 description = "Python library for easily interacting with trained machine learning models"
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.8"
 files = [
-    {file = "gradio_client-1.4.0-py3-none-any.whl", hash = "sha256:6cd0f2c7b83fbab1db904e577c19bccc518dc7a2e8ea02cf3e13f8a9510d83f7"},
-    {file = "gradio_client-1.4.0.tar.gz", hash = "sha256:bb24af01176774122f0c35e9a18f51047a22b457e6d667ba3cd7c7dfae17cd8d"},
+    {file = "gradio_client-1.3.0-py3-none-any.whl", hash = "sha256:20c40cb4d56e18de1a025ccf58079f08a304e4fb2dfbcf7c2352815b2cb31091"},
+    {file = "gradio_client-1.3.0.tar.gz", hash = "sha256:d904afeae4f5682add0a6a263542c10e7669ff6c9de0a53a5c2fc9b719a24bb8"},
 ]
 
 [package.dependencies]
@@ -1042,6 +1044,23 @@ huggingface-hub = ">=0.19.3"
 packaging = "*"
 typing-extensions = ">=4.0,<5.0"
 websockets = ">=10.0,<13.0"
+
+[[package]]
+name = "gradio-log"
+version = "0.0.4"
+description = "A Log component for Gradio which can easily show some log file in the interface."
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "gradio_log-0.0.4-py3-none-any.whl", hash = "sha256:0fba5e6a44435f5bbd3da6e05389dd2b592f7e29f9f30f39f739f09b21d26047"},
+    {file = "gradio_log-0.0.4.tar.gz", hash = "sha256:5efd29476d53641b7b35672824f5f205ccfdc7cbfa0f17bb65d685471d86fd16"},
+]
+
+[package.dependencies]
+gradio = ">=4.0,<5.0"
+
+[package.extras]
+dev = ["build", "twine"]
 
 [[package]]
 name = "h11"
@@ -1147,6 +1166,25 @@ files = [
 
 [package.extras]
 all = ["flake8 (>=7.1.1)", "mypy (>=1.11.2)", "pytest (>=8.3.2)", "ruff (>=0.6.2)"]
+
+[[package]]
+name = "importlib-resources"
+version = "6.4.5"
+description = "Read resources from Python packages"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "importlib_resources-6.4.5-py3-none-any.whl", hash = "sha256:ac29d5f956f01d5e4bb63102a5a19957f1b9175e45649977264a1416783bb717"},
+    {file = "importlib_resources-6.4.5.tar.gz", hash = "sha256:980862a1d16c9e147a59603677fa2aa5fd82b87f223b6cb870695bcfce830065"},
+]
+
+[package.extras]
+check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1)"]
+cover = ["pytest-cov"]
+doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "rst.linker (>=1.9)", "sphinx (>=3.5)", "sphinx-lint"]
+enabler = ["pytest-enabler (>=2.2)"]
+test = ["jaraco.test (>=5.4)", "pytest (>=6,!=8.1.*)", "zipp (>=3.17)"]
+type = ["pytest-mypy"]
 
 [[package]]
 name = "ipykernel"
@@ -4210,4 +4248,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10.0"
-content-hash = "fe0b3522439b9b63baeb4382110f4ed878bce11de55384e91f1fe3d8cfd1ca92"
+content-hash = "65c057958be2435fc426f662a318125d881b31a707674ec54aff3017b3977653"
