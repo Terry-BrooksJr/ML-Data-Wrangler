@@ -178,6 +178,9 @@ class LogHighlighter(QSyntaxHighlighter):
                 self.setFormat(index, length, format)
                 index = expression.indexIn(text, index + length)
 
+def _normalize_word_case(word:str) -> str:
+    return word.lower()
+
 class Logger:
     def __init__(self, filename):
         self.terminal = sys.stdout
@@ -209,7 +212,7 @@ def remove_useless_data(text: str) -> str:
         None
     """
     scrubbed = [
-        word
+        _normalize_word_case(word)
         for word in text
         if not (
             validators.email(word)
