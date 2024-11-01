@@ -268,7 +268,7 @@ class DataWrangler:
             Tuple[TextIO, TextIO]: A tuple containing the paths to the processed tickets and the corpus JSON files.
 
         Raises:
-            IOError: If there is an issue opening or writing to the output files.
+            IOError: ...If there is an issue opening or writing to the output files.
         """
 
         with open(filename, "w+") as output2:
@@ -279,16 +279,12 @@ class DataWrangler:
             return  output2.read()
         
     def is_ready(self) -> bool:
-        return (
-            self.comments_dir is not None
-            and self.comments_dir != ""
-            and isinstance(self.comments_dir, str)
-            and (
-                self.ticket_file is not None
-                and self.ticket_file != ""
-                and isinstance(self.ticket_file, str)
-            )
-        )
+        def is_non_empty_string(value):
+            return isinstance(value, str) and value != ""
+
+        return is_non_empty_string(self.comments_dir) and is_non_empty_string(self.ticket_file)
+
+
     class WranglerWorker:
         """
         Represents a worker class for async processing tickets and their associated comments.

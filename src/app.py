@@ -10,7 +10,7 @@ from LDA_logic import LatentDirichletAllocator, stopwords
 from wrangler import DataWrangler
 from loguru import logger
 import sys
-from gradio_log import Log
+from componets import Log
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
@@ -155,7 +155,6 @@ with gr.Blocks() as demo:
 
         train_button.click(fn=train_model, inputs=[num_topics_input, iterations_input, passes_input], outputs=train_output)
 
-    demo.load(fn=lambda: "Loading logs...", inputs=None, outputs=process_output)
 
 if __name__ == "__main__":
-    demo.queue().launch()
+    demo.launch()
