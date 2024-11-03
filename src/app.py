@@ -11,7 +11,7 @@ from wrangler import DataWrangler
 from loguru import logger
 import sys
 from componets import Log
-
+import datetime
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
 
@@ -24,6 +24,18 @@ logger.level('APPLICATION MESSAGE', no=26)
 
 def log_warning(message, category, filename, lineno, file=None, line=None):
     logger.warning(f" {message}")
+    return gr.update("")
+
+def clear_log():
+    with open(log_file, 'w+') as log:
+        logger.warning('Log Clear Command Recieved')
+        backup_log_name = os.path.join(pathlib.Path.cwd(),f"backup of logfile_{datetime.datetime.strftime(datetime.datetime.now(),'%Y-%M%DT%H:%M:%SZ')}.log")
+        with open(backup_log_name, 'w+') as backup_log:
+            logger.log('APPLICATION MESSAGE',f"Achiving Logs as {backup_log_name}")
+            for line in log:
+                backup_log.write(line)
+        log.write("")
+        logger.success('Logs sucessfully archived and cleared')
 
 
 warnings.showwarning = log_warning
@@ -127,8 +139,10 @@ with gr.Blocks() as demo:
 
         with gr.Row():  
             process_output = gr.Textbox(interactive=False, lines=15)
-            Log(log_file, dark=True, label="Training Output", show_label=True)
-        
+            with gr.Row():
+                Log(log_file, dark=True, label="Training Output", show_label=True)
+                clear_log = gr.Button("Clear Log", interactive=True)
+
         with gr.Row():
             process_button = gr.Button("Prepare Data For Training", interactive=True)
             certify_corpus_button = gr.Button("Certify Corpus 🗂️", interactive=False)
@@ -155,6 +169,7 @@ with gr.Blocks() as demo:
 
         train_button.click(fn=train_model, inputs=[num_topics_input, iterations_input, passes_input], outputs=train_output)
 
+    demo.load()
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue().launch()

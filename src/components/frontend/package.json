@@ -1,0 +1,25 @@
+{
+  "name": "terry-brooks_gradio_log",
+  "version": "0.1.13",
+  "description": "FORK OF GIThub  louis-she/gradio-log Gradio UI packages",
+  "type": "module",
+  "author": "",
+  "license": "ISC",
+  "private": false,
+  "main_changeset": true,
+  "exports": {
+    ".": "./Index.svelte",
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@gradio/atoms": "0.6.1",
+    "@gradio/icons": "0.3.4",
+    "@gradio/statustracker": "0.4.10",
+    "@gradio/utils": "0.3.0",
+    "@xterm/xterm": "^5.5.0",
+    "xterm-addon-fit": "^0.8.0"
+  },
+  "devDependencies": {
+    "@gradio/preview": "^0.13.0"
+  }
+}
