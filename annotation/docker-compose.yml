@@ -1,0 +1,13 @@
+version: "3.3"
+services:
+  label_studio:
+    image: heartexlabs/label-studio:latest
+    container_name: label_studio
+    ports:
+      - 8080:8080
+    volumes:
+      - ~/Document/label_studio/data:/label-studio/data
+    env_file:
+      - /Users/terry-brooks/Github/ML-Data-Wrangler/annotation/env.list
+volumes:
+  mydata:

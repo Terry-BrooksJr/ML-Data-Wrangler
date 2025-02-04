@@ -10,7 +10,7 @@ from LDA_logic import LatentDirichletAllocator, stopwords
 from wrangler import DataWrangler
 from loguru import logger
 import sys
-from componets import Log
+from components import Log
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
@@ -157,4 +157,30 @@ with gr.Blocks() as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    if os.getenv("DEBUG_MODE"):
+        demo.launch(inbrowser=True,
+                debug=True,
+                share=False,
+                show_error=True,
+                server_port=8000,
+                state_session_capacity=500,
+                auth=None,
+                quiet=False,
+                auth_message=None,     
+                enable_monitoring=True,
+                ssr_mode=False
+                )
+    else:
+        demo.launch(inbrowser=True,
+                debug=False,
+                share=True,
+                show_error=False,
+                server_port=8080,
+                state_session_capacity=10000,
+                share_server_address="blackberry-py.dev:7000",
+                quiet=True,
+                auth=(os.environ['GRADIO_USER'], os.environ['GRADIO_PASSWORD']),
+                auth_message='Please Enter the Gradio Username and Password. If you do not haver it please contact Gradio Admin/Terry',     
+                enable_monitoring=True,
+                ssr_mode=True
+                )

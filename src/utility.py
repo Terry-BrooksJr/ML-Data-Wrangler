@@ -213,7 +213,6 @@ def remove_useless_data(text: str) -> str:
     """
     scrubbed = [
         _normalize_word_case(word)
-        _normalize_word_case(word)
         for word in text
         if not (
             validators.email(word)

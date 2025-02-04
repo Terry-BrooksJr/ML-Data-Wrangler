@@ -1,0 +1,39 @@
+version: '3'
+
+vars:
+  DEFAULT_PORT: 8080
+  DEBUG_PORT: 8000
+
+tasks:
+  default:
+    desc: Start Production Wrangler Server
+    cmds:
+      - |
+        echo "Starting Production Wrangler Server on port {{.DEFAULT_PORT}}..."
+        export DEBUG_MODE=False
+        export GRADIO_SHARE=True
+        .venv/bin/python src/app.py
+      - defer: |
+                echo "Stopping Wrangler Server on port {{.DEFAULT_PORT}}..."````
+                if kill -9 $(lsof -t -i:{{.DEFAULT_PORT}}); then
+                echo "Server Shut Down"
+                else
+                echo "Error When Stopping Server Not Running"
+                fi
+    ignore_error: true
+
+  debug:
+    desc: Start Debug Wrangler Server
+    cmds:
+      - |
+        echo "Starting Dev Wrangler Server on port {{.DEBUG_PORT}}..."
+        export DEBUG_MODE=true
+        export GRADIO_DEBUG=1
+        .venv/bin/python src/app.py
+      - defer: |
+                echo "Stopping Dev Wrangler Server on port {{.DEBUG_PORT}}..."
+                if kill -9 $(lsof -t -i:{{.DEBUG_PORT}}); then
+                echo "Server Shut Down"
+                else
+                echo "Error When Stopping Dev Server Not Running"
+                fi

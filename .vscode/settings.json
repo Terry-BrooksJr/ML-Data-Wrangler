@@ -3,6 +3,7 @@
         "Carga",
         "corpous",
         "dtype",
+        "inbrowser",
         "ldamodel",
         "lemmatization",
         "loggable",
@@ -14,6 +15,7 @@
         "prelemma",
         "PUNCT",
         "qtextedit",
+        "stopwords",
         "tqdm",
         "ufunc",
         "xlabel",
@@ -24,5 +26,7 @@
     "search.useIgnoreFiles": false,
     "cSpell.ignoreWords": [
         "Lemmitizing"
-    ]
+    ],
+    "eslint.enable": false,
+    "FSharp.suggestGitignore": false
 }
