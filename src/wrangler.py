@@ -7,12 +7,16 @@ import unicodedata
 from datetime import datetime
 from enum import Enum
 from html import unescape
-from typing import List, TextIO, Tuple
+from typing import List, Optional, TextIO, Tuple, Union
+from xml.etree import ElementTree as ET
 
 from loguru import logger
 import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
+
+# Control characters that XML 1.0 cannot represent, even escaped.
+XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
 
 class MyEncoder(json.JSONEncoder):
@@ -88,11 +92,15 @@ class Comment:
         self.created_at = created_at
         self.body = body
 
-    def __getitem__(self, key):
-        return key
+    def __getitem__(self, key: str):
+        if key not in self.to_dict_format():
+            raise KeyError(key)
+        return getattr(self, key)
 
-    def __setitem__(self, key, value):
-        self.detail[key] = value
+    def __setitem__(self, key: str, value) -> None:
+        if key not in self.to_dict_format():
+            raise KeyError(key)
+        setattr(self, key, value)
 
     def to_dict_format(self) -> dict:
         """
@@ -163,15 +171,72 @@ class Ticket:
     def __getitem__(self, key):
         return key
 
+    def output_to_dict(self, output_path: Optional[Union[str, pathlib.Path]] = None) -> dict:
+        """
+        Converts the ticket to a dictionary and writes it to disk as JSON.
 
-class DataWrangler:
+        Args:
+            output_path: Where to write the JSON file. Defaults to
+                completed/ticket_<id>.json in the current working directory.
+
+        Returns:
+            The JSON-compatible dictionary that was written to disk.
+        """
+        ticket_dict = json.loads(
+            json.dumps(
+                {
+                    "id": self.id,
+                    "created_at": self.created_at,
+                    "last_updated": self.last_updated,
+                    "status": self.status.name,
+                    "subject": self.subject,
+                    "tags": self.tags,
+                    "outcome": self.outcome,
+                    "ticket_type": self.ticket_type,
+                    "comments": self.comments,
+                },
+                cls=MyEncoder,
+            )
+        )
+
+        output_path = pathlib.Path(
+            output_path or pathlib.Path.cwd() / "completed" / f"ticket_{self.id}.json"
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as output:
+            json.dump(ticket_dict, output, indent=4, ensure_ascii=False)
+        logger.success(f"Wrote ticket {self.id} to {output_path}")
+        return ticket_dict
+
+
+class DataWrangler(QObject):
     """A class for processing and managing ticket data and associated comments.
 
     This class provides methods to reshape ticket data from JSON files, bind
     comments to tickets, create a text corpus from the tickets and comments,
     clean text data, and generate JSON files containing processed ticket data.
     It facilitates the organization and analysis of ticket-related information.
+
+    Signals:
+        ticket_finished: Emitted when a ticket processing operation is completed.
+        ticket_progress: Emitted with the progress of ticket processing.
+        binding_finished: Emitted when the binding of comments to tickets is completed.
+        binding_progress: Emitted with the progress of comment binding.
+        corpus_creation_finished: Emitted when the corpus creation is completed.
+        corpus_creation_progress: Emitted with the progress of corpus creation.
+        error: Emitted with an error message if an error occurs during processing.
+        worker_status: Emitted with the current status of the worker.
     """
+
+    ticket_finished = pyqtSignal()
+    ticket_progress = pyqtSignal(int)
+    binding_finished = pyqtSignal()
+    binding_progress = pyqtSignal(int)
+    corpus_creation_finished = pyqtSignal()
+    corpus_creation_progress = pyqtSignal(int)
+    _mutex = QMutex()
+    error = pyqtSignal(str)
+    worker_status = pyqtSignal(str)
 
     def __init__(
         self,
@@ -184,6 +249,7 @@ class DataWrangler:
             comments_dir: The directory where comment files are stored.
             ticket_file: The path to the JSON file containing ticket data.
         """
+        super().__init__()
         self.ticket_file = ticket_file
         self.comments_dir = comments_dir
         self.wrangled_tickets: List[Ticket] = []
@@ -278,137 +344,89 @@ class DataWrangler:
                 )
             return (output1, output2)
 
-    class WranglerWorker(QObject):
+    def _cleanse(self, body_of_text: str) -> str:
+        """Cleanses the provided text by normalizing and unescaping it, then
+        dropping words that are emails, URLs, UUIDs, MD5 hashes, IPv4 addresses
+        or contain no letters or digits."""
+        if not body_of_text:
+            return ""
+        text = unicodedata.normalize("NFKC", unescape(body_of_text))
+
+        scrubbed = []
+        for word in text.split():
+            # Check the word without surrounding punctuation, e.g. "(https://x.com)."
+            candidate = word.strip("()[]{}<>\"'.,;:!?")
+            if not any(char.isalnum() for char in candidate):
+                continue
+            if any(
+                [
+                    validators.email(candidate),
+                    validators.url(candidate),
+                    validators.uuid(candidate),
+                    validators.md5(candidate),
+                    validators.ipv4(candidate),
+                ]
+            ):
+                continue
+            scrubbed.append(word)
+
+        logger.success("Successfully Cleansed Corpus")
+        return " ".join(scrubbed)
+
+    def comments_bound(self) -> bool:
+        """Binds comments from files to their corresponding tickets.
+
+        This method iterates through the wrangled tickets and attempts to match
+        comments stored in files within a specified directory. It loads the comments
+        associated with each ticket, reshapes them, and appends them to the ticket's
+        comments list, logging the process and any issues encountered.
+
+        Returns:
+            True if comments are successfully bound to the tickets, False otherwise.
+
+        Raises:
+            Exception: If there is an error during the binding process.
         """
-        Represents a worker class for async processing tickets and their associated comments.
+        try:
+            self.worker_status.emit("Collecting Ticket Objects for Comment Binding...")
+            for i, ticket in enumerate(self.wrangled_tickets):
+                self.worker_status.emit(f"Binding Comments for Ticket {ticket.id}")
+                logger.info(f"Binding comments for ticket {ticket.id}")
+                raw_comments = self._raw_comments_for(ticket.id)
+                if raw_comments:
+                    # Zendesk's first comment is the description, so the file
+                    # replaces the description comment tickets_reshaped added.
+                    ticket.comments = []
+                for comment in raw_comments:
+                    reshaped_comment = self.reshaped_comment(comment)
+                    ticket.comments.append(reshaped_comment.to_dict_format())
+                if raw_comments:
+                    logger.success(f"Comments bound to ticket {ticket.id}")
+                else:
+                    logger.warning(f"No comments found for ticket {ticket.id}")
+                self.binding_progress.emit(i + 1)
+            self.binding_finished.emit()
+            return True
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.exception(f"Error while binding comments: {e}")
+            return False
 
-        This class handles the cleansing of text, binding comments to tickets, reshaping ticket data from JSON files into Ticket objects, and creating a text corpus from the wrangled tickets and their comments. It emits signals to indicate progress and completion of various tasks, and logs the operations performed for tracking and debugging purposes.
+    def tickets_reshaped(self) -> bool:
+        """Reshapes ticket data from a JSON file into Ticket objects.
 
-        Signals:
-            ticket_finished: Emitted when a ticket processing operation is completed.
-            ticket_progress: Emitted with the progress of ticket processing.
-            binding_finished: Emitted when the binding of comments to tickets is completed.
-            binding_progress: Emitted with the progress of comment binding.
-            corpus_creation_finished: Emitted when the corpus creation is completed.
-            corpus_creation_progress: Emitted with the progress of corpus creation.
-            error: Emitted with an error message if an error occurs during processing.
-            worker_status: Emitted with the current status of the worker.
-
-        Methods:
-            _cleanse: Cleanses the provided text by normalizing and unescaping each line.
-            comments_bound: Binds comments from files to their corresponding tickets.
-            tickets_reshaped: Reshapes ticket data from a JSON file into Ticket objects.
-            create_corpus: Creates a text corpus from the wrangled tickets and their comments.
-        """
-
-        ticket_finished = pyqtSignal()
-        ticket_progress = pyqtSignal(int)
-        binding_finished = pyqtSignal()
-        binding_progress = pyqtSignal(int)
-        corpus_creation_finished = pyqtSignal()
-        corpus_creation_progress = pyqtSignal(int)
-        _mutex = QMutex()
-        error = pyqtSignal(str)
-        worker_status = pyqtSignal(str)
-
-        def _cleanse(self, body_of_text: str) -> str:
-            """Cleanses the provided text by normalizing and unescaping each line"""
-            check_body = body_of_text.splitlines()
-            cleaned_lines = [
-                unicodedata.normalize("NFKC", unescape(line))
-                .replace("\n", " ")
-                .replace("\r", " ")
-                for line in check_body
-            ]
-            for line in cleaned_lines:
-                if not line.isalnum():
-                    cleaned_lines.remove(line)
-
-            scrubbed = [
-                word
-                for word in cleaned_lines
-                if not any(
-                    [
-                        validators.email(word),
-                        validators.url(word),
-                        validators.uuid(word),
-                        validators.hashes.md5(word),
-                        validators.ip_address.ipv4(word),
-                    ]
-                )
-            ]
-            logger.success("Successfully Cleansed Corpus")
-            return scrubbed
-
-        def comments_bound(self) -> bool:
-            """Binds comments from files to their corresponding tickets.
-
-            This method iterates through the wrangled tickets and attempts to match
-            comments stored in files within a specified directory. It loads the comments
-            associated with each ticket, reshapes them, and appends them to the ticket's
-            comments list, logging the process and any issues encountered.
+            This method reads ticket data from a specified JSON file and converts
+            each ticket into a Ticket object, including associated comments. It
+            logs the success of each reshaping operation and returns a boolean
+            indicating the overall success of the process.
 
             Returns:
-                True if comments are successfully bound to the tickets, False otherwise.
+                True if all tickets are successfully reshaped and added to the
+                wrangled tickets list, False otherwise.
 
-            Raises:
-                Exception: If there is an error during the binding process.
-            """
-            try:
-                for ticket in self.wrangled_tickets:
-                    self.worker_status.emit(
-                        "Collecting Ticket Objects for Comment Binding..."
-                    )
-                    comments_found = False
-                    for i in range(len(os.listdir(self.comment_dir))):
-                        self.worker_status.emit(
-                            f'Binding Comments for Ticket {ticket["id"]}'
-                        )
-                        for filename in os.listdir(self.comments_dir):
-                            if filename.startswith(str(ticket.id)):
-                                comments_file_path = os.path.join(
-                                    self.comments_dir, filename
-                                )
-                                logger.info(f"Binding comments for ticket {ticket.id}")
-                                with open(comments_file_path, "r") as comments_file:
-                                    comments_data = json.load(comments_file)
-                                    for key, value in comments_data.items():
-                                        for comment in value:
-                                            reshaped_comment = self.reshaped_comment(
-                                                comment
-                                            )
-                                            ticket.comments.append(
-                                                reshaped_comment.to_dict_format()
-                                            )
-                                            comments_found = True
-                                            self.binding_progress.emit(i + 1)
-                            if not comments_found:
-                                logger.warning(
-                                    f"No comments found for ticket {ticket.id}"
-                                )
-                                self.binding_progress.emit(i + 1)
-                    logger.success(f"Comments bound to ticket {ticket.id}")
-                    return True
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                logger.exception(f"Error while binding comments: {e}")
-                return False
-
-        def tickets_reshaped(self) -> bool:
-            """Reshapes ticket data from a JSON file into Ticket objects.
-
-                This method reads ticket data from a specified JSON file and converts
-                each ticket into a Ticket object, including associated comments. It
-                logs the success of each reshaping operation and returns a boolean
-                indicating the overall success of the process.
-
-                Returns:
-                    True if all tickets are successfully reshaped and added to the
-                    wrangled tickets list, False otherwise.
-
-            Raises:
-                Exception: If there is an error during the reading or reshaping
-                process.
-            """
+        Raises:
+            Exception: If there is an error during the reading or reshaping
+            process.
+        """
 
         try:
             with open(self.ticket_file, "r") as tickets_file:
@@ -444,6 +462,165 @@ class DataWrangler:
                     logger.debug(
                         f" Length of Wrangled Tickets: {len(self.wrangled_tickets)} \n Wrangled Tickets: {[ticket.__str__() for ticket in self.wrangled_tickets]}"
                     )
+            self.ticket_finished.emit()
             return True
         except Exception as e:
             logger.exception(f"Failed to reshape tickets: {e}")
+            return False
+
+    def _raw_comments_for(self, ticket_id: int) -> List[dict]:
+        """Loads the raw comment dicts for a ticket from its file in comments_dir.
+
+        Matches files named "<id>.json" or "<id>_<anything>.json", and accepts
+        either a JSON list of comments or a dict of comment lists.
+        """
+        raw_comments = []
+        for filename in os.listdir(self.comments_dir):
+            if pathlib.Path(filename).stem.split("_")[0] != str(ticket_id):
+                continue
+            with open(os.path.join(self.comments_dir, filename), "r") as comments_file:
+                comments_data = json.load(comments_file)
+            if isinstance(comments_data, dict):
+                for value in comments_data.values():
+                    raw_comments.extend(value)
+            else:
+                raw_comments.extend(comments_data)
+        return raw_comments
+
+    def ticket_to_xml(
+        self,
+        ticket: Union[int, dict],
+        output_path: Optional[Union[str, pathlib.Path]] = None,
+        xsd_path: Optional[Union[str, pathlib.Path]] = None,
+    ) -> str:
+        """Converts a ticket to XML verbatim, without cleansing any text.
+
+        The XML follows the element order of ticket_schema.xsd. Text is copied
+        exactly as Zendesk stored it; only control characters that XML cannot
+        represent at all are removed. Zendesk exports people and groups as
+        numeric IDs, so those IDs are used as the Name/Group/Assignee values.
+
+        Args:
+            ticket: A raw Zendesk ticket dict, or a ticket ID to look up in
+                ticket_file.
+            output_path: Optional path to write the XML to.
+            xsd_path: Optional path to ticket_schema.xsd. Sets
+                xsi:noNamespaceSchemaLocation and, if lxml is installed,
+                validates the XML against the schema.
+
+        Returns:
+            The XML document as a string.
+
+        Raises:
+            KeyError: If a ticket ID is given and it is not in ticket_file.
+        """
+        if not isinstance(ticket, dict):
+            with open(self.ticket_file, "r") as tickets_file:
+                matches = [t for t in json.load(tickets_file) if t["id"] == int(ticket)]
+            if not matches:
+                raise KeyError(f"Ticket {ticket} not found in {self.ticket_file}")
+            ticket = matches[0]
+
+        def text(value) -> str:
+            if value is None:
+                return ""
+            return XML_ILLEGAL_CHARS_RE.sub("", str(value))
+
+        def field_value(index: int):
+            fields = ticket.get("fields") or []
+            return fields[index]["value"] if len(fields) > index else None
+
+        def add(parent, tag, value) -> ET.Element:
+            element = ET.SubElement(parent, tag)
+            element.text = text(value)
+            return element
+
+        root = ET.Element("Ticket")
+        if xsd_path:
+            root.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+            root.set("xsi:noNamespaceSchemaLocation", pathlib.Path(xsd_path).name)
+
+        add(root, "Id", ticket["id"])
+        add(root, "Subject", ticket.get("subject"))
+        add(root, "SubmittedDate", ticket.get("created_at"))
+        add(root, "ReceivedVia", (ticket.get("via") or {}).get("channel"))
+        requester = ET.SubElement(root, "Requester")
+        add(requester, "Name", ticket.get("requester_id"))
+        ccs = ET.SubElement(root, "CCs")
+        for cc_id in ticket.get("email_cc_ids") or []:
+            add(ET.SubElement(ccs, "CC"), "Name", cc_id)
+        add(root, "StatusCategory", ticket.get("status"))
+        add(root, "TicketStatus", ticket.get("status"))
+        add(root, "Type", ticket.get("type"))
+        add(root, "Priority", ticket.get("priority"))
+        add(root, "Group", ticket.get("group_id"))
+        add(root, "Assignee", ticket.get("assignee_id"))
+        # Same custom-field positions tickets_reshaped uses for ticket_type and outcome.
+        add(root, "RequestType", field_value(0))
+        add(root, "TicketOutcome", field_value(2))
+
+        comments = ET.SubElement(root, "Comments")
+        raw_comments = self._raw_comments_for(ticket["id"])
+        if not raw_comments and ticket.get("description"):
+            # The first Zendesk comment is the description, so only fall back
+            # to it when the ticket has no comment file.
+            raw_comments = [
+                {
+                    "author_id": ticket.get("requester_id"),
+                    "created_at": ticket.get("created_at"),
+                    "public": True,
+                    "plain_body": ticket["description"],
+                }
+            ]
+        for raw_comment in raw_comments:
+            comment = ET.SubElement(comments, "Comment")
+            add(comment, "Author", raw_comment.get("author_id"))
+            add(comment, "Date", raw_comment.get("created_at"))
+            add(
+                comment,
+                "IsInternalNote",
+                "false" if raw_comment.get("public", True) else "true",
+            )
+            add(comment, "Text", raw_comment.get("plain_body"))
+
+        # ET.indent only adds whitespace between elements, so comment text stays verbatim.
+        ET.indent(root, space="  ")
+        xml_text = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            + ET.tostring(root, encoding="unicode")
+            + "\n"
+        )
+
+        if xsd_path:
+            try:
+                from lxml import etree
+            except ImportError:
+                logger.warning("lxml not installed; skipping schema validation.")
+            else:
+                schema = etree.XMLSchema(etree.parse(str(xsd_path)))
+                schema.assertValid(etree.fromstring(xml_text.encode("utf-8")))
+                logger.success(f"Ticket {ticket['id']} XML is valid against {xsd_path}")
+
+        if output_path:
+            with open(output_path, "w", encoding="utf-8") as output:
+                output.write(xml_text)
+            logger.success(f"Wrote ticket {ticket['id']} XML to {output_path}")
+
+        return xml_text
+
+    def create_corpus(self) -> str:
+        """Creates a text corpus from the wrangled tickets and their comments."""
+        grouped_comments = []
+
+        for i, ticket in enumerate(self.wrangled_tickets):
+            logger.info(f"Selecting {ticket.id} for Corpus Merge")
+            for comment in ticket.comments:
+                logger.info(f"Selecting comment {comment['id']}")
+                grouped_comments.append(self._cleanse(comment["body"]))
+                logger.success(f"Merged comment {comment['id']} into corpus")
+            self.corpus_creation_progress.emit(i + 1)
+
+        self.corpus = " ".join(grouped_comments)
+        self.corpus_creation_finished.emit()
+        logger.success("Corpus Successfully Created")
+        return self.corpus
