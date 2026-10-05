@@ -2,10 +2,11 @@ import os
 import pathlib
 import sys
 import time
+import webbrowser
 from typing import List, Tuple, Union
 from datetime import datetime
 import gradio as gr
-from gradio import HTML, Interface, LinePlot, Row
+import pandas as pd
 from loguru import logger
 from PyQt5.QtCore import QRect, pyqtSignal, QThread, QCoreApplication, QObject, QMutex
 from PyQt5.QtGui import QFont
@@ -82,6 +83,7 @@ class MainWindow(QMainWindow, QDialog):
         super().__init__()
         self.wrangler: DataWrangler = DataWrangler()
         self.allocator: LatentDirichletAllocator = None
+        self.pdialog: QProgressDialog = None
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
@@ -141,9 +143,8 @@ class MainWindow(QMainWindow, QDialog):
         self.train_model_button = QPushButton("Train Model")
 
         self.comments_dir.setReadOnly(True)
-        self.ticket_file.read(True)
+        self.ticket_file.setReadOnly(True)
 
-        self.ticket_file_button.fileSelected.connect(self.confirm_file_change)
         self.ticket_file_button.clicked.connect(self.select_ticket_file)
         self.comments_dir_button.clicked.connect(self.select_comments_dir)
         self.process_button.clicked.connect(self.init_start_process)
@@ -250,75 +251,96 @@ class MainWindow(QMainWindow, QDialog):
             if progress >= 100:
                 self.pdialog.close()
 
+    def update_preprocess_progress(self, progress: int):
+        self.update_training_progress_bar(progress // 2)
+
+    def update_train_progress(self, progress: int):
+        self.update_training_progress_bar(50 + progress // 2)
+
     def update_training_status(self, progress: str):
         """
         Updates the progress dialog label status in the progress dialog.
 
         Args:
-            progress (str): The current progress value to be set.
+            progress (str): The current status message to be shown.
         """
         if self.pdialog is not None:
             self.pdialog.setLabelText(progress)
-            self.pdialog.setValue(self.pdialog.value + 5)
-            self.pbar.setValue(self.pbar.value + 5)
 
     def start_allocator_worker(self):
         """
-        Starts the LDAModelWorker in a separate thread and connects signals to update progress.
+        Validates the training inputs, then preprocesses the corpus and trains the
+        LDA models in a separate thread, updating the progress dialog as it goes.
         """
-        # Initialize and display the progress bar
+        number_of_topics = self.num_topics_input.text().strip()
+        iterations = self.iterations_input.text().strip()
+        passes = self.passes_input.text().strip()
+        valid, error_message = LatentDirichletAllocator.validate_inputs(
+            number_of_topics, iterations, passes
+        )
+        if not valid:
+            logger.error(error_message)
+            QMessageBox.warning(self, "Input Validation Error", error_message)
+            return
+
+        self.train_model_button.setEnabled(False)
         self.show_progress_bar("Training LDA Model...")
 
-        # Create a thread for the worker
-        self.thread = QThread()
-        self.modeler = self.allocator.LDAModelWorker()
-        self.modeler.moveToThread(self.thread)
+        # Preprocessing fills the first half of the bar and training the second.
+        self.allocator.preprocess_progress.connect(self.update_preprocess_progress)
+        self.allocator.train_progress.connect(self.update_train_progress)
+        self.allocator.worker_status.connect(self.update_training_status)
+        self.allocator.train_finished.connect(self.on_worker_finished)
+        self.allocator.error.connect(self.on_worker_error)
 
-        # Connect signals
+        # The lambda runs in the new thread; signals reach this window through
+        # queued connections, so the UI is only touched on the GUI thread.
+        self.thread = QThread()
         self.thread.started.connect(
-            lambda: self.modeler.process_corpus(
-                nlp=nlp, stopwords=stop_words, wranglerInstance=self.wrangler
+            lambda: self.allocator.run(
+                nlp=nlp,
+                stopwords=stop_words,
+                wranglerInstance=self.wrangler,
+                iterations=int(iterations),
+                passes=int(passes),
+                num_of_topics=int(number_of_topics),
             )
         )
-        self.modeler.preprocess_progress.connect(
-            self.update_progress_bar
-        )  # Update the progress bar with progress signals
-        self.modeler.worker_status.connect(
-            self.update_progress_status
-        )  # Update the progress bar with progress signals
-        self.modeler.preprocess_finished.connect(
-            self.on_worker_finished
-        )  # Handle when the worker finishes
-
-        # Start the thread
         self.thread.start()
+
+    def _disconnect_allocator(self):
+        for signal in [
+            self.allocator.preprocess_progress,
+            self.allocator.train_progress,
+            self.allocator.worker_status,
+            self.allocator.train_finished,
+            self.allocator.error,
+        ]:
+            signal.disconnect()
+
+    def _stop_worker_thread(self):
+        self._disconnect_allocator()
+        if self.pdialog is not None:
+            self.pdialog.close()
+        self.thread.quit()
+        self.thread.wait()
+        self.train_model_button.setEnabled(True)
 
     def on_worker_finished(self):
         """
-        Handles the completion of the worker process, cleaning up the thread and closing the progress dialog.
+        Handles the completion of the worker process, cleaning up the thread and
+        presenting the results.
         """
-        self.pdialog.close()
-        self.thread.quit()
-        self.thread.wait()
-        self.modeler.deleteLater()
-        self.thread.deleteLater()
-
+        self._stop_worker_thread()
         QMessageBox.information(
             self, "Process Complete", "LDA Model training has finished successfully."
         )
+        self.present_results()
 
-    def start_allocator_worker(self):
-        self.thread = QThread()
-        self.modeler = self.allocator.LDAModelWorker()
-        self.modeler.moveToThread(self.thread)
-
-        self.thread.started.connect(
-            lambda: self.modeler.data_reshaped(nlp=nlp, wranglerInstance=self.wrangler)
-        )
-        self.worker.preprocess_finished.connect(self.thread.quit)
-        self.worker.preprocess_finished.connect(self.worker.deleteLater)
-        self.thread.preprocess_finished.connect(self.thread.deleteLater)
-        self.worker.preprocess_progress.connect(self.reportProgress)
+    def on_worker_error(self, message: str):
+        """Handles a failure in the worker thread."""
+        self._stop_worker_thread()
+        self.notify_user_of_error((False, message))
 
     def init_logging(self) -> None:
         """
@@ -395,60 +417,52 @@ class MainWindow(QMainWindow, QDialog):
             logger.info(f"Comments Dir Selected: {dir_path}")
             self.wrangler.comments_dir = dir_path
 
-    def present_results(self) -> None:  # sourcery skip: extract-method
+    def present_results(self) -> None:
         """
-        Displays the results of the model training in a user interface.
-        This method visualizes the top topics and coherence plot, and attempts to load an LDA graph.
+        Displays the results of the model training in a browser.
 
-        The `present_results` function creates an interface to show the results of the topic modeling.
-        It retrieves the top five topics from the allocator instance and displays them, along with a coherence plot.
-        If any errors occur during the retrieval of topics or loading of the graph, appropriate error messages are shown.
+        Opens a Gradio page with the best model's topics and the coherence plot,
+        and opens the interactive pyLDAvis chart (lda_model.html) in its own tab.
 
         Args:
             self.allocator (LatentDirichletAllocator): The allocator instance used to retrieve the results.
 
         Returns:
             None
-
-        Raises:
-            IndexError: If there are not enough topics to display.
-            FileNotFoundError: If the LDA graph file cannot be found.
         """
-        results_UI = Interface(
-            fn=self.allocator.visualize_results(), inputs=None, outputs=["text"]
+        chart_path, _ = self.allocator.visualize_results()
+        topics = self.allocator.get_topics()
+        topic_lines = "\n".join(
+            f"{rank}. **{share:.0%} of tickets**: {', '.join(words)}"
+            for rank, (_, share, words) in enumerate(topics, start=1)
         )
-        with results_UI:
-            with Row():
-                try:
-                    top_topics = HTML("""<h1> Top 5 Topics</h1> <br/><ul>""")
-                    top_five_topics = self.allocator.get_top_5_topic()
-                    topics1 = HTML(f"<li>{top_five_topics[0]}</li>")
-                    topics2 = HTML(f"<li>{top_five_topics[1]}</li>")
-                    topics3 = HTML(f"<li>{top_five_topics[2]}</li>")
-                    topics4 = HTML(f"<li>{top_five_topics[3]}</li>")
-                    topics5 = HTML(f"<li>{top_five_topics[4]}</li>")
-                    end_list = HTML("</ul>")
-                except IndexError:
-                    top_topics = HTML(
-                        """<h1> Top 5 Topics</h1>
-                                        <p>Error Loading Top Five</p>
-                                        """
-                    )
+        coherence = pd.DataFrame(
+            {
+                "Number of Topics": self.allocator.topic_counts,
+                "Coherence": self.allocator.coherence_values,
+            }
+        )
 
-            with Row():
-                coherencePlot = LinePlot(
-                    x_title="Number of Topics", y_title="Coherence"
-                )
+        with gr.Blocks(title="LDA Results") as results_UI:
+            gr.Markdown(
+                f"# Topics ({self.allocator.best_num_topics}, the most coherent model)\n\n"
+                + (topic_lines or "No topics were found.")
+            )
+            gr.LinePlot(
+                coherence,
+                x="Number of Topics",
+                y="Coherence",
+                title="Coherence by Number of Topics",
+            )
+            gr.Markdown(
+                f"Interactive topic chart: `{chart_path}`"
+                if chart_path
+                else "Error: Loading LDA Graph"
+            )
 
-            with Row():
-                try:
-                    chart_html = os.path.join(pathlib.Path.cwd(), "lda_model.html")
-                    with open(chart_html, "r") as LDA_Chart_data:
-                        LDA_Chart = HTML(f"{LDA_Chart_data.read()}")
-                except FileNotFoundError:
-                    LDA_Chart = HTML("""<h1>Error: Loading LDA Graph </h1>""")
-
-            results_UI.launch()
+        results_UI.launch(inbrowser=True, prevent_thread_lock=True)
+        if chart_path:
+            webbrowser.open(pathlib.Path(chart_path).as_uri())
 
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
@@ -501,23 +515,17 @@ class MainWindow(QMainWindow, QDialog):
                     return
 
             # If all checks pass, proceed with JSON generation and UI adjustments
-            self.wrangler.generate_json()
-            self.allocator = LatentDirichletAllocator(num_of_topics=30)
             corpus_task = self.wrangler.create_corpus()
-
-            if corpus_task is None or corpus_task == "":
+            if not corpus_task:
                 self.notify_user_of_error(
-                    (
-                        False,
-                        f"Error: Failed to create corpus. \n Corpus Length: {len(corpus_task)} \n Corpus Type: {type(corpus_task)}",
-                    )
+                    (False, "Error: Failed to create corpus. The corpus is empty.")
                 )
+                return
+            self.wrangler.generate_json()
 
-            if not self.allocator.data_preprocessed(wranglerInstance=self.wrangler):
-                self.notify_user_of_error(
-                    (False, "Error: Data preprocessing in allocator failed.")
-                )
-            self.allocator.prelemma_corpus = corpus_task
+            self.allocator = LatentDirichletAllocator(num_of_topics=30)
+            # One document per ticket; lemmatization runs in the training thread.
+            self.allocator.prelemma_corpus = self.wrangler.ticket_documents()
             self.process_button.setEnabled(False)
             self.train_model_button.setEnabled(True)
 

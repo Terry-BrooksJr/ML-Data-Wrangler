@@ -3,7 +3,7 @@ import sys
 
 import validators
 from loguru import logger
-from PyQt5.QtCore import QRegExp
+from PyQt5.QtCore import pyqtSignal, QObject, QRegExp
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
 
@@ -47,6 +47,10 @@ class QTextEditLogger:
 
 
 # Custom class to redirect output to QTextEdit
+class _TextEmitter(QObject):
+    text_written = pyqtSignal(str)
+
+
 class QTextEditStream:
     """A stream-like interface for appending text to a QTextEdit widget.
 
@@ -61,6 +65,9 @@ class QTextEditStream:
             text_edit_widget: The QTextEdit widget to which messages will be appended.
         """
         self.text_edit_widget = text_edit_widget
+        # Writes may come from worker threads; the signal delivers them on the GUI thread.
+        self._emitter = _TextEmitter()
+        self._emitter.text_written.connect(text_edit_widget.append)
 
     def write(self, message):
         """Appends a message to the QTextEdit widget.
@@ -68,7 +75,7 @@ class QTextEditStream:
         Args:
             message: The message to be appended to the QTextEdit.
         """
-        self.text_edit_widget.append(message)
+        self._emitter.text_written.emit(message)
 
     def flush(self):
         """Flushes the stream.

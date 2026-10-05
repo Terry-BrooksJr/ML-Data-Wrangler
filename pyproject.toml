@@ -20,11 +20,15 @@ seaborn = "^0.13.2"
 pyldavis = "^3.4.1"
 scipy = "1.12"
 validators = "^0.34.0"
+anthropic = "^1.11.0"
+pymongo = "^4.18.0"
 
 [tool.poetry.group.dev.dependencies]
 isort = "*"
 black = "*"
 prospector = "*"
+pytest = "*"
+mongomock = "*"
 
 [build-system]
 requires = ["poetry-core"]
@@ -40,3 +44,7 @@ virtual_env = "./.venv/"
 force_alphabetical_sort_within_sections = true
 remove_redundant_aliases = true
 dedup_headings = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
