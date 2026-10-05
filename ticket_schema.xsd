@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="qualified">
+
+  <!-- Root element -->
+  <xs:element name="Ticket">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="Id" type="xs:string"/>
+        <xs:element name="Subject" type="xs:string"/>
+        <xs:element name="SubmittedDate" type="xs:string"/>
+        <xs:element name="ReceivedVia" type="xs:string"/>
+        <xs:element name="Requester" type="PersonType"/>
+        <xs:element name="CCs">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="CC" type="PersonType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="StatusCategory" type="xs:string"/>
+        <xs:element name="TicketStatus" type="xs:string"/>
+        <xs:element name="Type" type="xs:string"/>
+        <xs:element name="Priority" type="xs:string"/>
+        <xs:element name="Group" type="xs:string"/>
+        <xs:element name="Assignee" type="xs:string"/>
+        <xs:element name="RequestType" type="xs:string"/>
+        <xs:element name="TicketOutcome" type="xs:string"/>
+        <xs:element name="Comments">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="Comment" type="CommentType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- A person: name, optional role/title, and email -->
+  <xs:complexType name="PersonType">
+    <xs:sequence>
+      <xs:element name="Name" type="xs:string"/>
+      <xs:element name="Email" type="xs:string" minOccurs="0"/>
+      <xs:element name="Title" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- A single comment/message in the ticket thread -->
+  <xs:complexType name="CommentType">
+    <xs:sequence>
+      <xs:element name="Author" type="xs:string"/>
+      <xs:element name="Date" type="xs:string"/>
+      <xs:element name="IsInternalNote" type="xs:boolean" default="false"/>
+      <xs:element name="Text" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>
