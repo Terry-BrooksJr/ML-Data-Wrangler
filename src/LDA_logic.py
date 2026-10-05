@@ -1,9 +1,15 @@
+import os
+import pathlib
 import random
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple
 
-import en_core_web_lg
+import matplotlib
+
+matplotlib.use("Agg")  # Plots are saved to files; no GUI backend in worker threads.
+
 import matplotlib.pyplot as plt
 import nltk
+import pyLDAvis
 import pyLDAvis.gensim_models
 import seaborn as sns
 from gensim.corpora.dictionary import Dictionary as MappingDictionary
@@ -13,42 +19,66 @@ from loguru import logger
 from nltk.corpus import stopwords
 from numpy.random import RandomState
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
-from PyQt5.QtWidgets import QMessageBox
 from spacy.language import Language
-from spacy.tokens import Doc
 
 from wrangler import DataWrangler
 
-nltk.download("stopwords")
+try:
+    stopwords.words("english")
+except LookupError:
+    nltk.download("stopwords", quiet=True)
 sns.set_theme()
 
+# spaCy parts of speech that carry no topical meaning.
+REMOVED_POS = ["ADV", "PRON", "PUNCT", "PART", "DET", "ADP", "SPACE", "NUM", "SYM"]
 
-class LatentDirichletAllocator:
+
+class LatentDirichletAllocator(QObject):
     """
-     A class for performing Latent Dirichlet Allocation (LDA) on a text corpus.
+    A class for performing Latent Dirichlet Allocation (LDA) on a text corpus.
 
     This class handles the preprocessing of text data, training of the LDA model,
     and visualization of the results. It provides methods to manage topics and
     coherence values, enabling effective topic modeling on the provided corpus.
+
+    Signals:
+        preprocess_finished: Emitted when the corpus has been tokenized.
+        preprocess_progress: Emitted with preprocessing progress (0-100).
+        train_finished: Emitted when training is complete.
+        train_progress: Emitted with training progress (0-100).
+        error: Emitted with an error message if an error occurs.
+        worker_status: Emitted with the current status of the worker.
     """
 
-    def __init__(self, num_of_topics: int) -> None:
+    preprocess_finished = pyqtSignal()
+    preprocess_progress = pyqtSignal(int)
+    train_finished = pyqtSignal()
+    train_progress = pyqtSignal(int)
+    _mutex = QMutex()
+    error = pyqtSignal(str)
+    worker_status = pyqtSignal(str)
+
+    def __init__(self, num_of_topics: int, seed: Optional[int] = None) -> None:
         """
-        Initializes the LatentDirichletAllocator with a corpus and number of topics.
+        Initializes the LatentDirichletAllocator.
 
         Args:
-            corpus: The text corpus to be analyzed.
-            num_of_topics: The number of topics to be identified by the LDA model.
+            num_of_topics: The highest number of topics to evaluate when training.
+            seed: Optional random seed, for reproducible models.
         """
-        self.corpus: List[Doc] = []
-        self.documents: str = ""
-        self._tokens: List[Doc] = []
-        self.id2word: MappingDictionary = ""
+        super().__init__()
+        self.corpus: List[List[Tuple[int, int]]] = []
+        self._tokens: List[List[str]] = []
+        self.id2word: Optional[MappingDictionary] = None
         self.num_of_topics: int = num_of_topics
-        self.prelemma_corpus: str = None
+        self.seed: int = seed if seed is not None else random.randint(1, 2**32 - 1)
+        # One document per ticket.
+        self.prelemma_corpus: Optional[List[str]] = None
 
-        self.topics: List[str] = []
+        self.topic_counts: List[int] = []
         self.coherence_values: List[float] = []
+        self.lda_model: Optional[LdaModel] = None
+        self.best_num_topics: Optional[int] = None
 
     def __getitem__(self, key):
         return getattr(self, key)
@@ -56,302 +86,250 @@ class LatentDirichletAllocator:
     def __setitem__(self, name: str, value) -> None:
         return setattr(self, name, value)
 
-    def _generate_random_state(self) -> RandomState:
+    @staticmethod
+    def validate_inputs(number_of_topics, iterations, passes) -> Tuple[bool, str]:
         """
-        Generates a random state for model training.
+        Validates the user inputs for model training parameters.
+
+        Args:
+            number_of_topics (str): The highest number of topics to evaluate.
+            iterations (str): The number of iterations for the training process.
+            passes (str): The number of passes for the training process.
 
         Returns:
-            A RandomState object initialized with a random seed.
+            tuple: A boolean indicating validity and an error message.
         """
-        random_seed = random.randint(1, (4294967296 - 1))
-        return RandomState(random_seed)
+        values = [str(number_of_topics), str(iterations), str(passes)]
+        if not all(map(str.isdigit, values)):
+            return False, "All inputs must be integers."
+        if int(number_of_topics) < 2:
+            return False, "Number of topics must be at least 2."
+        if int(passes) >= 20 or int(iterations) >= 200:
+            return False, "Passes should be < 20 and iterations < 200."
+        return True, ""
 
     def get_lda_model(
-        self, iterations: int, workers: int, passes: int, num_of_topics: int = 0
+        self,
+        iterations: int = 50,
+        workers: int = 4,
+        passes: int = 10,
+        num_of_topics: Optional[int] = None,
     ) -> LdaModel:
-        """Retrieves the LDA model based on the specified parameters.
+        """Trains an LDA model with the specified parameters.
 
         Args:
             iterations: The number of iterations for the LDA model.
-            workers: The number of worker threads to use.
+            workers: The number of worker processes to use.
             passes: The number of passes through the corpus.
             num_of_topics: The number of topics to model (defaults to instance's value).
 
         Returns:
             An LdaModel instance configured with the provided parameters.
         """
-        if num_of_topics is None:
-            num_of_topics = self.num_of_topics
-        elif workers is None:
-            workers = 4
         return LdaMulticore(
             corpus=self.corpus,
             id2word=self.id2word,
             iterations=iterations,
-            num_topics=num_of_topics,
+            num_topics=num_of_topics or self.num_of_topics,
             workers=workers,
             passes=passes,
-            random_state=self._generate_random_state(),
+            random_state=RandomState(self.seed),
         )
 
-    def visualize_results(self):
-        """Visualizes the results of the LDA model and its coherence values.
+    def process_corpus(
+        self, nlp: Language, stopwords: List[str], wranglerInstance: DataWrangler
+    ) -> bool:
+        """
+        Lemmatizes each ticket document and builds the bag-of-words corpus.
 
-        This method prepares and displays the visualization of the LDA model
-        using the pyLDAvis library, along with a plot of coherence values
-        against the number of topics. It provides insights into the model's
-        performance and helps in understanding the topic distribution.
+        If no documents have been set, they are generated from the DataWrangler.
+
+        Args:
+            nlp (Language): The spaCy model used for tokenization and lemmatization.
+            stopwords (List[str]): Words to exclude from the tokens.
+            wranglerInstance (DataWrangler): Used to generate the documents if needed.
 
         Returns:
-            The visualization object if successful, None otherwise.
+            bool: True if the data was successfully pre-processed, False otherwise.
+        """
+        logger.info(
+            "Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictonary Creation"
+        )
+        self.worker_status.emit("Configured SpaCy Model..")
+        try:
+            if not self.prelemma_corpus:
+                logger.info(
+                    "Prelemma Corpus is empty. Regenerating Corpus using DataWrangler"
+                )
+                self.prelemma_corpus = wranglerInstance.ticket_documents()
 
-        Raises:
-            Exception: If there is an error during the visualization process.
+            stopword_set = set(stopwords)
+            self._tokens = []
+            self.worker_status.emit("Lemmatizing Corpus...")
+            total = len(self.prelemma_corpus)
+            # Lemmas only need the tagger, so skip the slower parser and NER.
+            with nlp.select_pipes(disable=["parser", "ner"]):
+                for i, document in enumerate(nlp.pipe(self.prelemma_corpus)):
+                    self._tokens.append(
+                        [
+                            token.lemma_.lower()
+                            for token in document
+                            if (
+                                token.pos_ not in REMOVED_POS
+                                and token.lemma_.lower() not in stopword_set
+                                and not token.is_stop
+                                and token.is_alpha
+                            )
+                        ]
+                    )
+                    self.preprocess_progress.emit(int((i + 1) / total * 100))
+            self.worker_status.emit("Lemmatization Completed")
+            logger.debug(f"Token Length:{len(self._tokens)}")
+
+            self.worker_status.emit(
+                f"Preparing Mapping Dictonary for {len(self._tokens)} documents... "
+            )
+            self.id2word = MappingDictionary(self._tokens)
+            self.worker_status.emit("Finally, Filtering Out Extremes...")
+            self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=5000)
+            self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
+            logger.debug(
+                f"Pre-Lemma Corpus Length:{len(self.prelemma_corpus)} \n Mapping Dict: {self.id2word} \n Post Processing Corpus: {len(self.corpus)}"
+            )
+            logger.success("Successfully Processed Corpus")
+            self.preprocess_finished.emit()
+            return True
+        except Exception as e:
+            logger.exception("FAILED to Process Data")
+            self.error.emit(f"Failed to process data: {e}")
+            return False
+
+    def model_trained(
+        self, iterations: int, workers: int, passes: int, num_of_topics: int
+    ) -> bool:
+        """Trains LDA models for 2..num_of_topics topics and keeps the most coherent.
+
+        Args:
+            iterations: The number of iterations for the LDA model training.
+            workers: The number of worker processes to use during training.
+            passes: The number of passes through the corpus during training.
+            num_of_topics: The highest number of topics to evaluate.
+
+        Returns:
+            True if the models are trained and coherence values are recorded,
+            False otherwise.
         """
         try:
-            lda_display = pyLDAvis.gensim_models.prepare(
-                self.get_lda_model(), self.corpus, self.id2word
+            self.topic_counts, self.coherence_values = [], []
+            self.lda_model, self.best_num_topics = None, None
+            topic_range = range(2, num_of_topics + 1)
+            for i, topic_count in enumerate(topic_range):
+                self.worker_status.emit(f"Training model with {topic_count} topics...")
+                lda_model = self.get_lda_model(
+                    iterations=iterations,
+                    workers=workers,
+                    passes=passes,
+                    num_of_topics=topic_count,
+                )
+                coherence = CoherenceModel(
+                    model=lda_model,
+                    texts=self._tokens,
+                    dictionary=self.id2word,
+                    coherence="c_v",
+                ).get_coherence()
+                logger.info(f"{topic_count} topics: coherence {coherence:.4f}")
+                self.topic_counts.append(topic_count)
+                self.coherence_values.append(coherence)
+                if coherence == max(self.coherence_values):
+                    self.lda_model, self.best_num_topics = lda_model, topic_count
+                self.train_progress.emit(int((i + 1) / len(topic_range) * 100))
+
+            logger.success(
+                f"Successfully Trained Model. Best: {self.best_num_topics} topics"
             )
-            _ = plt.plot(self.topics, self.coherence_values)
-            _ = plt.xlabel("Number of Topics")
-            _ = plt.ylabel("Coherence")
-            plt.show()
-            return lda_display
-        except Exception:
-            logger.exception("Failed to Visualize Results")
-            return None
+            self.train_finished.emit()
+            return True
+        except Exception as e:
+            logger.exception("Failed to  Train Model")
+            self.error.emit(f"Failed to train model: {e}")
+            return False
 
-    def get_top_5_topic(self):
-        """Retrieves the top five topics identified by the LDA model.
+    def run(
+        self,
+        nlp: Language,
+        stopwords: List[str],
+        wranglerInstance: DataWrangler,
+        iterations: int,
+        passes: int,
+        num_of_topics: int,
+        workers: int = 4,
+    ) -> bool:
+        """Preprocesses the corpus and then trains the models, for use in a worker thread."""
+        return self.process_corpus(nlp, stopwords, wranglerInstance) and self.model_trained(
+            iterations=iterations,
+            workers=workers,
+            passes=passes,
+            num_of_topics=num_of_topics,
+        )
 
-        This method returns a list containing the five most significant topics
-        based on the training results. It is useful for quickly accessing the
-        primary topics derived from the analysis.
+    def get_topics(self, num_words: int = 10) -> List[Tuple[int, float, List[str]]]:
+        """Returns the best model's topics, most prevalent first.
 
         Returns:
-            A list of the top five topics.
+            A list of (topic id, share of the corpus, top words) tuples.
         """
-        return self.topics[:5]
-
-    class LDAModelWorker(QObject):
-        preprocess_finished = pyqtSignal()
-        preprocess_progress = pyqtSignal(int)
-        train_finished = pyqtSignal()
-        train_progress = pyqtSignal(int)
-        _mutex = QMutex()
-        error = pyqtSignal(str)
-        worker_status = pyqtSignal(str)
-
-        def _validate_inputs(
-            self, number_of_topics, iterations, passes
-        ) -> Tuple[bool, Union[str, None]]:
-            """
-            Validates the user inputs for model training parameters.
-            This method checks that the inputs are integers and within acceptable ranges.
-
-            The `validate_inputs` function ensures that the provided values for the number of topics, iterations,
-            and passes meet the specified criteria. It returns a boolean indicating the validity of the inputs
-            along with an error message if the inputs are invalid.
-
-            Args:
-                number_of_topics (str): The number of topics to be used in the model.
-                iterations (str): The number of iterations for the training process.
-                passes (str): The number of passes for the training process.
-
-            Returns:
-                tuple: A tuple containing a boolean indicating validity and an error message.
-            """
-            if not all(map(str.isdigit, [number_of_topics, iterations, passes])):
-                return False, "All inputs must be integers."
-            if int(passes) >= 20 or int(iterations) >= 200:
-                return False, "Passes should be < 20 and iterations < 200."
-            return True, ""
-
-        def train_model(
-            self, passes: int, iterations: int, number_of_topics: int
-        ) -> None:
-            """
-            Trains the model using the specified parameters for topics, iterations, and passes.
-            This method validates the input values and initiates the training process if the inputs are valid.
-
-            The `train_model` function retrieves user input for the number of topics, iterations, and passes,
-            validates these inputs, and then calls the model training method on the allocator instance.
-            If the training is successful, it logs a success message and presents the results.
-
-            Args:
-                    allocator (LatentDirichletAllocator): The allocator instance used for training the model.
-                Returns:
-                    None
-
-            Raises:
-                QMessageBox: Displays a warning if the input validation fails.
-            """
-            logger.info("Starting the Model Training.. ")
-            number_of_topics = number_of_topics
-            iterations = iterations
-            passes = passes
-
-            valid, error_message = self._validate_inputs(
-                number_of_topics, iterations, passes
+        if self.lda_model is None:
+            return []
+        weights = [0.0] * self.lda_model.num_topics
+        for bow in self.corpus:
+            for topic_id, probability in self.lda_model.get_document_topics(bow):
+                weights[topic_id] += probability
+        total = sum(weights) or 1.0
+        topics = [
+            (
+                topic_id,
+                weights[topic_id] / total,
+                [word for word, _ in self.lda_model.show_topic(topic_id, topn=num_words)],
             )
-            if not valid:
-                logger.error(error_message)
-                QMessageBox.warning(self, "Input Validation Error", error_message)
-                return
+            for topic_id in range(self.lda_model.num_topics)
+        ]
+        return sorted(topics, key=lambda topic: topic[1], reverse=True)
 
-            if self.allocator.model_trained(
-                iterations=iterations,
-                workers=4,
-                passes=passes,
-                num_of_topics=number_of_topics,
-            ):
-                logger.success("Model successfully trained!")
-                self.present_results()
+    def get_top_5_topic(self) -> List[str]:
+        """Retrieves the five most prevalent topics of the best model.
 
-        def process_corpus(
-            self, nlp: Language, stopwords: List[str], wranglerInstance: DataWrangler
-        ) -> bool:
-            """
-            Pre-processes the data by reshaping the corpus and generating tokens from the input text.
+        Returns:
+            A list of up to five topics, each as a string of its top words.
+        """
+        return [
+            f"{share:.0%} of corpus: {', '.join(words)}"
+            for _, share, words in self.get_topics()[:5]
+        ]
 
-            This function takes a natural language processing model and a list of parts of speech to remove, processes the prelemma corpus to extract lemmatized tokens, and constructs a bag-of-words representation. It handles the case where the prelemma corpus is empty by attempting to regenerate it using a provided DataWrangler instance.
+    def visualize_results(
+        self, output_dir: pathlib.Path = pathlib.Path.cwd()
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Saves the pyLDAvis chart and the coherence plot for the best model.
 
-            Args:
-                nlp (Language): The natural language processing model used for tokenization and lemmatization.
-                removal (List[str]): A list of part-of-speech tags to be excluded from the tokenization process.
-                wranglerInstance (DataWrangler): An instance of DataWrangler used to regenerate the corpus if necessary.
-
-            Returns:
-                bool: True if the data was successfully pre-processed, False otherwise.
-
-            Raises:
-                Exception: Logs an error if data processing fails.
-            """
-            removal = [
-                "ADV",
-                "PRON",
-                "PUNCT",
-                "PART",
-                "DET",
-                "ADP",
-                "SPACE",
-                "NUM",
-                "SYM",
-            ]
-            logger.info(
-                "Configured SpaCy Model and NLTK Stopwords...Initiating Data Cleanse and Dictonary Creation"
+        Returns:
+            Paths to the saved LDA chart (HTML) and coherence plot (PNG), or
+            (None, None) if visualization fails.
+        """
+        try:
+            chart_path = os.path.join(output_dir, "lda_model.html")
+            lda_display = pyLDAvis.gensim_models.prepare(
+                self.lda_model, self.corpus, self.id2word
             )
-            self.worker_status.emit("Configured SpaCy Model..")
-            try:
-                if self.prelemma_corpus is not None:
-                    self.worker_status.emit("Lemmitizing Corpus...")
-                    unprocessed_corpus = nlp.pipe(self.prelemma_corpus)
-                    for i in range(len(unprocessed_corpus)):
-                        for comment in unprocessed_corpus:
-                            proj_tok = [
-                                token.lemma_.lower()
-                                for token in comment
-                                if (
-                                    token.pos_ not in removal
-                                    and token.lemma_.lower() not in stopwords
-                                    and not token.is_stop
-                                    and token.is_alpha
-                                )
-                            ]
-                            self._tokens.append(proj_tok)
-                            self.preprocess_progress.emit(i + 1)
-                    self.worker_status.emit("Lemmatization Completed")
-                else:
-                    logger.info(
-                        "Prelemma Corpus is empty. Regenerating Corpus using DataWrangler"
-                    )
-                    self.prelemma_corpus = wranglerInstance.create_corpus()
-                logger.debug(f"Token Length:{len(self._tokens)}")
-                logger.info("Successfully Regenerated Corpus!...")
-                self.worker_status.emit(
-                    f"Preparing Mapping Dictonary for {len(self._tokens)} tokens... "
-                )
-                self.id2word = MappingDictionary(self._tokens)
-                self.worker_status.emit("Finally, Filtering Out Extremes...")
-                self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=5000)
-                self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
-                logger.debug(
-                    f"Pre-Lemma Corpus Length:{len(self.prelemma_corpus)} \n Mapping Dict: {self.id2word} \n Post Processing Corpus: {len(self.corpus)}"
-                )
-                logger.success("Successfully Processed Corpus")
-                self.preprocess_finished.emit()
-                return True
-            except Exception as e:
-                logger.exception("FAILED to Process Data")
-                return False
+            pyLDAvis.save_html(lda_display, chart_path)
 
-        def preprocess_input_data(
-            self, nlp, wranglerInstance: DataWrangler = None
-        ) -> bool:
-            """
-            Prepares the data for further processing by configuring the necessary NLP model and stopwords.
-
-            This function initializes the SpaCy language model and defines a list of parts of speech to remove during data cleansing. It then calls the `data_reshaped` method to perform the actual data reshaping and tokenization, handling any exceptions that may occur during the process.
-
-            Args:
-                wranglerInstance (DataWrangler, optional): An instance of DataWrangler used for data handling, defaults to None.
-
-            Returns:
-                bool: True if the data was successfully preprocessed, False otherwise.
-
-            Raises:
-                Exception: Logs an error if data preprocessing fails.
-            """
-
-            try:
-                return self.process_corpus(
-                    nlp=nlp,
-                    removal=removal,
-                    wranglerInstance=wranglerInstance,
-                    stopwords=stopwords,
-                )
-            except Exception:
-                logger.exception("Failed to Preprocess Data")
-                return False
-
-        def model_trained(
-            self, iterations: int, workers: int, passes: int, num_of_topics: int
-        ) -> bool:
-            """Trains the LDA model and evaluates coherence for a range of topic counts.
-
-            This method iteratively trains the LDA model for a specified number of
-            topics and records the coherence values for each topic count. It helps
-            in determining the optimal number of topics for the model based on
-            coherence scores.
-
-            Args:
-                iterations: The number of iterations for the LDA model training.
-                workers: The number of worker threads to use during training.
-                passes: The number of passes through the corpus during training.
-                num_of_topics: The number of topics to evaluate during training.
-
-            Returns:
-                True if the model is successfully trained and coherence values are
-                recorded, False otherwise.
-            """
-            try:
-                for i in range(1, 20):
-                    lda_model = self.get_lda_model(
-                        iterations=iterations, workers=4, passes=passes, num_of_topics=i
-                    )
-                    cm = CoherenceModel(
-                        model=lda_model,
-                        corpus=self.corpus,
-                        dictionary=self.id2word,
-                        coherence="c_v",
-                    )
-                    self.topics.append(i)
-                    self.coherence_values.append(cm.get_coherence())
-                    self.train_progress.emit(i + 1)
-
-                logger.success("Successfully Trained Model")
-                self.train_finished.emit()
-                return True
-            except Exception as e:
-                logger.exception("Failed to  Train Model")
-                return False
+            plot_path = os.path.join(output_dir, "coherence.png")
+            plt.figure()
+            plt.plot(self.topic_counts, self.coherence_values, marker="o")
+            plt.xlabel("Number of Topics")
+            plt.ylabel("Coherence")
+            plt.savefig(plot_path, bbox_inches="tight")
+            plt.close()
+            return chart_path, plot_path
+        except Exception:
+            logger.exception("Failed to Visualize Results")
+            return None, None

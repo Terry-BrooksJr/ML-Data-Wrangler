@@ -241,7 +241,7 @@ class DataWrangler(QObject):
     def __init__(
         self,
         comments_dir: pathlib.Path = pathlib.Path.cwd() / "comments",
-        ticket_file: pathlib.Path = pathlib.Path.cwd() / "tickets.json",
+        ticket_file: pathlib.Path = pathlib.Path.cwd() / "tickets-only.json",
     ) -> None:
         """Initializes the DataWrangler with specified directories for comments and tickets.
 
@@ -320,6 +320,7 @@ class DataWrangler(QObject):
             Returns:
                 str: The full path to the specified file in the 'completed' directory.
             """
+            os.makedirs(os.path.join(pathlib.Path.cwd(), "completed"), exist_ok=True)
             return os.path.join(pathlib.Path.cwd(), "completed", filename)
 
         filename = construct_path(filename)
@@ -460,7 +461,7 @@ class DataWrangler(QObject):
                         f"Appended ticket {ticket['id']} to wrangled_tickets property on the caller object"
                     )
                     logger.debug(
-                        f" Length of Wrangled Tickets: {len(self.wrangled_tickets)} \n Wrangled Tickets: {[ticket.__str__() for ticket in self.wrangled_tickets]}"
+                        f"Length of Wrangled Tickets: {len(self.wrangled_tickets)}"
                     )
             self.ticket_finished.emit()
             return True
@@ -624,3 +625,16 @@ class DataWrangler(QObject):
         self.corpus_creation_finished.emit()
         logger.success("Corpus Successfully Created")
         return self.corpus
+
+    def ticket_documents(self) -> List[str]:
+        """Returns one cleansed document per wrangled ticket, for topic modelling.
+
+        Each document is the ticket's subject followed by its comments.
+        """
+        return [
+            " ".join(
+                [self._cleanse(ticket.subject)]
+                + [self._cleanse(comment["body"]) for comment in ticket.comments]
+            )
+            for ticket in self.wrangled_tickets
+        ]
