@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  GREETING: Hello, world!
+
+tasks:
+  default:
+    desc: Print a greeting message
+    cmds:
+      - echo "{{.GREETING}}"
+    silent: true
+
+  deps:upgrade:
+    desc: Resolve dependencies to the newest mutually compatible versions
+    cmds:
+      - uv lock --upgrade
+      - uv tree --outdated
+    silent: false
+
+  run:app:
+    desc: Run the application
+    cmds:
+      - uv run src/app.py
+    silent: false

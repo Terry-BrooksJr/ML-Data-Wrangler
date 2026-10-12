@@ -26,6 +26,7 @@ def build_ticket_payload(ticket_doc: dict) -> str:
         "priority": ticket_doc.get("priority"),  # corroborating only, per prompt
         "status": ticket_doc.get("status"),
         "jira_ids": ticket_doc.get("jira_ids", []),
+        "as_of" : datetime.utcnow().isoformat(), #Allows for the model to know when the ticket was last seen, so it can reason about time-sensitive information like SLA deadlines.
         "transcript": [
             {
                 "author": c["author"],
