@@ -20,6 +20,96 @@ poetry install
 cp .env.example .env   # then fill in values
 ```
 
+The LDA app also needs a spaCy model and the NLTK stopword list, which
+`poetry install` doesn't provide:
+
+```bash
+poetry run python -m spacy download en_core_web_lg
+poetry run python -c "import nltk; nltk.download('stopwords')"
+```
+
+Both commands fetch from `raw.githubusercontent.com`. If your network breaks
+SSL to that host, install from the GitHub release and the jsDelivr mirror
+instead:
+
+```bash
+poetry run pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl
+mkdir -p ~/nltk_data/corpora && curl -sSfL -o ~/nltk_data/corpora/stopwords.zip https://cdn.jsdelivr.net/gh/nltk/nltk_data@gh-pages/packages/corpora/stopwords.zip && unzip -oq ~/nltk_data/corpora/stopwords.zip -d ~/nltk_data/corpora
+```
+
+## Data wrangler and LDA app
+
+### Running it
+
+Run from the repo root. Output files are written relative to the directory
+you launch from.
+
+```bash
+poetry run python src/app.py
+```
+
+1. **Select Path to Ticket File** (`tickets-only.json`) and **Select Path to Comments Directory** (`comments/`).
+2. **Process Data** reshapes the tickets, binds each ticket's comments and builds the corpus. It writes `completed/processed_tickets<date>.json` and `completed/corpus_<date>.json`.
+3. Enter **Number of Topics**, **Iterations** and **Passes**, then click **Train Model**. All three must be integers: at least 2 topics, fewer than 200 iterations, fewer than 20 passes.
+
+Training runs in a background thread with a progress dialog. It treats each
+ticket as one document, then trains a model for every topic count from 2 up
+to the number you entered and keeps the one with the highest `c_v`
+coherence. When it finishes, it:
+- opens a Gradio page in your browser with that model's topics, ranked by share of tickets, and a coherence-by-topic-count plot;
+- writes `lda_model.html` (an interactive pyLDAvis chart, also opened in the browser) and `coherence.png`.
+
+### Data handling
+
+- **Comments** come from `comments/<ticket id>.json`, a JSON list of Zendesk comments. Each file starts with the ticket description, so the description isn't added twice. A ticket without a comment file keeps its description as its only comment.
+- **Corpus cleansing** happens only when building the corpus and the LDA documents. `DataWrangler._cleanse` normalizes text and drops emails, URLs, UUIDs, MD5 hashes, IPv4 addresses and words with no letters or digits. Everything else keeps the original text.
+
+### Using it from Python
+
+```python
+from wrangler import DataWrangler
+
+wrangler = DataWrangler()               # tickets-only.json + comments/ in the current directory
+wrangler.tickets_reshaped()
+wrangler.comments_bound()
+
+wrangler.ticket_to_xml(30882, output_path="30882.xml", xsd_path="ticket_schema.xsd")
+wrangler.wrangled_tickets[0].output_to_dict()   # writes completed/ticket_<id>.json
+documents = wrangler.ticket_documents()          # one cleansed document per ticket
+```
+
+- **`ticket_to_xml(ticket, output_path=None, xsd_path=None)`** takes a ticket ID or a raw Zendesk ticket dict and returns XML that validates against `ticket_schema.xsd`. Text is verbatim: nothing is cleansed. People and groups are numeric Zendesk IDs, because the export has no names or emails. Validation against the schema runs only if `lxml` is installed.
+- **`Ticket.output_to_dict(output_path=None)`** writes the ticket as JSON and returns the same data as a dict.
+
+### Known issues
+
+- **Training workers re-import `app.py`.** gensim's `LdaMulticore` starts worker processes, and on macOS each one re-runs `app.py` from the top. So every worker loads the spaCy model and builds a hidden copy of the window. Training still works, but it's slow and uses a lot of memory. The fix is to move the module-level `nlp`, `app` and `window` setup under `if __name__ == "__main__":`.
+- **Chart files aren't gitignored.** `coherence.png` and `lda_model.html` land in the directory you launch from and show up as untracked files. (`completed/` and `*.log` are already ignored.)
+
+## Writing tickets to MongoDB
+
+`DataWrangler` can load the export into the `tickets` collection that the
+decision engine reads. It uses the same `MONGO_URI`, `MONGO_DB` and
+`MONGO_COLLECTION` settings as the engine.
+
+```python
+from wrangler import DataWrangler
+
+wrangler = DataWrangler()                  # tickets-only.json + comments/
+wrangler.write_tickets_to_mongo()          # every ticket in the export
+wrangler.write_ticket_to_mongo(30882)      # one ticket
+```
+
+Writes are keyed by `zendesk_id` and are safe to re-run:
+- **New tickets** are inserted with `awaiting_review: true`.
+- **Existing tickets** get only unseen comments appended, and their status, priority, assignee and other mutable fields refreshed.
+- **`awaiting_review`** goes back to `true` only when new comments arrive.
+- **Review history** (`agent_reviews`) is never touched.
+
+Known limitations:
+- Authors and assignees are numeric Zendesk IDs. Only the requester's comments get a `role`.
+- `customer_id` and `jira_ids` stay empty until open items #8 and #7 are resolved.
+
 ## Decision engine
 
 ### What it does

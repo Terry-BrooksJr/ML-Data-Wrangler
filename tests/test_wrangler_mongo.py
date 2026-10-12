@@ -1,0 +1,155 @@
+import json
+from datetime import datetime, timezone
+
+import mongomock
+import pytest
+
+from decision_engine.payload import build_ticket_payload
+from wrangler import DataWrangler
+
+TICKET = {
+    "id": 101,
+    "subject": "Import fails",
+    "description": "The import fails.",
+    "via": {"channel": "web"},
+    "status": "open",
+    "type": "incident",
+    "priority": "high",
+    "group_id": 24165535,
+    "assignee_id": 384720527257,
+    "requester_id": 555,
+    "organization_id": 777,
+    "email_cc_ids": [888],
+    "tags": ["enterprise"],
+    "created_at": "2026-08-18T18:53:13Z",
+    "updated_at": "2026-08-19T20:01:24Z",
+    "fields": [
+        {"id": 27124341, "value": "developer_support"},
+        {"id": 27159242, "value": None},
+        {"id": 27219391, "value": "learnosity_bug"},
+    ],
+}
+
+
+def comment(comment_id, author_id, body, created_at, public=True):
+    return {
+        "id": comment_id,
+        "type": "Comment",
+        "author_id": author_id,
+        "plain_body": body,
+        "created_at": created_at,
+        "public": public,
+    }
+
+
+COMMENTS = [
+    comment(1, 555, "The import fails.", "2026-08-18T18:53:13Z"),
+    comment(2, 384720527257, "Escalated to engineering.", "2026-08-19T09:00:00Z", public=False),
+]
+
+
+@pytest.fixture
+def data_dir(tmp_path):
+    (tmp_path / "comments").mkdir()
+    (tmp_path / "tickets-only.json").write_text(json.dumps([TICKET]))
+    (tmp_path / "comments" / "101.json").write_text(json.dumps(COMMENTS))
+    return tmp_path
+
+
+@pytest.fixture
+def wrangler(data_dir):
+    return DataWrangler(comments_dir=data_dir / "comments", ticket_file=data_dir / "tickets-only.json")
+
+
+@pytest.fixture
+def tickets():
+    return mongomock.MongoClient().support_db.tickets
+
+
+def test_document_maps_fields(wrangler):
+    doc = wrangler.ticket_to_document(101)
+
+    assert doc["zendesk_id"] == "101"
+    assert doc["assignee"] == "384720527257"
+    assert doc["priority"] == "high"
+    assert doc["request_type"] == "developer_support"
+    assert doc["historical_outcome"] == "learnosity_bug"
+    assert doc["organization_id"] == "777"
+    assert doc["customer_id"] is None
+    assert doc["created_at"] == datetime(2026, 8, 18, 18, 53, 13, tzinfo=timezone.utc)
+    assert doc["raw_xml"].startswith('<?xml version="1.0"')
+
+    first, second = doc["transcript"]
+    assert first["role"] == "requester" and first["is_internal_note"] is False
+    assert second["role"] is None and second["is_internal_note"] is True
+    assert second["comment_id"] == "2"
+
+
+def test_insert_marks_ticket_awaiting_review(wrangler, tickets):
+    summary = wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert summary == {"zendesk_id": "101", "inserted": True, "new_comments": 2}
+    stored = tickets.find_one({"zendesk_id": "101"})
+    assert stored["awaiting_review"] is True
+    assert stored["agent_reviews"] == [] and stored["reengage_attempts"] == []
+
+
+def test_rewrite_is_idempotent(wrangler, tickets):
+    wrangler.write_ticket_to_mongo(101, tickets)
+    tickets.update_one({"zendesk_id": "101"}, {"$set": {"awaiting_review": False}})
+
+    summary = wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert summary["new_comments"] == 0
+    assert tickets.count_documents({}) == 1
+    stored = tickets.find_one({"zendesk_id": "101"})
+    assert len(stored["transcript"]) == 2
+    assert stored["awaiting_review"] is False
+
+
+def test_new_comments_append_and_reopen_review(wrangler, tickets, data_dir):
+    wrangler.write_ticket_to_mongo(101, tickets)
+    tickets.update_one(
+        {"zendesk_id": "101"},
+        {"$set": {"awaiting_review": False}, "$push": {"agent_reviews": {"classification": "flag_reengage"}}},
+    )
+    updated_comments = COMMENTS + [comment(3, 555, "Any update?", "2026-08-25T10:00:00Z")]
+    (data_dir / "comments" / "101.json").write_text(json.dumps(updated_comments))
+    updated_ticket = dict(TICKET, status="pending", priority="urgent")
+
+    summary = wrangler.write_ticket_to_mongo(updated_ticket, tickets)
+
+    assert summary["new_comments"] == 1
+    stored = tickets.find_one({"zendesk_id": "101"})
+    assert [entry["comment_id"] for entry in stored["transcript"]] == ["1", "2", "3"]
+    assert stored["status"] == "pending" and stored["priority"] == "urgent"
+    assert stored["awaiting_review"] is True
+    assert len(stored["agent_reviews"]) == 1  # review history is never touched
+
+
+def test_rewrite_is_idempotent_without_comment_ids(wrangler, tickets, data_dir):
+    # An empty comment file falls back to the description, which has no
+    # Zendesk comment ID, so de-duplication compares author/date/text.
+    (data_dir / "comments" / "101.json").write_text("[]")
+    wrangler.write_ticket_to_mongo(101, tickets)
+
+    summary = wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert summary["new_comments"] == 0
+    assert len(tickets.find_one({"zendesk_id": "101"})["transcript"]) == 1
+
+
+def test_write_all_tickets(wrangler, tickets):
+    summaries = wrangler.write_tickets_to_mongo(collection=tickets)
+
+    assert [s["zendesk_id"] for s in summaries] == ["101"]
+
+
+def test_stored_document_feeds_decision_engine(wrangler, tickets):
+    wrangler.write_ticket_to_mongo(101, tickets)
+
+    payload = build_ticket_payload(tickets.find_one({"zendesk_id": "101"}))
+
+    data = json.loads(payload.split("\n\n", 1)[1])
+    assert data["ticket_id"] == "101"
+    assert len(data["transcript"]) == 2

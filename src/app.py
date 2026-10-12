@@ -1,14 +1,15 @@
+import json
 import os
 import pathlib
 import sys
 import time
 import webbrowser
-from typing import List, Tuple, Union
+from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
 import gradio as gr
 import pandas as pd
 from loguru import logger
-from PyQt5.QtCore import QRect, pyqtSignal, QThread, QCoreApplication, QObject, QMutex
+from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex
 from PyQt5.QtGui import QFont
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
@@ -36,6 +37,38 @@ import en_core_web_lg
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
+
+
+class ThreadWorker(QObject):
+    """Runs a function on the QThread it is moved to.
+
+    A QObject moved onto a QThread is used rather than a lambda connected to
+    QThread.started: PyQt5 runs such a lambda on the GUI thread, which freezes
+    the window for the whole job.
+
+    Signals:
+        finished: Emitted with the function's return value.
+        error: Emitted with a message if the function raises. Exceptions are
+            caught because one escaping a Qt thread would abort the app.
+    """
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, task: Callable[[], Any], description: str) -> None:
+        super().__init__()
+        self.task = task
+        self.description = description
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            result = self.task()
+        except Exception as e:
+            logger.exception(f"{self.description} failed: {e}")
+            self.error.emit(f"Error: {self.description} failed: {e}")
+            return
+        self.finished.emit(result)
 
 
 class MainWindow(QMainWindow, QDialog):
@@ -123,7 +156,8 @@ class MainWindow(QMainWindow, QDialog):
             "Welcome to the Data Wrangler. \n\n"
             "Identify two file locations.\n"
             "1. The Ticket File Path from the ZenDesk Tickets API.\n"
-            "2. The path to the comments directory with JSON comments for each ticket."
+            "2. The path to the comments directory with JSON comments for each ticket.\n\n"
+            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs MONGO_URI)."
         )
         warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
         warning_label.setStyleSheet("color: red;")
@@ -140,6 +174,7 @@ class MainWindow(QMainWindow, QDialog):
         self.comments_dir = QLineEdit()
 
         self.process_button = QPushButton("Process Data")
+        self.mongo_button = QPushButton("Write Tickets to MongoDB")
         self.train_model_button = QPushButton("Train Model")
 
         self.comments_dir.setReadOnly(True)
@@ -148,6 +183,7 @@ class MainWindow(QMainWindow, QDialog):
         self.ticket_file_button.clicked.connect(self.select_ticket_file)
         self.comments_dir_button.clicked.connect(self.select_comments_dir)
         self.process_button.clicked.connect(self.init_start_process)
+        self.mongo_button.clicked.connect(self.start_mongo_worker)
         self.train_model_button.clicked.connect(self.start_allocator_worker)
         self.train_model_button.setEnabled(False)
 
@@ -186,6 +222,7 @@ class MainWindow(QMainWindow, QDialog):
         self.data_entry_layout.addWidget(self.ticket_file_button)
         self.data_entry_layout.addWidget(self.comments_dir_button)
         self.data_entry_layout.addWidget(self.process_button)
+        self.data_entry_layout.addWidget(self.mongo_button)
         self.data_entry_layout.addLayout(self.form_layout)
         self.data_entry_layout.addWidget(self.train_model_button)
         self.data_entry_layout.addWidget(self.log_output)
@@ -293,10 +330,12 @@ class MainWindow(QMainWindow, QDialog):
         self.allocator.train_finished.connect(self.on_worker_finished)
         self.allocator.error.connect(self.on_worker_error)
 
-        # The lambda runs in the new thread; signals reach this window through
-        # queued connections, so the UI is only touched on the GUI thread.
+        # The allocator emits from the worker thread; these queued connections
+        # deliver to this window, so the UI is only touched on the GUI thread.
+        # process_corpus and model_trained report their own failures through
+        # allocator.error; the worker's error signal covers anything else.
         self.thread = QThread()
-        self.thread.started.connect(
+        self.training_worker = ThreadWorker(
             lambda: self.allocator.run(
                 nlp=nlp,
                 stopwords=stop_words,
@@ -304,8 +343,12 @@ class MainWindow(QMainWindow, QDialog):
                 iterations=int(iterations),
                 passes=int(passes),
                 num_of_topics=int(number_of_topics),
-            )
+            ),
+            "Training the LDA model",
         )
+        self.training_worker.moveToThread(self.thread)
+        self.training_worker.error.connect(self.on_worker_error)
+        self.thread.started.connect(self.training_worker.run)
         self.thread.start()
 
     def _disconnect_allocator(self):
@@ -324,6 +367,7 @@ class MainWindow(QMainWindow, QDialog):
             self.pdialog.close()
         self.thread.quit()
         self.thread.wait()
+        self.training_worker = None
         self.train_model_button.setEnabled(True)
 
     def on_worker_finished(self):
@@ -335,11 +379,89 @@ class MainWindow(QMainWindow, QDialog):
         QMessageBox.information(
             self, "Process Complete", "LDA Model training has finished successfully."
         )
-        self.present_results()
+        # This runs as a Qt slot, where an unhandled exception aborts the app.
+        try:
+            self.present_results()
+        except Exception as e:
+            logger.exception(f"Presenting results failed: {e}")
+            self.notify_user_of_error(
+                (False, f"Training finished, but the results could not be shown: {e}")
+            )
 
     def on_worker_error(self, message: str):
         """Handles a failure in the worker thread."""
         self._stop_worker_thread()
+        self.notify_user_of_error((False, message))
+
+    def start_mongo_worker(self):
+        """
+        Writes every ticket in the selected ticket file to MongoDB in a separate
+        thread, updating the progress dialog as it goes.
+
+        Inserts new tickets and appends only unseen comments to existing ones;
+        see DataWrangler.write_ticket_to_mongo. Independent of Process Data.
+        """
+        if not os.getenv("MONGO_URI"):
+            message = "MONGO_URI is not set. Set it (see .env.example) and restart the app."
+            logger.error(message)
+            QMessageBox.warning(self, "MongoDB Not Configured", message)
+            return
+        try:
+            with open(self.wrangler.ticket_file, "r") as tickets_file:
+                tickets = json.load(tickets_file)
+        except (OSError, json.JSONDecodeError) as e:
+            self.notify_user_of_error((False, f"Error: Could not read the ticket file: {e}"))
+            return
+
+        self.mongo_ticket_count = len(tickets)
+        self.mongo_button.setEnabled(False)
+        self.show_progress_bar("Writing Tickets to MongoDB...")
+
+        self.mongo_thread = QThread()
+        self.mongo_worker = ThreadWorker(
+            lambda: self.wrangler.write_tickets_to_mongo(tickets),
+            "Writing tickets to MongoDB",
+        )
+        self.mongo_worker.moveToThread(self.mongo_thread)
+
+        # The wrangler emits from the worker thread; these queued connections
+        # deliver to this window on the GUI thread.
+        self.wrangler.mongo_write_progress.connect(self.update_mongo_progress)
+        self.wrangler.worker_status.connect(self.update_training_status)
+        self.mongo_worker.finished.connect(self.on_mongo_finished)
+        self.mongo_worker.error.connect(self.on_mongo_error)
+        self.mongo_thread.started.connect(self.mongo_worker.run)
+        self.mongo_thread.start()
+
+    def update_mongo_progress(self, written: int):
+        self.update_training_progress_bar(written * 100 // max(self.mongo_ticket_count, 1))
+
+    def _stop_mongo_thread(self):
+        self.wrangler.mongo_write_progress.disconnect(self.update_mongo_progress)
+        self.wrangler.worker_status.disconnect(self.update_training_status)
+        if self.pdialog is not None:
+            self.pdialog.close()
+        self.mongo_thread.quit()
+        self.mongo_thread.wait()
+        self.mongo_worker = None
+        self.mongo_button.setEnabled(True)
+
+    def on_mongo_finished(self, summaries: list):
+        """Cleans up the thread and summarises what was written."""
+        self._stop_mongo_thread()
+        inserted = sum(summary["inserted"] for summary in summaries)
+        updated = len(summaries) - inserted
+        new_comments = sum(summary["new_comments"] for summary in summaries)
+        message = (
+            f"Wrote {len(summaries)} tickets to MongoDB: "
+            f"{inserted} new, {updated} updated, {new_comments} new comments."
+        )
+        logger.success(message)
+        QMessageBox.information(self, "MongoDB Write Complete", message)
+
+    def on_mongo_error(self, message: str):
+        """Handles a failure in the MongoDB write thread."""
+        self._stop_mongo_thread()
         self.notify_user_of_error((False, message))
 
     def init_logging(self) -> None:
