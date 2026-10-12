@@ -4,13 +4,15 @@ import pathlib
 import random
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from html import unescape
-from typing import List, Optional, TextIO, Tuple, Union
+from typing import Iterable, List, Optional, TextIO, Tuple, Union
 from xml.etree import ElementTree as ET
 
 from loguru import logger
+from pymongo import MongoClient
+from pymongo.collection import Collection
 import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
@@ -237,6 +239,8 @@ class DataWrangler(QObject):
     _mutex = QMutex()
     error = pyqtSignal(str)
     worker_status = pyqtSignal(str)
+    mongo_write_progress = pyqtSignal(int)
+    mongo_write_finished = pyqtSignal()
 
     def __init__(
         self,
@@ -608,6 +612,202 @@ class DataWrangler(QObject):
             logger.success(f"Wrote ticket {ticket['id']} XML to {output_path}")
 
         return xml_text
+
+    @staticmethod
+    def _parse_zendesk_time(value: Optional[str]) -> Optional[datetime]:
+        """Parses Zendesk's "2026-08-18T18:53:13Z" timestamps as aware UTC datetimes."""
+        if not value:
+            return None
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    @staticmethod
+    def _transcript_key(entry: dict) -> tuple:
+        """Identifies a transcript entry for de-duplication across ingests.
+
+        Uses the Zendesk comment ID when there is one, otherwise falls back to
+        Author + Date + Text, as the ingestion requirements allow.
+        """
+        if entry.get("comment_id") is not None:
+            return ("id", entry["comment_id"])
+        timestamp = entry.get("timestamp")
+        if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
+            # pymongo returns naive UTC datetimes, so compare in that form.
+            timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        return ("content", entry.get("author"), timestamp, entry.get("body"))
+
+    def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
+        """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
+
+        The shape follows the `tickets` collection in
+        AI_CODER_INTEGRATION_BRIEF.md (section 4.2), which the decision engine
+        reads. Comment text is stored verbatim, not cleansed, because the
+        decision engine needs the real wording.
+
+        Args:
+            ticket: A raw Zendesk ticket dict, or a ticket ID to look up in
+                ticket_file.
+
+        Returns:
+            The document, without the review-state fields (`awaiting_review`,
+            `agent_reviews`, ...) that write_ticket_to_mongo manages.
+        """
+        if not isinstance(ticket, dict):
+            with open(self.ticket_file, "r") as tickets_file:
+                matches = [t for t in json.load(tickets_file) if t["id"] == int(ticket)]
+            if not matches:
+                raise KeyError(f"Ticket {ticket} not found in {self.ticket_file}")
+            ticket = matches[0]
+
+        fields = ticket.get("fields") or []
+
+        def field_value(index: int):
+            # Same custom-field positions tickets_reshaped and ticket_to_xml use.
+            return fields[index]["value"] if len(fields) > index else None
+
+        def as_id(value) -> Optional[str]:
+            return None if value is None else str(value)
+
+        requester_id = as_id(ticket.get("requester_id"))
+        raw_comments = self._raw_comments_for(ticket["id"])
+        if not raw_comments and ticket.get("description"):
+            # Mirrors ticket_to_xml: the description is the first comment.
+            raw_comments = [
+                {
+                    "author_id": ticket.get("requester_id"),
+                    "created_at": ticket.get("created_at"),
+                    "public": True,
+                    "plain_body": ticket["description"],
+                }
+            ]
+
+        transcript = []
+        for raw_comment in raw_comments:
+            author = as_id(raw_comment.get("author_id"))
+            transcript.append(
+                {
+                    "comment_id": as_id(raw_comment.get("id")),
+                    "author": author,
+                    # Only the requester can be identified without a Zendesk
+                    # users lookup; every other author's role stays unknown.
+                    "role": "requester" if author is not None and author == requester_id else None,
+                    "body": raw_comment.get("plain_body"),
+                    "timestamp": self._parse_zendesk_time(raw_comment.get("created_at")),
+                    "is_internal_note": not raw_comment.get("public", True),
+                }
+            )
+
+        return {
+            "zendesk_id": str(ticket["id"]),
+            "subject": ticket.get("subject"),
+            "received_via": (ticket.get("via") or {}).get("channel"),
+            "status": ticket.get("status"),
+            "status_category": ticket.get("status"),
+            "ticket_type": ticket.get("type"),
+            "priority": ticket.get("priority"),
+            "group": as_id(ticket.get("group_id")),
+            "assignee": as_id(ticket.get("assignee_id")),
+            "request_type": field_value(0),
+            "historical_outcome": field_value(2),
+            "tags": ticket.get("tags") or [],
+            "requester_id": requester_id,
+            "organization_id": as_id(ticket.get("organization_id")),
+            "cc_list": [str(cc_id) for cc_id in ticket.get("email_cc_ids") or []],
+            # TODO(open item #8): no stable customer identifier is agreed yet,
+            # and the export has no requester email for the interim key.
+            "customer_id": None,
+            # TODO(open item #7): Jira IDs need the confirmed integration
+            # comment format before they can be extracted.
+            "jira_ids": [],
+            "raw_xml": self.ticket_to_xml(ticket),
+            "transcript": transcript,
+            "created_at": self._parse_zendesk_time(ticket.get("created_at")),
+            "updated_at": self._parse_zendesk_time(ticket.get("updated_at")),
+        }
+
+    @staticmethod
+    def get_tickets_collection() -> Collection:
+        """Connects to the `tickets` collection named by MONGO_URI, MONGO_DB and MONGO_COLLECTION."""
+        mongo = MongoClient(os.environ["MONGO_URI"])
+        database = mongo[os.environ.get("MONGO_DB", "support_db")]
+        return database[os.environ.get("MONGO_COLLECTION", "tickets")]
+
+    def write_ticket_to_mongo(
+        self, ticket: Union[int, dict], collection: Optional[Collection] = None
+    ) -> dict:
+        """Inserts or updates one ticket in Mongo, keyed by zendesk_id.
+
+        New tickets are inserted with `awaiting_review: true`. For tickets
+        already stored, only comments not seen before are appended and the
+        mutable fields are refreshed; `awaiting_review` is set back to true
+        only when there are new comments. Re-running on the same data changes
+        nothing, so the write is idempotent. This never calls the decision
+        engine and never writes to Zendesk.
+
+        Args:
+            ticket: A raw Zendesk ticket dict, or a ticket ID to look up in
+                ticket_file.
+            collection: The `tickets` collection. Defaults to
+                get_tickets_collection().
+
+        Returns:
+            A summary: zendesk_id, whether it was inserted, and how many new
+            comments were appended.
+        """
+        collection = collection if collection is not None else self.get_tickets_collection()
+        document = self.ticket_to_document(ticket)
+        zendesk_id = document["zendesk_id"]
+        now = datetime.now(timezone.utc)
+
+        existing = collection.find_one({"zendesk_id": zendesk_id}, {"transcript": 1})
+        if existing is None:
+            document.update(
+                {
+                    "awaiting_review": True,
+                    "reengage_attempts": [],
+                    "agent_reviews": [],
+                    "outcomes": [],
+                    "last_ingest": {"at": now, "new_comments": len(document["transcript"])},
+                }
+            )
+            collection.insert_one(document)
+            logger.success(f"Inserted ticket {zendesk_id} into Mongo")
+            return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+
+        seen = {self._transcript_key(entry) for entry in existing.get("transcript", [])}
+        new_comments = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+
+        # raw_xml is refreshed too, so it always matches the latest payload.
+        update = {"$set": {**document, "last_ingest": {"at": now, "new_comments": len(new_comments)}}}
+        if new_comments:
+            update["$push"] = {"transcript": {"$each": new_comments}}
+            update["$set"]["awaiting_review"] = True
+        collection.update_one({"zendesk_id": zendesk_id}, update)
+        logger.success(f"Updated ticket {zendesk_id} in Mongo ({len(new_comments)} new comments)")
+        return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": len(new_comments)}
+
+    def write_tickets_to_mongo(
+        self,
+        tickets: Optional[Iterable[Union[int, dict]]] = None,
+        collection: Optional[Collection] = None,
+    ) -> List[dict]:
+        """Writes every ticket in ticket_file (or the given tickets) to Mongo.
+
+        Returns:
+            One write_ticket_to_mongo summary per ticket.
+        """
+        collection = collection if collection is not None else self.get_tickets_collection()
+        if tickets is None:
+            with open(self.ticket_file, "r") as tickets_file:
+                tickets = json.load(tickets_file)
+
+        summaries = []
+        for i, ticket in enumerate(tickets):
+            ticket_id = ticket["id"] if isinstance(ticket, dict) else ticket
+            self.worker_status.emit(f"Writing Ticket {ticket_id} to MongoDB")
+            summaries.append(self.write_ticket_to_mongo(ticket, collection))
+            self.mongo_write_progress.emit(i + 1)
+        self.mongo_write_finished.emit()
+        return summaries
 
     def create_corpus(self) -> str:
         """Creates a text corpus from the wrangled tickets and their comments."""

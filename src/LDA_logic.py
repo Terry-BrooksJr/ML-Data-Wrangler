@@ -13,7 +13,7 @@ import pyLDAvis
 import pyLDAvis.gensim_models
 import seaborn as sns
 from gensim.corpora.dictionary import Dictionary as MappingDictionary
-from gensim.models import CoherenceModel, LdaMulticore
+from gensim.models import CoherenceModel
 from gensim.models.ldamodel import LdaModel
 from loguru import logger
 from nltk.corpus import stopwords
@@ -111,27 +111,27 @@ class LatentDirichletAllocator(QObject):
     def get_lda_model(
         self,
         iterations: int = 50,
-        workers: int = 4,
         passes: int = 10,
         num_of_topics: Optional[int] = None,
     ) -> LdaModel:
         """Trains an LDA model with the specified parameters.
 
+        Runs in a single process: on this corpus it is faster than
+        LdaMulticore, and on macOS each extra process re-imports app.py.
+
         Args:
             iterations: The number of iterations for the LDA model.
-            workers: The number of worker processes to use.
             passes: The number of passes through the corpus.
             num_of_topics: The number of topics to model (defaults to instance's value).
 
         Returns:
             An LdaModel instance configured with the provided parameters.
         """
-        return LdaMulticore(
+        return LdaModel(
             corpus=self.corpus,
             id2word=self.id2word,
             iterations=iterations,
             num_topics=num_of_topics or self.num_of_topics,
-            workers=workers,
             passes=passes,
             random_state=RandomState(self.seed),
         )
@@ -205,13 +205,12 @@ class LatentDirichletAllocator(QObject):
             return False
 
     def model_trained(
-        self, iterations: int, workers: int, passes: int, num_of_topics: int
+        self, iterations: int, passes: int, num_of_topics: int
     ) -> bool:
         """Trains LDA models for 2..num_of_topics topics and keeps the most coherent.
 
         Args:
             iterations: The number of iterations for the LDA model training.
-            workers: The number of worker processes to use during training.
             passes: The number of passes through the corpus during training.
             num_of_topics: The highest number of topics to evaluate.
 
@@ -227,7 +226,6 @@ class LatentDirichletAllocator(QObject):
                 self.worker_status.emit(f"Training model with {topic_count} topics...")
                 lda_model = self.get_lda_model(
                     iterations=iterations,
-                    workers=workers,
                     passes=passes,
                     num_of_topics=topic_count,
                 )
@@ -236,6 +234,7 @@ class LatentDirichletAllocator(QObject):
                     texts=self._tokens,
                     dictionary=self.id2word,
                     coherence="c_v",
+                    processes=1,  # c_v otherwise starts a pool of processes
                 ).get_coherence()
                 logger.info(f"{topic_count} topics: coherence {coherence:.4f}")
                 self.topic_counts.append(topic_count)
@@ -262,12 +261,10 @@ class LatentDirichletAllocator(QObject):
         iterations: int,
         passes: int,
         num_of_topics: int,
-        workers: int = 4,
     ) -> bool:
         """Preprocesses the corpus and then trains the models, for use in a worker thread."""
         return self.process_corpus(nlp, stopwords, wranglerInstance) and self.model_trained(
             iterations=iterations,
-            workers=workers,
             passes=passes,
             num_of_topics=num_of_topics,
         )
