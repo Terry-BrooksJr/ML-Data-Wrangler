@@ -27,48 +27,18 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QProgressBar,
     QDialog,
+    QTabWidget,
 )
 
 from LDA_logic import LatentDirichletAllocator, stopwords
-from utility import LogHighlighter, QTextEditStream
+from triage_tab import TriageTab
+from utility import LogHighlighter, QTextEditStream, ThreadWorker
 from wrangler import DataWrangler
 import en_core_web_lg
 
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
-
-
-class ThreadWorker(QObject):
-    """Runs a function on the QThread it is moved to.
-
-    A QObject moved onto a QThread is used rather than a lambda connected to
-    QThread.started: PyQt5 runs such a lambda on the GUI thread, which freezes
-    the window for the whole job.
-
-    Signals:
-        finished: Emitted with the function's return value.
-        error: Emitted with a message if the function raises. Exceptions are
-            caught because one escaping a Qt thread would abort the app.
-    """
-
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-
-    def __init__(self, task: Callable[[], Any], description: str) -> None:
-        super().__init__()
-        self.task = task
-        self.description = description
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            result = self.task()
-        except Exception as e:
-            logger.exception(f"{self.description} failed: {e}")
-            self.error.emit(f"Error: {self.description} failed: {e}")
-            return
-        self.finished.emit(result)
 
 
 class MainWindow(QMainWindow, QDialog):
@@ -120,7 +90,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
-        self.setGeometry(100, 100, 600, 400)
+        self.setGeometry(100, 100, 900, 750)
 
         # Main layout
         self.main_layout = QVBoxLayout()
@@ -225,11 +195,24 @@ class MainWindow(QMainWindow, QDialog):
         self.data_entry_layout.addWidget(self.mongo_button)
         self.data_entry_layout.addLayout(self.form_layout)
         self.data_entry_layout.addWidget(self.train_model_button)
-        self.data_entry_layout.addWidget(self.log_output)
+        self.data_entry_layout.addStretch()
+
+        # Topic modeling and the decision engine each get a tab; the log pane
+        # sits below both so either tab's output stays visible.
+        topic_tab = QWidget()
+        topic_layout = QVBoxLayout(topic_tab)
+        topic_layout.addLayout(self.instruction_layout)
+        topic_layout.addLayout(self.data_entry_layout)
+
+        self.triage_tab = TriageTab()
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(topic_tab, "Topic Modeling")
+        self.tabs.addTab(self.triage_tab, "Decision Engine")
 
         # Main layout arrangement
-        self.main_layout.addLayout(self.instruction_layout)
-        self.main_layout.addLayout(self.data_entry_layout)
+        self.main_layout.addWidget(self.tabs, stretch=3)
+        self.main_layout.addWidget(self.log_output, stretch=1)
 
     def confirm_file_change(self, type: str) -> None:
 
