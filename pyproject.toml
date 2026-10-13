@@ -1,38 +1,45 @@
-[tool.poetry]
+[project]
 name = "ml-data-wrangler"
 version = "0.1.0"
 description = ""
-authors = ["Terry Arthur Brooks, Jr. <Terry.Arthur@BrooksJr.com>"]
+authors = [{ name = "Terry Arthur Brooks, Jr.", email = "Terry.Arthur@BrooksJr.com" }]
 license = "MIT"
 readme = "README.md"
-package-mode = false 
+requires-python = ">=3.10,<4"
+dependencies = [
+    "anthropic>=1.11.0,<2",
+    "en-core-web-lg",
+    "gensim>=4.3.2",
+    "loguru",
+    "matplotlib",
+    "nltk>=3.9.1",
+    "pandas>=2.2",
+    "pyldavis>=3.4.1,<4",
+    "pymongo>=4.18.0,<5",
+    "PyQt5",
+    "scipy==1.12",
+    "seaborn>=0.13.2,<0.14",
+    "spacy>=3.7.5,<3.8",
+    "validators>=0.34.0,<0.35",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10.0"
-gradio = "*"
-matplotlib = "*"
-gensim = "*"
-loguru = "*"
-nltk = "*"
-PyQt5 = "*"
-spacy = "*"
-seaborn = "^0.13.2"
-pyldavis = "^3.4.1"
-scipy = "1.12"
-validators = "^0.34.0"
-anthropic = "^1.11.0"
-pymongo = "^4.18.0"
+[dependency-groups]
+dev = [
+    "black",
+    "isort",
+    "mongomock",
+    "prospector",
+    "pytest",
+]
 
-[tool.poetry.group.dev.dependencies]
-isort = "*"
-black = "*"
-prospector = "*"
-pytest = "*"
-mongomock = "*"
+[tool.uv]
+# An application, not an installable package (was Poetry's package-mode = false).
+package = false
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv.sources]
+# spaCy models aren't on PyPI. 3.7.1 is the release for spaCy 3.7.x, hence the
+# spacy <3.8 bound above.
+en-core-web-lg = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl" }
 
 [tool.isort]
 profile = "black"
