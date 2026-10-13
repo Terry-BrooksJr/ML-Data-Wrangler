@@ -1,13 +1,9 @@
 import json
 import os
-import pathlib
 import sys
 import time
-import webbrowser
 from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
-import gradio as gr
-import pandas as pd
 from loguru import logger
 from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex
 from PyQt5.QtGui import QFont
@@ -30,6 +26,7 @@ from PyQt5.QtWidgets import (
 )
 
 from LDA_logic import LatentDirichletAllocator, stopwords
+from results_dialog import ResultsDialog
 from utility import LogHighlighter, QTextEditStream
 from wrangler import DataWrangler
 import en_core_web_lg
@@ -541,10 +538,11 @@ class MainWindow(QMainWindow, QDialog):
 
     def present_results(self) -> None:
         """
-        Displays the results of the model training in a browser.
+        Displays the results of the model training.
 
-        Opens a Gradio page with the best model's topics and the coherence plot,
-        and opens the interactive pyLDAvis chart (lda_model.html) in its own tab.
+        Shows the best model's topics and the coherence plot in a results
+        window, and opens the interactive pyLDAvis chart (lda_model.html) in
+        the browser.
 
         Args:
             self.allocator (LatentDirichletAllocator): The allocator instance used to retrieve the results.
@@ -552,39 +550,17 @@ class MainWindow(QMainWindow, QDialog):
         Returns:
             None
         """
-        chart_path, _ = self.allocator.visualize_results()
-        topics = self.allocator.get_topics()
-        topic_lines = "\n".join(
-            f"{rank}. **{share:.0%} of tickets**: {', '.join(words)}"
-            for rank, (_, share, words) in enumerate(topics, start=1)
+        chart_path, plot_path = self.allocator.visualize_results()
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.results_dialog = ResultsDialog(
+            best_num_topics=self.allocator.best_num_topics,
+            topics=self.allocator.get_topics(),
+            chart_path=chart_path,
+            plot_path=plot_path,
+            parent=self,
         )
-        coherence = pd.DataFrame(
-            {
-                "Number of Topics": self.allocator.topic_counts,
-                "Coherence": self.allocator.coherence_values,
-            }
-        )
-
-        with gr.Blocks(title="LDA Results") as results_UI:
-            gr.Markdown(
-                f"# Topics ({self.allocator.best_num_topics}, the most coherent model)\n\n"
-                + (topic_lines or "No topics were found.")
-            )
-            gr.LinePlot(
-                coherence,
-                x="Number of Topics",
-                y="Coherence",
-                title="Coherence by Number of Topics",
-            )
-            gr.Markdown(
-                f"Interactive topic chart: `{chart_path}`"
-                if chart_path
-                else "Error: Loading LDA Graph"
-            )
-
-        results_UI.launch(inbrowser=True, prevent_thread_lock=True)
-        if chart_path:
-            webbrowser.open(pathlib.Path(chart_path).as_uri())
+        self.results_dialog.show()
+        self.results_dialog.open_chart()
 
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
