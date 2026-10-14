@@ -1,7 +1,7 @@
 import os
 import pathlib
 import random
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import matplotlib
 
@@ -31,6 +31,47 @@ sns.set_theme()
 
 # spaCy parts of speech that carry no topical meaning.
 REMOVED_POS = ["ADV", "PRON", "PUNCT", "PART", "DET", "ADP", "SPACE", "NUM", "SYM"]
+# Dictionary.filter_extremes settings; recorded with each saved run.
+FILTER_NO_BELOW = 5
+FILTER_NO_ABOVE = 0.5
+FILTER_KEEP_N = 5000
+
+
+def tokenize(
+    nlp: Language,
+    stopwords: List[str],
+    documents: List[str],
+    progress: Optional[Callable[[int], None]] = None,
+) -> List[List[str]]:
+    """Lemmatizes documents into token lists, dropping stopwords and REMOVED_POS.
+
+    Used for training and for assigning topics with a saved model, so both see
+    the same preprocessing.
+
+    Args:
+        progress: Called with percent complete (0-100) after each document.
+    """
+    stopword_set = set(stopwords)
+    tokens: List[List[str]] = []
+    total = len(documents) or 1
+    # Lemmas only need the tagger, so skip the slower parser and NER.
+    with nlp.select_pipes(disable=[p for p in ("parser", "ner") if p in nlp.pipe_names]):
+        for i, document in enumerate(nlp.pipe(documents)):
+            tokens.append(
+                [
+                    token.lemma_.lower()
+                    for token in document
+                    if (
+                        token.pos_ not in REMOVED_POS
+                        and token.lemma_.lower() not in stopword_set
+                        and not token.is_stop
+                        and token.is_alpha
+                    )
+                ]
+            )
+            if progress:
+                progress(int((i + 1) / total * 100))
+    return tokens
 
 
 class LatentDirichletAllocator(QObject):
@@ -72,8 +113,11 @@ class LatentDirichletAllocator(QObject):
         self.id2word: Optional[MappingDictionary] = None
         self.num_of_topics: int = num_of_topics
         self.seed: int = seed if seed is not None else random.randint(1, 2**32 - 1)
-        # One document per ticket.
+        # One document per ticket, and the Zendesk ID of each, in the same order.
         self.prelemma_corpus: Optional[List[str]] = None
+        self.document_ids: List[str] = []
+        # The settings of the last training run, recorded with saved runs.
+        self.settings: dict = {}
 
         self.topic_counts: List[int] = []
         self.coherence_values: List[float] = []
@@ -162,27 +206,10 @@ class LatentDirichletAllocator(QObject):
                     "Prelemma Corpus is empty. Regenerating Corpus using DataWrangler"
                 )
                 self.prelemma_corpus = wranglerInstance.ticket_documents()
+                self.document_ids = wranglerInstance.ticket_ids()
 
-            stopword_set = set(stopwords)
-            self._tokens = []
             self.worker_status.emit("Lemmatizing Corpus...")
-            total = len(self.prelemma_corpus)
-            # Lemmas only need the tagger, so skip the slower parser and NER.
-            with nlp.select_pipes(disable=["parser", "ner"]):
-                for i, document in enumerate(nlp.pipe(self.prelemma_corpus)):
-                    self._tokens.append(
-                        [
-                            token.lemma_.lower()
-                            for token in document
-                            if (
-                                token.pos_ not in REMOVED_POS
-                                and token.lemma_.lower() not in stopword_set
-                                and not token.is_stop
-                                and token.is_alpha
-                            )
-                        ]
-                    )
-                    self.preprocess_progress.emit(int((i + 1) / total * 100))
+            self._tokens = tokenize(nlp, stopwords, self.prelemma_corpus, self.preprocess_progress.emit)
             self.worker_status.emit("Lemmatization Completed")
             logger.debug(f"Token Length:{len(self._tokens)}")
 
@@ -191,7 +218,9 @@ class LatentDirichletAllocator(QObject):
             )
             self.id2word = MappingDictionary(self._tokens)
             self.worker_status.emit("Finally, Filtering Out Extremes...")
-            self.id2word.filter_extremes(no_below=5, no_above=0.5, keep_n=5000)
+            self.id2word.filter_extremes(
+                no_below=FILTER_NO_BELOW, no_above=FILTER_NO_ABOVE, keep_n=FILTER_KEEP_N
+            )
             self.corpus = [self.id2word.doc2bow(doc) for doc in self._tokens]
             logger.debug(
                 f"Pre-Lemma Corpus Length:{len(self.prelemma_corpus)} \n Mapping Dict: {self.id2word} \n Post Processing Corpus: {len(self.corpus)}"
@@ -221,6 +250,17 @@ class LatentDirichletAllocator(QObject):
         try:
             self.topic_counts, self.coherence_values = [], []
             self.lda_model, self.best_num_topics = None, None
+            self.settings = {
+                "max_topics": num_of_topics,
+                "iterations": iterations,
+                "passes": passes,
+                "seed": self.seed,
+                "filter_extremes": {
+                    "no_below": FILTER_NO_BELOW,
+                    "no_above": FILTER_NO_ABOVE,
+                    "keep_n": FILTER_KEEP_N,
+                },
+            }
             topic_range = range(2, num_of_topics + 1)
             for i, topic_count in enumerate(topic_range):
                 self.worker_status.emit(f"Training model with {topic_count} topics...")
@@ -304,14 +344,20 @@ class LatentDirichletAllocator(QObject):
         ]
 
     def visualize_results(
-        self, output_dir: pathlib.Path = pathlib.Path.cwd()
+        self, output_dir: Optional[pathlib.Path] = None
     ) -> Tuple[Optional[str], Optional[str]]:
         """Saves the pyLDAvis chart and the coherence plot for the best model.
+
+        Args:
+            output_dir: Where to write the files; each saved run passes its own
+                directory so charts aren't overwritten. Defaults to the
+                current directory.
 
         Returns:
             Paths to the saved LDA chart (HTML) and coherence plot (PNG), or
             (None, None) if visualization fails.
         """
+        output_dir = output_dir if output_dir is not None else pathlib.Path.cwd()
         try:
             chart_path = os.path.join(output_dir, "lda_model.html")
             lda_display = pyLDAvis.gensim_models.prepare(

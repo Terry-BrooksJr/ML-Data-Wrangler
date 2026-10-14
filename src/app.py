@@ -1,17 +1,19 @@
 import json
 import os
+import pathlib
 import sys
 import time
 from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
 from loguru import logger
-from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex
+from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
     QFormLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -23,49 +25,21 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QProgressBar,
     QDialog,
+    QTabWidget,
 )
 
+import topic_store
+from decision_engine.persistence import get_database
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
-from utility import LogHighlighter, QTextEditStream
+from triage_tab import TriageTab
+from utility import LogHighlighter, QTextEditStream, ThreadWorker
 from wrangler import DataWrangler
 import en_core_web_lg
 
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
-
-
-class ThreadWorker(QObject):
-    """Runs a function on the QThread it is moved to.
-
-    A QObject moved onto a QThread is used rather than a lambda connected to
-    QThread.started: PyQt5 runs such a lambda on the GUI thread, which freezes
-    the window for the whole job.
-
-    Signals:
-        finished: Emitted with the function's return value.
-        error: Emitted with a message if the function raises. Exceptions are
-            caught because one escaping a Qt thread would abort the app.
-    """
-
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-
-    def __init__(self, task: Callable[[], Any], description: str) -> None:
-        super().__init__()
-        self.task = task
-        self.description = description
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            result = self.task()
-        except Exception as e:
-            logger.exception(f"{self.description} failed: {e}")
-            self.error.emit(f"Error: {self.description} failed: {e}")
-            return
-        self.finished.emit(result)
 
 
 class MainWindow(QMainWindow, QDialog):
@@ -114,10 +88,17 @@ class MainWindow(QMainWindow, QDialog):
         self.wrangler: DataWrangler = DataWrangler()
         self.allocator: LatentDirichletAllocator = None
         self.pdialog: QProgressDialog = None
+        self._allocator_error: str = ""
+        self.run_thread: QThread = None
+        self.mongo_thread: QThread = None
+        # Set when the user closes the window while a job is running; the
+        # window closes itself once every job has finished.
+        self._close_pending = False
+        self._base_title = windowName
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
-        self.setGeometry(100, 100, 600, 400)
+        self.setGeometry(100, 100, 900, 750)
 
         # Main layout
         self.main_layout = QVBoxLayout()
@@ -173,6 +154,9 @@ class MainWindow(QMainWindow, QDialog):
         self.process_button = QPushButton("Process Data")
         self.mongo_button = QPushButton("Write Tickets to MongoDB")
         self.train_model_button = QPushButton("Train Model")
+        # Saved runs survive a restart, so these work without processing data.
+        self.previous_runs_button = QPushButton("Show Previous Run…")
+        self.assign_topics_button = QPushButton("Assign Topics from Saved Run…")
 
         self.comments_dir.setReadOnly(True)
         self.ticket_file.setReadOnly(True)
@@ -182,6 +166,8 @@ class MainWindow(QMainWindow, QDialog):
         self.process_button.clicked.connect(self.init_start_process)
         self.mongo_button.clicked.connect(self.start_mongo_worker)
         self.train_model_button.clicked.connect(self.start_allocator_worker)
+        self.previous_runs_button.clicked.connect(self.show_previous_run)
+        self.assign_topics_button.clicked.connect(self.start_assign_topics)
         self.train_model_button.setEnabled(False)
 
         # Form layout for inputs
@@ -222,11 +208,27 @@ class MainWindow(QMainWindow, QDialog):
         self.data_entry_layout.addWidget(self.mongo_button)
         self.data_entry_layout.addLayout(self.form_layout)
         self.data_entry_layout.addWidget(self.train_model_button)
-        self.data_entry_layout.addWidget(self.log_output)
+        self.data_entry_layout.addWidget(self.previous_runs_button)
+        self.data_entry_layout.addWidget(self.assign_topics_button)
+        self.data_entry_layout.addStretch()
+
+        # Topic modeling and the decision engine each get a tab; the log pane
+        # sits below both so either tab's output stays visible.
+        topic_tab = QWidget()
+        topic_layout = QVBoxLayout(topic_tab)
+        topic_layout.addLayout(self.instruction_layout)
+        topic_layout.addLayout(self.data_entry_layout)
+
+        self.triage_tab = TriageTab()
+        self.triage_tab.idle.connect(self._finish_pending_close)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(topic_tab, "Topic Modeling")
+        self.tabs.addTab(self.triage_tab, "Decision Engine")
 
         # Main layout arrangement
-        self.main_layout.addLayout(self.instruction_layout)
-        self.main_layout.addLayout(self.data_entry_layout)
+        self.main_layout.addWidget(self.tabs, stretch=3)
+        self.main_layout.addWidget(self.log_output, stretch=1)
 
     def confirm_file_change(self, type: str) -> None:
 
@@ -324,36 +326,70 @@ class MainWindow(QMainWindow, QDialog):
         self.allocator.preprocess_progress.connect(self.update_preprocess_progress)
         self.allocator.train_progress.connect(self.update_train_progress)
         self.allocator.worker_status.connect(self.update_training_status)
-        self.allocator.train_finished.connect(self.on_worker_finished)
-        self.allocator.error.connect(self.on_worker_error)
+        self._allocator_error = ""
+        self.allocator.error.connect(self._remember_allocator_error)
 
         # The allocator emits from the worker thread; these queued connections
         # deliver to this window, so the UI is only touched on the GUI thread.
         # process_corpus and model_trained report their own failures through
-        # allocator.error; the worker's error signal covers anything else.
+        # allocator.error and return False, so the worker finishes with None;
+        # the worker's error signal covers anything else.
         self.thread = QThread()
         self.training_worker = ThreadWorker(
-            lambda: self.allocator.run(
-                nlp=nlp,
-                stopwords=stop_words,
-                wranglerInstance=self.wrangler,
-                iterations=int(iterations),
-                passes=int(passes),
-                num_of_topics=int(number_of_topics),
-            ),
+            lambda: self._train_and_save(int(iterations), int(passes), int(number_of_topics)),
             "Training the LDA model",
         )
         self.training_worker.moveToThread(self.thread)
+        self.training_worker.finished.connect(self.on_worker_finished)
         self.training_worker.error.connect(self.on_worker_error)
         self.thread.started.connect(self.training_worker.run)
         self.thread.start()
+
+    def _train_and_save(self, iterations: int, passes: int, num_of_topics: int):
+        """Trains, then saves the run and links it to Mongo. Runs on the worker thread.
+
+        The model files are saved locally first; recording the run and
+        assigning topics in Mongo is skipped (with a warning on the run) when
+        MONGO_URI is unset or Mongo fails, so a trained model is never lost.
+
+        Returns:
+            The run document, or None if training failed.
+        """
+        trained = self.allocator.run(
+            nlp=nlp,
+            stopwords=stop_words,
+            wranglerInstance=self.wrangler,
+            iterations=iterations,
+            passes=passes,
+            num_of_topics=num_of_topics,
+        )
+        if not trained:
+            return None
+        self.allocator.worker_status.emit("Saving the model and its charts...")
+        run = topic_store.save_run(self.allocator, nlp, stop_words)
+        if not os.getenv("MONGO_URI"):
+            run["warnings"].append("MONGO_URI is not set: the run was saved locally only and no ticket topics were written.")
+            return run
+        self.allocator.worker_status.emit("Recording the run and ticket topics in MongoDB...")
+        try:
+            database = get_database()
+            topic_store.record_run(database[topic_store.RUNS_COLLECTION], run)
+            run["assignment"] = topic_store.assign_trained_topics(
+                database[os.environ.get("MONGO_COLLECTION", "tickets")], run, self.allocator
+            )
+        except Exception as e:
+            logger.exception(f"Could not record run {run['run_id']} in MongoDB: {e}")
+            run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")
+        return run
+
+    def _remember_allocator_error(self, message: str):
+        self._allocator_error = message
 
     def _disconnect_allocator(self):
         for signal in [
             self.allocator.preprocess_progress,
             self.allocator.train_progress,
             self.allocator.worker_status,
-            self.allocator.train_finished,
             self.allocator.error,
         ]:
             signal.disconnect()
@@ -367,18 +403,35 @@ class MainWindow(QMainWindow, QDialog):
         self.training_worker = None
         self.train_model_button.setEnabled(True)
 
-    def on_worker_finished(self):
+    def on_worker_finished(self, run):
         """
         Handles the completion of the worker process, cleaning up the thread and
         presenting the results.
+
+        Args:
+            run: The saved run document, or None if training failed (the
+                allocator's error message is shown instead).
         """
         self._stop_worker_thread()
-        QMessageBox.information(
-            self, "Process Complete", "LDA Model training has finished successfully."
-        )
+        if self._close_pending:
+            if run is None:
+                logger.error(f"Training failed while closing: {self._allocator_error}")
+            else:
+                logger.info(f"Training finished while closing; saved as run {run['run_id']}.")
+            self._finish_pending_close()
+            return
+        if run is None:
+            self.notify_user_of_error((False, self._allocator_error or "Training failed; see the log."))
+            return
+        message = f"LDA Model training has finished successfully.\n\nSaved as run {run['run_id']}."
+        if run.get("assignment"):
+            message += f"\nTopics written to {run['assignment']['assigned']} ticket(s) in MongoDB."
+        if run.get("warnings"):
+            message += "\n\nWarning:\n" + "\n".join(run["warnings"])
+        QMessageBox.information(self, "Process Complete", message)
         # This runs as a Qt slot, where an unhandled exception aborts the app.
         try:
-            self.present_results()
+            self.present_results(run)
         except Exception as e:
             logger.exception(f"Presenting results failed: {e}")
             self.notify_user_of_error(
@@ -388,6 +441,10 @@ class MainWindow(QMainWindow, QDialog):
     def on_worker_error(self, message: str):
         """Handles a failure in the worker thread."""
         self._stop_worker_thread()
+        if self._close_pending:
+            logger.error(f"Training failed while closing: {message}")
+            self._finish_pending_close()
+            return
         self.notify_user_of_error((False, message))
 
     def start_mongo_worker(self):
@@ -440,12 +497,17 @@ class MainWindow(QMainWindow, QDialog):
             self.pdialog.close()
         self.mongo_thread.quit()
         self.mongo_thread.wait()
+        self.mongo_thread = None
         self.mongo_worker = None
         self.mongo_button.setEnabled(True)
 
     def on_mongo_finished(self, summaries: list):
         """Cleans up the thread and summarises what was written."""
         self._stop_mongo_thread()
+        if self._close_pending:
+            logger.info(f"MongoDB write finished while closing ({len(summaries)} tickets).")
+            self._finish_pending_close()
+            return
         inserted = sum(summary["inserted"] for summary in summaries)
         updated = len(summaries) - inserted
         new_comments = sum(summary["new_comments"] for summary in summaries)
@@ -459,6 +521,10 @@ class MainWindow(QMainWindow, QDialog):
     def on_mongo_error(self, message: str):
         """Handles a failure in the MongoDB write thread."""
         self._stop_mongo_thread()
+        if self._close_pending:
+            logger.error(f"MongoDB write failed while closing: {message}")
+            self._finish_pending_close()
+            return
         self.notify_user_of_error((False, message))
 
     def init_logging(self) -> None:
@@ -536,31 +602,179 @@ class MainWindow(QMainWindow, QDialog):
             logger.info(f"Comments Dir Selected: {dir_path}")
             self.wrangler.comments_dir = dir_path
 
-    def present_results(self) -> None:
+    def present_results(self, run: dict) -> None:
         """
-        Displays the results of the model training.
+        Displays the results of a saved training run.
 
-        Shows the best model's topics and the coherence plot in a results
-        window, and opens the interactive pyLDAvis chart (lda_model.html) in
-        the browser.
+        Shows the run's topics and coherence plot in a results window, and
+        opens the run's interactive pyLDAvis chart in the browser. Works for
+        the run just trained and for previous runs.
 
         Args:
-            self.allocator (LatentDirichletAllocator): The allocator instance used to retrieve the results.
+            run: A run document from topic_store.
 
         Returns:
             None
         """
-        chart_path, plot_path = self.allocator.visualize_results()
+        charts = run.get("charts") or {}
+        # Paths from an older run may point at files since deleted.
+        chart_path, plot_path = (
+            path if path and pathlib.Path(path).exists() else None
+            for path in (charts.get("lda_html"), charts.get("coherence_png"))
+        )
         # Kept on self: a dialog with no reference is garbage-collected and closes.
         self.results_dialog = ResultsDialog(
-            best_num_topics=self.allocator.best_num_topics,
-            topics=self.allocator.get_topics(),
+            best_num_topics=run.get("best_num_topics"),
+            topics=[(t["topic_id"], t["share"], t["words"]) for t in run.get("topics") or []],
             chart_path=chart_path,
             plot_path=plot_path,
             parent=self,
         )
+        self.results_dialog.setWindowTitle(f"LDA Results · {topic_store.describe_run(run)}")
         self.results_dialog.show()
         self.results_dialog.open_chart()
+
+    def _runs_collection(self):
+        """The topic_model_runs collection, or None to read runs from disk."""
+        if not os.getenv("MONGO_URI"):
+            return None
+        return get_database()[topic_store.RUNS_COLLECTION]
+
+    def _choose_run(self, title: str):
+        """Asks the user to pick a previous run; returns it, or None."""
+        try:
+            runs = topic_store.list_runs(self._runs_collection())
+        except Exception as e:
+            logger.warning(f"Could not list runs from MongoDB ({e}); reading them from disk.")
+            runs = topic_store.list_runs()
+        if not runs:
+            QMessageBox.information(self, title, "No saved topic-model runs were found.")
+            return None
+        labels = [topic_store.describe_run(run) for run in runs]
+        label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
+        return runs[labels.index(label)] if ok else None
+
+    def show_previous_run(self) -> None:
+        """Shows a previous run's topics and coherence."""
+        run = self._choose_run("Previous Topic-Model Runs")
+        if run is None:
+            return
+        try:
+            self.present_results(run)
+        except Exception as e:
+            logger.exception(f"Showing run {run['run_id']} failed: {e}")
+            self.notify_user_of_error((False, f"Could not show run {run['run_id']}: {e}"))
+
+    def start_assign_topics(self) -> None:
+        """Loads a saved run and writes its topics to every ticket in MongoDB."""
+        if not os.getenv("MONGO_URI"):
+            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it (see .env.example) and restart the app.")
+            return
+        run = self._choose_run("Assign Topics from Saved Run")
+        if run is None:
+            return
+        self.assign_topics_button.setEnabled(False)
+        self.run_thread = QThread()
+        self.run_worker = ThreadWorker(
+            lambda: topic_store.assign_from_saved_run(
+                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], run, nlp, stop_words
+            ),
+            f"Assigning topics from run {run['run_id']}",
+        )
+        self.run_worker.moveToThread(self.run_thread)
+        self.run_worker.finished.connect(lambda summary: self._assign_topics_done(run, summary))
+        self.run_worker.error.connect(self._assign_topics_failed)
+        self.run_thread.started.connect(self.run_worker.run)
+        self.run_thread.start()
+
+    def _stop_run_thread(self) -> None:
+        self.run_thread.quit()
+        self.run_thread.wait()
+        self.run_thread = None
+        self.run_worker = None
+        self.assign_topics_button.setEnabled(True)
+
+    def _assign_topics_done(self, run: dict, summary: dict) -> None:
+        self._stop_run_thread()
+        if self._close_pending:
+            logger.info(f"Topic assignment for run {run['run_id']} finished while closing: {summary}")
+            self._finish_pending_close()
+            return
+        message = (
+            f"Run {run['run_id']}: topics written to {summary['assigned']} ticket(s); "
+            f"{summary['empty']} had no words the model knows."
+        )
+        logger.success(message)
+        QMessageBox.information(self, "Topics Assigned", message)
+
+    def _assign_topics_failed(self, message: str) -> None:
+        self._stop_run_thread()
+        if self._close_pending:
+            logger.error(f"Topic assignment failed while closing: {message}")
+            self._finish_pending_close()
+            return
+        self.notify_user_of_error((False, message))
+
+    # --- shutdown --------------------------------------------------------------
+
+    def _app_threads(self) -> List[Tuple[str, QThread]]:
+        """This window's own worker threads, with a label for each."""
+        # self.thread shadows QObject.thread() until training first runs.
+        candidates = [("model training", getattr(self, "thread", None)),
+                      ("MongoDB write", self.mongo_thread),
+                      ("topic assignment", self.run_thread)]
+        return [(label, t) for label, t in candidates if isinstance(t, QThread)]
+
+    def running_jobs(self) -> List[str]:
+        """Labels of the background jobs still running, in this window and the Decision Engine tab."""
+        jobs = [label for label, t in self._app_threads() if t.isRunning()]
+        if self.triage_tab.is_busy():
+            jobs.append("Decision Engine job")
+        return jobs
+
+    def closeEvent(self, event) -> None:
+        """Defers closing while a background job runs.
+
+        Destroying a running QThread aborts the app, and a Mongo or model call
+        in flight can't be interrupted safely. So the close is ignored, the
+        Decision Engine tab cancels the rest of any review batch, and the
+        window closes itself once every job has finished and its thread has
+        been joined (see _finish_pending_close).
+        """
+        jobs = self.running_jobs()
+        if not jobs:
+            event.accept()
+            return
+        event.ignore()
+        self.triage_tab.request_shutdown()
+        self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+        if not self._close_pending:
+            self._close_pending = True
+            logger.warning(f"Close requested; waiting for {', '.join(jobs)} to finish before closing.")
+
+    def _finish_pending_close(self) -> None:
+        """Closes the window if a close was deferred and every job is now done."""
+        if not self._close_pending:
+            return
+        jobs = self.running_jobs()
+        if jobs:
+            self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+            return
+        # Let the finishing job's slot return before the window goes away.
+        QTimer.singleShot(0, self.close)
+
+    def join_threads_on_quit(self) -> None:
+        """Last resort on application quit: waits for any job still running.
+
+        Normally closeEvent has already waited. This covers quitting by
+        another path; it blocks, but never lets a running QThread be destroyed.
+        """
+        self.triage_tab.wait_for_job()
+        for label, thread in self._app_threads():
+            if thread.isRunning():
+                logger.warning(f"Waiting for {label} to finish before quitting…")
+                thread.quit()
+                thread.wait()
 
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
@@ -624,6 +838,7 @@ class MainWindow(QMainWindow, QDialog):
             self.allocator = LatentDirichletAllocator(num_of_topics=30)
             # One document per ticket; lemmatization runs in the training thread.
             self.allocator.prelemma_corpus = self.wrangler.ticket_documents()
+            self.allocator.document_ids = self.wrangler.ticket_ids()
             self.process_button.setEnabled(False)
             self.train_model_button.setEnabled(True)
 
@@ -652,6 +867,7 @@ class MainWindow(QMainWindow, QDialog):
 
 app = QApplication(sys.argv)
 window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
+app.aboutToQuit.connect(window.join_threads_on_quit)
 
 if __name__ == "__main__":
     window.show()

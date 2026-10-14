@@ -1,9 +1,10 @@
 import re
 import sys
+from typing import Any, Callable
 
 import validators
 from loguru import logger
-from PyQt5.QtCore import pyqtSignal, QObject, QRegExp
+from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject, QRegExp
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
 
@@ -44,6 +45,38 @@ class QTextEditLogger:
             message: The log message to be appended to the QTextEdit.
         """
         self.text_edit_widget.append(message)
+
+
+class ThreadWorker(QObject):
+    """Runs a function on the QThread it is moved to.
+
+    A QObject moved onto a QThread is used rather than a lambda connected to
+    QThread.started: PyQt5 runs such a lambda on the GUI thread, which freezes
+    the window for the whole job.
+
+    Signals:
+        finished: Emitted with the function's return value.
+        error: Emitted with a message if the function raises. Exceptions are
+            caught because one escaping a Qt thread would abort the app.
+    """
+
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, task: Callable[[], Any], description: str) -> None:
+        super().__init__()
+        self.task = task
+        self.description = description
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            result = self.task()
+        except Exception as e:
+            logger.exception(f"{self.description} failed: {e}")
+            self.error.emit(f"Error: {self.description} failed: {e}")
+            return
+        self.finished.emit(result)
 
 
 # Custom class to redirect output to QTextEdit
@@ -223,4 +256,4 @@ def remove_useless_data(text: str) -> str:
     return " ".join(scrubbed)
 
 
-5
+
