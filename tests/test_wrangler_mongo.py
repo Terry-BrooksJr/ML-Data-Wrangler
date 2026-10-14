@@ -304,3 +304,37 @@ def test_clean_text_decodes_any_depth():
     deep = "a" + "&" + "amp;" * 7 + "nbsp;b"
     assert clean_text(deep) == "a b"
     assert clean_text(clean_text(deep)) == clean_text(deep)
+
+
+def test_ensure_ticket_indexes_creates_unique_index(tickets):
+    assert DataWrangler.ensure_ticket_indexes(tickets) is True
+    assert tickets.index_information()["zendesk_id_1"]["unique"] is True
+    assert DataWrangler.ensure_ticket_indexes(tickets) is True  # idempotent
+
+
+def test_ensure_ticket_indexes_warns_on_non_unique(tickets):
+    tickets.create_index("zendesk_id", name="zendesk_id_1")
+    assert DataWrangler.ensure_ticket_indexes(tickets) is False
+    assert not tickets.index_information()["zendesk_id_1"].get("unique")
+
+
+def test_write_all_tickets_ensures_unique_index(wrangler, tickets):
+    wrangler.write_tickets_to_mongo(collection=tickets)
+    assert tickets.index_information()["zendesk_id_1"]["unique"] is True
+
+
+def test_concurrent_insert_of_new_ticket_merges(wrangler, tickets, monkeypatch):
+    DataWrangler.ensure_ticket_indexes(tickets)
+    first = wrangler.write_ticket_to_mongo(101, tickets)
+
+    # The second writer looked before the first insert landed: its first
+    # lookup sees no ticket, so it tries to insert and hits the unique index.
+    real_find_one = tickets.find_one
+    stale_lookups = [None]
+    monkeypatch.setattr(tickets, "find_one", lambda f, p=None: stale_lookups.pop() if stale_lookups else real_find_one(f, p))
+    second = wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert first["inserted"] is True
+    assert second == {"zendesk_id": "101", "inserted": False, "new_comments": 0}
+    assert tickets.count_documents({"zendesk_id": "101"}) == 1
+    assert len(real_find_one({"zendesk_id": "101"})["transcript"]) == 2

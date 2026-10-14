@@ -907,6 +907,32 @@ class DataWrangler(QObject):
         logger.info(f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}")
         return summary
 
+    @staticmethod
+    def ensure_ticket_indexes(collection: Collection) -> bool:
+        """Creates the unique index on zendesk_id if the collection has none.
+
+        Uniqueness is what makes concurrent inserts of the same new ticket
+        safe: the losing insert raises DuplicateKeyError and
+        write_ticket_to_mongo merges into the winner's document. An existing
+        non-unique index on zendesk_id is left alone with a warning, since
+        converting it needs collMod or a drop and rebuild. Idempotent.
+
+        Returns:
+            True if a unique index on zendesk_id is in place.
+        """
+        for name, info in collection.index_information().items():
+            if list(info.get("key", [])) == [("zendesk_id", 1)]:
+                if info.get("unique"):
+                    return True
+                logger.warning(
+                    f"Index {name} on zendesk_id is not unique; concurrent inserts of a new ticket can create "
+                    "duplicates. Recreate it with unique=True."
+                )
+                return False
+        collection.create_index("zendesk_id", unique=True, name="zendesk_id_1")
+        logger.info("Created unique index zendesk_id_1")
+        return True
+
     def write_tickets_to_mongo(
         self,
         tickets: Optional[Iterable[Union[int, dict]]] = None,
@@ -918,6 +944,7 @@ class DataWrangler(QObject):
             One write_ticket_to_mongo summary per ticket.
         """
         collection = collection if collection is not None else self.get_tickets_collection()
+        self.ensure_ticket_indexes(collection)
         if tickets is None:
             with open(self.ticket_file, "r") as tickets_file:
                 tickets = json.load(tickets_file)
