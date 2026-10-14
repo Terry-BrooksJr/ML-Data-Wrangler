@@ -1,4 +1,4 @@
-# ML-Data-Wrangler
+# Lasso (ML-Data-Wrangler)
 Data Wrangler and Reshaper for Downstream LDA And Zero-Shot Classification ML FIne Tuning 
 
 The repo holds two separate pieces of work that read the same Zendesk ticket data:
@@ -24,6 +24,15 @@ uv sync
 cp .env.example .env   # then fill in values
 ```
 
+Instead of `.env`, you can enter the same values in the app under
+**File > Settings…** (**Preferences…** in the macOS app menu). They're saved to
+`settings.json` in your user config folder (`~/Library/Application
+Support/Lasso/` on macOS, `%APPDATA%\Lasso\` on
+Windows), readable only by you, and override `.env` and the shell. On launch
+the app offers to open Settings if any required value is missing. Most
+changes apply immediately; the collection names and `DECISION_ENGINE_MODEL`
+need a restart.
+
 `requirements.txt` is exported from the lock for pip users. Regenerate it
 after changing dependencies:
 
@@ -44,6 +53,27 @@ that host, use the jsDelivr mirror instead:
 ```bash
 mkdir -p ~/nltk_data/corpora && curl -sSfL -o ~/nltk_data/corpora/stopwords.zip https://cdn.jsdelivr.net/gh/nltk/nltk_data@gh-pages/packages/corpora/stopwords.zip && unzip -oq ~/nltk_data/corpora/stopwords.zip -d ~/nltk_data/corpora
 ```
+
+## Packaging for distribution
+
+`packaging/build.sh` builds a standalone app with PyInstaller, so users need
+neither Python nor a `.env`; they enter credentials under Settings.
+
+```bash
+packaging/build.sh
+```
+
+It syncs a separate environment (`build/pkg-venv`) from `uv.lock` on Python
+3.10.21, since PyInstaller refuses the 3.10.0 that `.python-version` pins, and
+bundles the NLTK stopwords so the app works offline. Output is
+`dist/Lasso.app` on macOS (about 900 MB, mostly the spaCy model)
+or `dist/Lasso/` on Windows and Linux. PyInstaller doesn't
+cross-compile: build on each OS you ship for.
+
+The packaged app writes its log, wrangled data, charts and saved topic runs
+to `~/Documents/Lasso/`. The build is ad-hoc signed only; macOS
+Gatekeeper will block it on other machines until it's signed with a
+Developer ID and notarized (or users right-click > Open).
 
 ## Data wrangler and LDA app
 

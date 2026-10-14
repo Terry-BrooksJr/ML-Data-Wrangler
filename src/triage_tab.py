@@ -346,7 +346,7 @@ class TriageTab(QWidget):
         missing = missing_env(names)
         if not missing:
             return True
-        message = f"Not configured: set {', '.join(missing)} (see .env.example) and restart the app."
+        message = f"Not configured: set {', '.join(missing)} in File > Settings… (see .env.example)."
         self.status_label.setText(message)
         if notify:
             logger.error(message)

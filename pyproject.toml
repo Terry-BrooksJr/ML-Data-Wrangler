@@ -32,6 +32,9 @@ dev = [
     "prospector",
     "pytest",
 ]
+package = [
+    "pyinstaller>=6.22.3",
+]
 
 [tool.uv]
 # An application, not an installable package (was Poetry's package-mode = false).
