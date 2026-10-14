@@ -727,6 +727,39 @@ def test_batch_stops_on_auth_or_credit_error(monkeypatch, tickets, code):
     assert "review_attempts" not in stalled and "review_claim" not in stalled
 
 
+def test_batch_reviews_only_the_given_ids(fake_model, tickets):
+    ids = three_awaiting(tickets)
+    client = fake_model(model_reply("flag_solve"))
+
+    summary = persistence.run_review_batch(tickets, zendesk_ids=[ids[0], ids[0], ids[2]])
+
+    assert len(client.calls) == 2  # duplicate ignored; ids[1] not approved
+    assert summary["classified"] == 2
+    assert tickets.find_one({"zendesk_id": ids[1]})["awaiting_review"] is True
+
+
+def test_batch_skips_given_ids_no_longer_awaiting(fake_model, tickets):
+    ids = three_awaiting(tickets)
+    tickets.update_one({"zendesk_id": ids[0]}, {"$set": {"awaiting_review": False}})
+    client = fake_model(model_reply("flag_solve"))
+
+    summary = persistence.run_review_batch(tickets, zendesk_ids=ids)
+
+    assert len(client.calls) == 2 and summary["skipped"] == 1
+
+
+def test_batch_stops_when_asked(fake_model, tickets):
+    three_awaiting(tickets)
+    client = fake_model(model_reply("flag_solve"))
+    checks = iter([False, True])
+
+    summary = persistence.run_review_batch(tickets, should_stop=lambda: next(checks))
+
+    assert len(client.calls) == 1
+    assert summary["classified"] == 1 and summary["cancelled"] == 2
+    assert "Cancelled before starting: 2" in persistence.format_batch_summary(summary)
+
+
 def test_format_batch_summary_mentions_stop():
     text = persistence.format_batch_summary(
         {"classified": 1, "manual_fallback": 0, "skipped": 0, "errored": 0, "stopped": "AuthenticationError: bad key",

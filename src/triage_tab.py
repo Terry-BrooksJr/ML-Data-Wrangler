@@ -7,13 +7,14 @@ nothing here changes how tickets are classified or stored.
 """
 
 import os
+import threading
 from typing import Any, Callable, List, Optional
 
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5 import QtCore
-from PyQt5.QtCore import QThread
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -176,20 +177,30 @@ class TriageTab(QWidget):
     """The Decision Engine tab.
 
     Every Mongo or model call runs on a QThread, so a slow or unreachable
-    cluster never freezes the window. One job runs at a time.
+    cluster never freezes the window. One job runs at a time. A running
+    QThread must not be destroyed, so the main window calls request_shutdown
+    before closing and waits for `idle` if a job is still running.
+
+    Signals:
+        idle: Emitted when a job ends after request_shutdown, meaning the tab
+            can now be destroyed safely.
 
     Args:
         collection_factory: Returns the tickets collection. Defaults to the
             engine's own connection so both share one client.
-        review_batch: Reviews every awaiting ticket.
+        review_batch: Reviews the given Zendesk IDs: called as
+            review_batch(tickets, zendesk_ids). Defaults to run_review_batch,
+            which also stops between tickets once shutdown is requested.
         review_one: Reviews one ticket by Zendesk ID; returns None if it is
             missing or not awaiting review.
     """
 
+    idle = pyqtSignal()
+
     def __init__(
         self,
         collection_factory: Callable[[], Collection] = persistence.get_tickets_collection,
-        review_batch: Callable[[Collection], Any] = persistence.run_review_batch,
+        review_batch: Optional[Callable[[Collection, List[str]], Any]] = None,
         review_one: Callable[[str, Collection], Optional[dict]] = persistence.process_one_ticket,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -200,7 +211,16 @@ class TriageTab(QWidget):
         """
         super().__init__(parent)
         self.collection_factory = collection_factory
-        self.review_batch = review_batch
+        # Set once shutdown is requested; the default batch checks it between
+        # tickets. A Mongo or model call already in flight can't be
+        # interrupted safely, so it always finishes.
+        self._cancel = threading.Event()
+        self._closing = False
+        self.review_batch = review_batch or (
+            lambda tickets, zendesk_ids: persistence.run_review_batch(
+                tickets, zendesk_ids, should_stop=self._cancel.is_set
+            )
+        )
         self.review_one = review_one
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
@@ -353,6 +373,41 @@ class TriageTab(QWidget):
         """
         return self._thread is not None
 
+    def request_shutdown(self) -> bool:
+        """Prepares the tab for the window closing.
+
+        If no job is running, returns True: the tab can be destroyed now.
+        Otherwise cancels the rest of a review batch (the ticket in progress
+        still finishes), keeps the controls disabled, and returns False; `idle`
+        is emitted once the job has ended and its thread has been joined. The
+        job's own completion callback and dialogs are skipped.
+        """
+        self._closing = True
+        self._cancel.set()
+        if not self.is_busy():
+            return True
+        message = "Closing after the current job finishes…"
+        self.status_label.setText(message)
+        self.busy_bar.setFormat(message)
+        logger.warning(f"Decision Engine: {message}")
+        return False
+
+    def wait_for_job(self) -> None:
+        """Blocks until the running job's thread has finished, then joins it.
+
+        Last resort for when the application is quitting anyway (e.g. on
+        aboutToQuit): it freezes the window for the rest of the job, but a
+        running QThread is never destroyed.
+        """
+        if self._thread is None:
+            return
+        self._cancel.set()
+        self._thread.quit()  # the thread's loop exits once the worker returns
+        self._thread.wait()
+        self._thread = None
+        self._worker = None
+        self._on_done = None
+
     def _set_busy(self, busy: bool, label: str = "") -> None:
         """Switches the tab between busy and idle states.
 
@@ -376,6 +431,9 @@ class TriageTab(QWidget):
             self.status_label.setText(label)
 
     def _run(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]) -> None:
+        if self._closing:
+            return
+
         def with_connection_hint():
             try:
                 return task()
@@ -396,13 +454,14 @@ class TriageTab(QWidget):
         """Shuts down the current worker thread and returns to the idle state.
 
         Quits and waits for the thread, clears the thread and worker
-        references, and re-enables the controls.
+        references, and re-enables the controls (unless the tab is closing).
         """
         self._thread.quit()
         self._thread.wait()
         self._thread = None
         self._worker = None
-        self._set_busy(False)
+        if not self._closing:
+            self._set_busy(False)
 
     def _job_finished(self, result: Any) -> None:
         """Handles a successful job.
@@ -417,6 +476,10 @@ class TriageTab(QWidget):
         """
         self._stop_thread()
         on_done, self._on_done = self._on_done, None
+        if self._closing:
+            # Don't start follow-up jobs or show dialogs while closing.
+            self.idle.emit()
+            return
         on_done(result)
 
     def _job_failed(self, message: str) -> None:
@@ -430,6 +493,10 @@ class TriageTab(QWidget):
         """
         self._stop_thread()
         self._on_done = None
+        if self._closing:
+            logger.error(f"Decision Engine job failed while closing: {message}")
+            self.idle.emit()
+            return
         self.status_label.setText("Last action failed; see the log.")
         QMessageBox.critical(self, "Decision Engine Error", message)
 
@@ -464,26 +531,28 @@ class TriageTab(QWidget):
         self._fill_table()
 
     def start_review_all(self) -> None:
-        """Begins the review-all flow by counting awaiting tickets.
+        """Begins the review-all flow by listing awaiting tickets.
 
-        Counts off the GUI thread first so the confirmation dialog shows a
-        current number. Shows a warning and stops if the environment is not
-        configured.
+        Snapshots the awaiting IDs off the GUI thread before asking, so the
+        batch reviews exactly the tickets the user approved, not ones inserted
+        or reopened while the dialog was open. Shows a warning and stops if
+        the environment is not configured.
         """
         if not self._configured(REVIEW_ENV, notify=True):
             return
         self._run(
-            lambda: count_awaiting(self.collection_factory()),
-            "Counting tickets awaiting review",
+            lambda: persistence.awaiting_ids(self.collection_factory()),
+            "Finding tickets awaiting review",
             self._confirm_review_all,
         )
 
-    def _confirm_review_all(self, awaiting: int) -> None:
-        """Asks before sending the counted tickets to the model, then runs the batch.
+    def _confirm_review_all(self, zendesk_ids: List[str]) -> None:
+        """Asks before sending the listed tickets to the model, then reviews only those.
 
         Args:
-            awaiting: The number of tickets awaiting review, from the count job.
+            zendesk_ids: The tickets awaiting review when the list was taken.
         """
+        awaiting = len(zendesk_ids)
         self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
         if awaiting == 0:
             QMessageBox.information(self, "Nothing to Review", "No tickets are awaiting review.")
@@ -502,7 +571,7 @@ class TriageTab(QWidget):
             return
         self._warn_optional_models()
         self._run(
-            lambda: self.review_batch(self.collection_factory()),
+            lambda: self.review_batch(self.collection_factory(), list(zendesk_ids)),
             f"Reviewing {awaiting} ticket(s)",
             self._review_all_done,
         )

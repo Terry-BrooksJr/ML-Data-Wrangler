@@ -3,7 +3,7 @@ import socket
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Optional
+from typing import Callable, Iterable, List, Optional
 
 import anthropic
 from bson import ObjectId
@@ -199,22 +199,47 @@ def _add_usage(totals: dict, audit: Optional[dict]) -> None:
         totals[key] = totals.get(key, 0) + (value or 0)
 
 
-def run_review_batch(tickets: Collection = None, worker: Optional[str] = None) -> dict:
-    """Reviews every awaiting ticket, continuing past per-ticket failures.
+def awaiting_ids(tickets: Collection) -> List[str]:
+    """Zendesk IDs of every ticket currently awaiting review."""
+    return [doc["zendesk_id"] for doc in tickets.find({"awaiting_review": True}, {"zendesk_id": 1})]
 
-    Stops early only on errors that will hit every ticket (401 bad key, 402
-    out of credit).
+
+def run_review_batch(
+    tickets: Collection = None,
+    zendesk_ids: Optional[Iterable[str]] = None,
+    worker: Optional[str] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> dict:
+    """Reviews awaiting tickets, continuing past per-ticket failures.
+
+    Stops early on errors that will hit every ticket (401 bad key, 402 out
+    of credit), or when `should_stop` returns True. The ticket in progress
+    always finishes first, so its claim is saved or released cleanly.
+
+    Args:
+        zendesk_ids: The tickets to review. Pass the IDs the user confirmed,
+            so tickets inserted or reopened after confirmation aren't billed
+            without approval. Any that are no longer awaiting review are
+            skipped. Defaults to every ticket awaiting review now.
+        should_stop: Checked before each ticket; True cancels the rest.
 
     Returns:
         Counts: classified, manual_fallback (gave up after repeated engine
         errors), skipped (claimed elsewhere or already reviewed), errored,
-        plus `stopped` (the fatal error message, or None) and token `usage`.
+        cancelled (not started because should_stop fired), plus `stopped`
+        (the fatal error message, or None) and token `usage`.
     """
     tickets = tickets if tickets is not None else get_tickets_collection()
     worker = worker or default_worker_id()
-    summary = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0, "stopped": None, "usage": {}}
-    zendesk_ids = [doc["zendesk_id"] for doc in tickets.find({"awaiting_review": True}, {"zendesk_id": 1})]
-    for zendesk_id in zendesk_ids:
+    summary = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0, "cancelled": 0,
+               "stopped": None, "usage": {}}
+    # dict.fromkeys de-duplicates while keeping order, so no ID is billed twice.
+    zendesk_ids = list(dict.fromkeys(zendesk_ids if zendesk_ids is not None else awaiting_ids(tickets)))
+    for index, zendesk_id in enumerate(zendesk_ids):
+        if should_stop and should_stop():
+            summary["cancelled"] = len(zendesk_ids) - index
+            logger.warning(f"Batch cancelled; {summary['cancelled']} ticket(s) not started.")
+            break
         try:
             result = process_one_ticket(zendesk_id, tickets, worker)
         except Exception as e:
@@ -239,7 +264,8 @@ def run_review_batch(tickets: Collection = None, worker: Optional[str] = None) -
 
     logger.info(
         f"Batch finished: {summary['classified']} classified, {summary['manual_fallback']} routed to manual "
-        f"triage after engine errors, {summary['skipped']} skipped, {summary['errored']} errored. "
+        f"triage after engine errors, {summary['skipped']} skipped, {summary['errored']} errored, "
+        f"{summary['cancelled']} cancelled. "
         f"Tokens: {summary['usage'] or 'none'}"
     )
     return summary
@@ -252,6 +278,8 @@ def format_batch_summary(summary: dict) -> str:
         f"Skipped (already reviewed or claimed elsewhere): {summary['skipped']}",
         f"Engine errors (left in the queue to retry): {summary['errored']}",
     ]
+    if summary.get("cancelled"):
+        lines.append(f"Cancelled before starting: {summary['cancelled']}")
     usage = summary.get("usage") or {}
     if usage:
         lines.append(

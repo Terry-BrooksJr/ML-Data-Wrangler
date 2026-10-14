@@ -9,7 +9,7 @@ from datetime import datetime
 import gradio as gr
 import pandas as pd
 from loguru import logger
-from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex
+from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
@@ -92,6 +92,11 @@ class MainWindow(QMainWindow, QDialog):
         self.pdialog: QProgressDialog = None
         self._allocator_error: str = ""
         self.run_thread: QThread = None
+        self.mongo_thread: QThread = None
+        # Set when the user closes the window while a job is running; the
+        # window closes itself once every job has finished.
+        self._close_pending = False
+        self._base_title = windowName
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
@@ -217,6 +222,7 @@ class MainWindow(QMainWindow, QDialog):
         topic_layout.addLayout(self.data_entry_layout)
 
         self.triage_tab = TriageTab()
+        self.triage_tab.idle.connect(self._finish_pending_close)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(topic_tab, "Topic Modeling")
@@ -409,6 +415,13 @@ class MainWindow(QMainWindow, QDialog):
                 allocator's error message is shown instead).
         """
         self._stop_worker_thread()
+        if self._close_pending:
+            if run is None:
+                logger.error(f"Training failed while closing: {self._allocator_error}")
+            else:
+                logger.info(f"Training finished while closing; saved as run {run['run_id']}.")
+            self._finish_pending_close()
+            return
         if run is None:
             self.notify_user_of_error((False, self._allocator_error or "Training failed; see the log."))
             return
@@ -430,6 +443,10 @@ class MainWindow(QMainWindow, QDialog):
     def on_worker_error(self, message: str):
         """Handles a failure in the worker thread."""
         self._stop_worker_thread()
+        if self._close_pending:
+            logger.error(f"Training failed while closing: {message}")
+            self._finish_pending_close()
+            return
         self.notify_user_of_error((False, message))
 
     def start_mongo_worker(self):
@@ -482,12 +499,17 @@ class MainWindow(QMainWindow, QDialog):
             self.pdialog.close()
         self.mongo_thread.quit()
         self.mongo_thread.wait()
+        self.mongo_thread = None
         self.mongo_worker = None
         self.mongo_button.setEnabled(True)
 
     def on_mongo_finished(self, summaries: list):
         """Cleans up the thread and summarises what was written."""
         self._stop_mongo_thread()
+        if self._close_pending:
+            logger.info(f"MongoDB write finished while closing ({len(summaries)} tickets).")
+            self._finish_pending_close()
+            return
         inserted = sum(summary["inserted"] for summary in summaries)
         updated = len(summaries) - inserted
         new_comments = sum(summary["new_comments"] for summary in summaries)
@@ -501,6 +523,10 @@ class MainWindow(QMainWindow, QDialog):
     def on_mongo_error(self, message: str):
         """Handles a failure in the MongoDB write thread."""
         self._stop_mongo_thread()
+        if self._close_pending:
+            logger.error(f"MongoDB write failed while closing: {message}")
+            self._finish_pending_close()
+            return
         self.notify_user_of_error((False, message))
 
     def init_logging(self) -> None:
@@ -687,6 +713,10 @@ class MainWindow(QMainWindow, QDialog):
 
     def _assign_topics_done(self, run: dict, summary: dict) -> None:
         self._stop_run_thread()
+        if self._close_pending:
+            logger.info(f"Topic assignment for run {run['run_id']} finished while closing: {summary}")
+            self._finish_pending_close()
+            return
         message = (
             f"Run {run['run_id']}: topics written to {summary['assigned']} ticket(s); "
             f"{summary['empty']} had no words the model knows."
@@ -696,7 +726,72 @@ class MainWindow(QMainWindow, QDialog):
 
     def _assign_topics_failed(self, message: str) -> None:
         self._stop_run_thread()
+        if self._close_pending:
+            logger.error(f"Topic assignment failed while closing: {message}")
+            self._finish_pending_close()
+            return
         self.notify_user_of_error((False, message))
+
+    # --- shutdown --------------------------------------------------------------
+
+    def _app_threads(self) -> List[Tuple[str, QThread]]:
+        """This window's own worker threads, with a label for each."""
+        # self.thread shadows QObject.thread() until training first runs.
+        candidates = [("model training", getattr(self, "thread", None)),
+                      ("MongoDB write", self.mongo_thread),
+                      ("topic assignment", self.run_thread)]
+        return [(label, t) for label, t in candidates if isinstance(t, QThread)]
+
+    def running_jobs(self) -> List[str]:
+        """Labels of the background jobs still running, in this window and the Decision Engine tab."""
+        jobs = [label for label, t in self._app_threads() if t.isRunning()]
+        if self.triage_tab.is_busy():
+            jobs.append("Decision Engine job")
+        return jobs
+
+    def closeEvent(self, event) -> None:
+        """Defers closing while a background job runs.
+
+        Destroying a running QThread aborts the app, and a Mongo or model call
+        in flight can't be interrupted safely. So the close is ignored, the
+        Decision Engine tab cancels the rest of any review batch, and the
+        window closes itself once every job has finished and its thread has
+        been joined (see _finish_pending_close).
+        """
+        jobs = self.running_jobs()
+        if not jobs:
+            event.accept()
+            return
+        event.ignore()
+        self.triage_tab.request_shutdown()
+        self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+        if not self._close_pending:
+            self._close_pending = True
+            logger.warning(f"Close requested; waiting for {', '.join(jobs)} to finish before closing.")
+
+    def _finish_pending_close(self) -> None:
+        """Closes the window if a close was deferred and every job is now done."""
+        if not self._close_pending:
+            return
+        jobs = self.running_jobs()
+        if jobs:
+            self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+            return
+        # Let the finishing job's slot return before the window goes away.
+        QTimer.singleShot(0, self.close)
+
+    def join_threads_on_quit(self) -> None:
+        """Last resort on application quit: waits for any job still running.
+
+        Normally closeEvent has already waited. This covers quitting by
+        another path; it blocks, but never lets a running QThread be destroyed.
+        """
+        self.triage_tab.wait_for_job()
+        for label, thread in self._app_threads():
+            if thread.isRunning():
+                logger.warning(f"Waiting for {label} to finish before quitting…")
+                thread.quit()
+                thread.wait()
 
     def notify_user_of_error(self, error: Tuple[bool, str]) -> QMessageBox:
         """
@@ -789,6 +884,7 @@ class MainWindow(QMainWindow, QDialog):
 
 app = QApplication(sys.argv)
 window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
+app.aboutToQuit.connect(window.join_threads_on_quit)
 
 if __name__ == "__main__":
     window.show()

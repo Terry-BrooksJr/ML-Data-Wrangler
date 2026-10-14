@@ -167,7 +167,7 @@ def test_refresh_needs_only_mongo(qapp, monkeypatch, dialogs, stored):
 def test_review_needs_model_settings(qapp, configured, monkeypatch, dialogs, stored):
     monkeypatch.delenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME")
     calls = []
-    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(tickets))
 
     tab.start_review_all()
 
@@ -182,7 +182,7 @@ def test_review_needs_model_settings(qapp, configured, monkeypatch, dialogs, sto
 def test_review_runs_without_optional_models(qapp, configured, monkeypatch, dialogs, stored, optional):
     monkeypatch.delenv(optional, raising=False)
     calls = []
-    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(tickets))
 
     tab.start_review_all()
     wait_until_idle(qapp, tab)
@@ -192,7 +192,7 @@ def test_review_runs_without_optional_models(qapp, configured, monkeypatch, dial
 
 
 def test_no_optional_warning_when_all_set(qapp, configured, dialogs, stored):
-    tab = make_tab(stored, review_batch=lambda tickets: None)
+    tab = make_tab(stored, review_batch=lambda tickets, ids: None)
     tab.start_review_all()
     wait_until_idle(qapp, tab)
 
@@ -212,7 +212,7 @@ def test_review_one_warns_about_unset_confirmation(qapp, configured, monkeypatch
 def test_missing_env_blocks_actions(qapp, configured, monkeypatch, dialogs, stored):
     monkeypatch.delenv("MONGO_URI")
     calls = []
-    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(tickets))
 
     tab.start_review_all()
 
@@ -223,7 +223,7 @@ def test_missing_env_blocks_actions(qapp, configured, monkeypatch, dialogs, stor
 
 def test_review_all_confirms_then_runs_batch(qapp, configured, dialogs, stored):
     calls = []
-    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(tickets))
 
     tab.start_review_all()
     wait_until_idle(qapp, tab)
@@ -240,7 +240,7 @@ def test_review_all_confirms_then_runs_batch(qapp, configured, dialogs, stored):
 def test_review_all_cancel_does_not_run(qapp, configured, dialogs, monkeypatch, stored):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
     calls = []
-    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(tickets))
 
     tab.start_review_all()
     wait_until_idle(qapp, tab)
@@ -250,7 +250,7 @@ def test_review_all_cancel_does_not_run(qapp, configured, dialogs, monkeypatch, 
 
 def test_review_all_with_nothing_awaiting_skips_confirm(qapp, configured, dialogs, tickets):
     calls = []
-    tab = make_tab(tickets, review_batch=lambda t: calls.append(t))
+    tab = make_tab(tickets, review_batch=lambda t, ids: calls.append(t))
 
     tab.start_review_all()
     wait_until_idle(qapp, tab)
@@ -286,7 +286,7 @@ def test_review_one_reports_not_awaiting(qapp, configured, dialogs, stored):
 
 
 def test_engine_error_is_shown_and_tab_recovers(qapp, configured, dialogs, stored):
-    def failing_batch(tickets):
+    def failing_batch(tickets, ids):
         raise KeyError("confidence")
 
     tab = make_tab(stored, review_batch=failing_batch)
@@ -314,7 +314,7 @@ def test_unreachable_mongo_shows_connection_hint(qapp, configured, dialogs):
 
 def test_review_all_shows_batch_summary(qapp, configured, dialogs, stored):
     summary = {"classified": 1, "manual_fallback": 0, "skipped": 0, "errored": 2, "stopped": None, "usage": {}}
-    tab = make_tab(stored, review_batch=lambda tickets: summary)
+    tab = make_tab(stored, review_batch=lambda tickets, ids: summary)
     tab.start_review_all()
     wait_until_idle(qapp, tab)
 
@@ -325,7 +325,7 @@ def test_review_all_shows_batch_summary(qapp, configured, dialogs, stored):
 def test_review_all_warns_when_batch_stopped(qapp, configured, dialogs, stored):
     summary = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0,
                "stopped": "AuthenticationError: bad key", "usage": {}}
-    tab = make_tab(stored, review_batch=lambda tickets: summary)
+    tab = make_tab(stored, review_batch=lambda tickets, ids: summary)
     tab.start_review_all()
     wait_until_idle(qapp, tab)
 
@@ -410,3 +410,134 @@ def test_accuracy_report_dialog(qapp, configured, dialogs, stored):
     tab.show_accuracy_report()
     wait_until_idle(qapp, tab)
     assert dialogs[-1][0] == "information" and "flag_solve" in dialogs[-1][1]
+
+
+# --- confirmed snapshot (paid calls only for approved tickets) -------------------
+
+
+def test_review_all_reviews_only_the_confirmed_snapshot(qapp, configured, stored, monkeypatch):
+    late = copy.deepcopy(CATEGORY_FIXTURES["manual_triage"])
+
+    def confirm_while_a_ticket_arrives(*args, **kwargs):
+        stored.insert_one(late)  # e.g. the Mongo writer, while the dialog is open
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm_while_a_ticket_arrives)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    calls = []
+    tab = make_tab(stored, review_batch=lambda tickets, ids: calls.append(ids))
+
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert calls == [[CATEGORY_FIXTURES["escalation_internal"]["zendesk_id"]]]
+
+
+def test_default_batch_does_not_bill_tickets_added_after_confirmation(qapp, configured, stored, monkeypatch):
+    from decision_engine import persistence
+
+    late = copy.deepcopy(CATEGORY_FIXTURES["manual_triage"])
+    classified = []
+
+    def fake_process(zendesk_id, tickets, worker=None):
+        classified.append(zendesk_id)
+        return {"classification": "flag_solve", "confidence": 90}
+
+    def confirm(*args, **kwargs):
+        stored.insert_one(late)
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(persistence, "process_one_ticket", fake_process)
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    tab = make_tab(stored)
+
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert classified == [CATEGORY_FIXTURES["escalation_internal"]["zendesk_id"]]
+
+
+# --- shutdown ------------------------------------------------------------------
+
+
+def test_request_shutdown_when_idle_allows_close(qapp, configured, stored):
+    tab = make_tab(stored)
+    assert tab.request_shutdown() is True
+
+
+def test_request_shutdown_waits_for_running_job(qapp, configured, dialogs, stored):
+    import threading
+
+    release = threading.Event()
+    done_callbacks, idle = [], []
+    tab = make_tab(stored)
+    tab.idle.connect(lambda: idle.append(True))
+    tab._run(lambda: release.wait(5), "Slow job", done_callbacks.append)
+
+    assert tab.request_shutdown() is False
+    assert tab.is_busy()
+    assert "Closing after the current job finishes" in tab.status_label.text()
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while not idle:
+        qapp.processEvents()
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert not tab.is_busy()
+    assert done_callbacks == []  # no follow-up jobs or dialogs while closing
+    assert dialogs == []
+
+
+def test_request_shutdown_cancels_rest_of_default_batch(qapp, configured, tickets, monkeypatch):
+    import threading
+
+    from decision_engine import persistence
+
+    for category in ("flag_solve", "escalation_internal", "flag_reengage"):
+        tickets.insert_one(copy.deepcopy(CATEGORY_FIXTURES[category]))
+    started, release = threading.Event(), threading.Event()
+    classified, idle = [], []
+
+    def slow_process(zendesk_id, tickets, worker=None):
+        classified.append(zendesk_id)
+        started.set()
+        release.wait(5)
+        return {"classification": "flag_solve", "confidence": 90}
+
+    monkeypatch.setattr(persistence, "process_one_ticket", slow_process)
+    tab = make_tab(tickets)
+    tab.idle.connect(lambda: idle.append(True))
+    tab._run(lambda: tab.review_batch(tickets, persistence.awaiting_ids(tickets)), "Batch", lambda _: None)
+
+    assert started.wait(5)
+    assert tab.request_shutdown() is False
+    release.set()
+    deadline = time.monotonic() + 5
+    while not idle:
+        qapp.processEvents()
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert len(classified) == 1  # the in-flight ticket finished; the rest were cancelled
+
+
+def test_wait_for_job_joins_thread(qapp, configured, stored):
+    import threading
+
+    release = threading.Event()
+    tab = make_tab(stored)
+    tab._run(lambda: release.wait(5), "Slow job", lambda _: None)
+    threading.Timer(0.1, release.set).start()
+
+    tab.wait_for_job()
+    assert not tab.is_busy()
+
+
+def test_no_new_jobs_after_shutdown_requested(qapp, configured, stored):
+    tab = make_tab(stored)
+    tab.request_shutdown()
+    tab.refresh()
+    assert not tab.is_busy()
