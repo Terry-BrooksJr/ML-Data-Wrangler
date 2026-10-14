@@ -126,3 +126,85 @@ def test_highlight_text_marks_hits():
     result = {"highlights": [{"texts": [{"value": "The ", "type": "text"}, {"value": "import", "type": "hit"},
                                         {"value": " fails", "type": "text"}]}]}
     assert search.highlight_text(result) == "The [import] fails"
+
+
+# --- review fixes ------------------------------------------------------------
+
+
+def test_permission_error_is_not_reported_as_unsupported():
+    tickets = FakeSearchCollection()
+    tickets.list_search_indexes = lambda: (_ for _ in ()).throw(
+        OperationFailure("not authorized on support_db to execute command", code=13))
+    with pytest.raises(OperationFailure) as raised:
+        search.ensure_search_indexes(tickets)
+    assert not isinstance(raised.value, search.SearchUnavailable) and raised.value.code == 13
+
+
+def test_index_created_concurrently_counts_as_success():
+    tickets = FakeSearchCollection()
+
+    def lose_the_race(model):
+        tickets.indexes.append({"name": search.TEXT_INDEX, "queryable": False})
+        raise OperationFailure("Index already exists: tickets_text", code=68)
+
+    tickets.create_search_index = lose_the_race
+    assert search.ensure_search_indexes(tickets) == []
+
+
+def test_other_create_errors_are_raised():
+    tickets = FakeSearchCollection()
+    tickets.create_search_index = lambda model: (_ for _ in ()).throw(
+        OperationFailure("not authorized", code=13))
+    with pytest.raises(OperationFailure):
+        search.ensure_search_indexes(tickets)
+
+
+def test_unsupported_by_code_name():
+    tickets = FakeSearchCollection()
+    tickets.list_search_indexes = lambda: (_ for _ in ()).throw(
+        OperationFailure("search not enabled", code=31082, details={"codeName": "SearchNotEnabled"}))
+    with pytest.raises(search.SearchUnavailable):
+        search.ensure_search_indexes(tickets)
+
+
+def test_stalled_listing_raises_timeout_error():
+    from pymongo.errors import NetworkTimeout
+
+    tickets = FakeSearchCollection()
+    tickets.list_search_indexes = lambda: (_ for _ in ()).throw(NetworkTimeout("timed out"))
+    with pytest.raises(TimeoutError, match="timed out"):
+        search.wait_until_queryable(tickets, timeout=5)
+
+
+@pytest.mark.parametrize("limit", [0, -1, 2.5, True, "10"])
+def test_invalid_limit_is_rejected(limit):
+    tickets = FakeSearchCollection()
+    with pytest.raises(ValueError, match="limit"):
+        search.search_tickets(tickets, "import", limit=limit)
+    assert tickets.pipelines == []
+
+
+def test_cli_dangling_status_shows_usage(capsys):
+    with pytest.raises(SystemExit) as raised:
+        search.main(["query", "import", "--status"])
+    assert raised.value.code == 2
+    assert "expected one argument" in capsys.readouterr().err
+
+
+def test_terminal_safe_escapes_control_sequences():
+    assert search.terminal_safe("ok\x1b]52;c;ZXZpbA==\x07 red\x1b[31m‮evil\nnext") == (
+        "ok\\x1b]52;c;ZXZpbA==\\x07 red\\x1b[31m\\u202eevil next")
+    assert search.terminal_safe(None) == ""
+
+
+def test_cli_output_is_terminal_safe(capsys, monkeypatch):
+    from decision_engine import persistence
+
+    result = {"zendesk_id": "1", "subject": "Hi\x1b[2J", "status": "open", "score": 1.0,
+              "highlights": [{"texts": [{"value": "boom\x1b]0;x\x07", "type": "hit"}]}]}
+    monkeypatch.setattr(persistence, "get_tickets_collection", lambda: FakeSearchCollection(results=[result]))
+
+    assert search.main(["query", "boom"]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\x07" not in out
+    assert "Hi\\x1b[2J" in out

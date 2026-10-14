@@ -13,6 +13,7 @@ from xml.etree import ElementTree as ET
 from loguru import logger
 from pymongo import MongoClient
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
@@ -23,8 +24,12 @@ XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
 # Unicode spaces Zendesk text carries (mostly from &nbsp;), turned into plain spaces.
 _SPECIAL_SPACES = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
-_ZERO_WIDTH = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
-_RUNS_OF_SPACES = re.compile(r"[ \t]{2,}")
+# Invisible characters with no meaning in ticket text. U+200C/U+200D (joiners)
+# are kept: they shape emoji sequences and some scripts.
+_ZERO_WIDTH = re.compile(r"[\u200b\u2060\ufeff]")
+# C0/C1 control characters other than tab and newline. ESC (from e.g. &#27;)
+# would otherwise reach terminals as ANSI/OSC sequences.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _TRAILING_SPACES = re.compile(r"[ \t]+$", re.MULTILINE)
 
 
@@ -32,11 +37,13 @@ def clean_text(text: Optional[str]) -> Optional[str]:
     """Decodes HTML entities in ticket text before it is stored in Mongo.
 
     Entities are decoded until the text stops changing, so double-escaped
-    ones ("&amp;nbsp;") are handled too. Non-breaking and other special
-    spaces become plain spaces, zero-width characters are removed, and runs
-    of spaces are collapsed. Line breaks are kept. Words are not removed:
-    unlike _cleanse, which prepares topic-modelling text, this keeps the
-    real wording the decision engine needs. Idempotent.
+    ones ("&amp;nbsp;") are handled too. Line endings become "\n",
+    non-breaking and other special spaces become plain spaces, and control
+    characters and invisible zero-width characters are removed. Trailing
+    whitespace is stripped from each line, but spaces and tabs inside or at
+    the start of a line are kept, so code and indentation survive. Words are
+    not removed: unlike _cleanse, which prepares topic-modelling text, this
+    keeps the real wording the decision engine needs. Idempotent.
 
     Returns:
         The cleaned text, or None when given None.
@@ -48,8 +55,9 @@ def clean_text(text: Optional[str]) -> Optional[str]:
         if decoded == text:
             break
         text = decoded
-    text = _ZERO_WIDTH.sub("", _SPECIAL_SPACES.sub(" ", text))
-    return _TRAILING_SPACES.sub("", _RUNS_OF_SPACES.sub(" ", text))
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _CONTROL_CHARS.sub("", _ZERO_WIDTH.sub("", _SPECIAL_SPACES.sub(" ", text)))
+    return _TRAILING_SPACES.sub("", text)
 
 
 class MyEncoder(json.JSONEncoder):
@@ -674,8 +682,10 @@ class DataWrangler(QObject):
 
         The shape follows the `tickets` collection in
         AI_CODER_INTEGRATION_BRIEF.md (section 4.2), which the decision engine
-        reads. Comment text is stored verbatim, not cleansed, because the
-        decision engine needs the real wording.
+        reads. The subject and comment text go through clean_text (HTML
+        entities decoded, control characters removed) but are not cleansed:
+        no words are dropped, because the decision engine needs the real
+        wording. raw_xml keeps the original text.
 
         Args:
             ticket: A raw Zendesk ticket dict, or a ticket ID to look up in
@@ -804,53 +814,97 @@ class DataWrangler(QObject):
                     "last_ingest": {"at": now, "new_comments": len(document["transcript"])},
                 }
             )
-            collection.insert_one(document)
-            logger.success(f"Inserted ticket {zendesk_id} into Mongo")
-            return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+            try:
+                collection.insert_one(document)
+                logger.success(f"Inserted ticket {zendesk_id} into Mongo")
+                return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+            except DuplicateKeyError:
+                # Another writer inserted it first (needs a unique index on
+                # zendesk_id); merge into theirs instead.
+                document = self.ticket_to_document(ticket)
+                existing = collection.find_one({"zendesk_id": zendesk_id}, {"transcript": 1})
 
-        seen = {self._transcript_key(entry) for entry in existing.get("transcript", [])}
-        new_comments = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+        stored = existing.get("transcript", [])
+        seen = {self._transcript_key(entry) for entry in stored}
+        candidates = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+
+        # Each push is conditional on the comment not being in the stored
+        # transcript, checked atomically by the server, so two writers
+        # ingesting the same ticket can't both append it.
+        appended = 0
+        for entry in candidates:
+            appended += collection.update_one(
+                {"zendesk_id": zendesk_id, **self._absent_from_transcript(entry)},
+                {"$push": {"transcript": entry}, "$set": {"awaiting_review": True}},
+            ).modified_count
+
+        # Bodies stored before clean_text existed (or by an older app version)
+        # are cleaned as the ticket is re-ingested. Guarded on the old value,
+        # so a newer write is never overwritten.
+        for index, entry in enumerate(stored):
+            body = entry.get("body")
+            cleaned = clean_text(body)
+            if cleaned != body:
+                collection.update_one(
+                    {"zendesk_id": zendesk_id, f"transcript.{index}.body": body},
+                    {"$set": {f"transcript.{index}.body": cleaned}},
+                )
 
         # raw_xml is refreshed too, so it always matches the latest payload.
-        update = {"$set": {**document, "last_ingest": {"at": now, "new_comments": len(new_comments)}}}
-        if new_comments:
-            update["$push"] = {"transcript": {"$each": new_comments}}
-            update["$set"]["awaiting_review"] = True
-        collection.update_one({"zendesk_id": zendesk_id}, update)
-        logger.success(f"Updated ticket {zendesk_id} in Mongo ({len(new_comments)} new comments)")
-        return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": len(new_comments)}
+        collection.update_one(
+            {"zendesk_id": zendesk_id},
+            {"$set": {**document, "last_ingest": {"at": now, "new_comments": appended}}},
+        )
+        logger.success(f"Updated ticket {zendesk_id} in Mongo ({appended} new comments)")
+        return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": appended}
+
+    @staticmethod
+    def _absent_from_transcript(entry: dict) -> dict:
+        """A query matching tickets whose transcript doesn't contain `entry` yet."""
+        if entry.get("comment_id") is not None:
+            return {"transcript.comment_id": {"$ne": entry["comment_id"]}}
+        match = {"author": entry.get("author"), "timestamp": entry.get("timestamp"), "body": entry.get("body")}
+        return {"transcript": {"$not": {"$elemMatch": match}}}
 
     @staticmethod
     def clean_stored_tickets(collection: Optional[Collection] = None, dry_run: bool = False) -> dict:
         """Applies clean_text to tickets already in Mongo (subject and comment bodies).
 
         For tickets stored before cleaning was added; new writes are cleaned
-        by ticket_to_document. Only documents whose text actually changes are
-        written, and review state is left alone. Safe to re-run.
+        by ticket_to_document, and re-ingesting a ticket also cleans its older
+        bodies. Each update only applies if the fields still hold the values
+        that were read, so text written in the meantime is never reverted;
+        such tickets are counted as skipped_changed and picked up by a re-run.
+        Run it again once no older app version is writing to the collection.
+        Review state is left alone. Safe to re-run.
 
         Args:
             dry_run: Count what would change without writing anything.
 
         Returns:
-            Counts: scanned, tickets_changed, comments_changed.
+            Counts: scanned, tickets_changed, comments_changed, skipped_changed.
         """
         collection = collection if collection is not None else DataWrangler.get_tickets_collection()
-        summary = {"scanned": 0, "tickets_changed": 0, "comments_changed": 0}
+        summary = {"scanned": 0, "tickets_changed": 0, "comments_changed": 0, "skipped_changed": 0}
         for doc in collection.find({}, {"zendesk_id": 1, "subject": 1, "transcript": 1}):
             summary["scanned"] += 1
-            update = {}
+            update, guard = {}, {"_id": doc["_id"]}
             subject = clean_text(doc.get("subject"))
             if subject != doc.get("subject"):
                 update["subject"] = subject
+                guard["subject"] = doc.get("subject")
             for index, entry in enumerate(doc.get("transcript") or []):
                 body = clean_text(entry.get("body"))
                 if body != entry.get("body"):
                     update[f"transcript.{index}.body"] = body
-                    summary["comments_changed"] += 1
-            if update:
-                summary["tickets_changed"] += 1
-                if not dry_run:
-                    collection.update_one({"_id": doc["_id"]}, {"$set": update})
+                    guard[f"transcript.{index}.body"] = entry.get("body")
+            if not update:
+                continue
+            if not dry_run and collection.update_one(guard, {"$set": update}).matched_count == 0:
+                summary["skipped_changed"] += 1
+                continue
+            summary["tickets_changed"] += 1
+            summary["comments_changed"] += sum(key.startswith("transcript.") for key in update)
         logger.info(f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}")
         return summary
 

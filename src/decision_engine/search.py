@@ -10,12 +10,15 @@ chosen.
     python -m decision_engine.search ensure [--wait]
     python -m decision_engine.search query "import fails" [--status open]
 """
+import argparse
+import re
 import sys
 import time
 from typing import List, Optional
 
+import pymongo
 from pymongo.collection import Collection
-from pymongo.errors import OperationFailure
+from pymongo.errors import OperationFailure, PyMongoError
 from pymongo.operations import SearchIndexModel
 
 TEXT_INDEX = "tickets_text"
@@ -42,22 +45,40 @@ UNSUPPORTED_HINT = (
 )
 
 
+# Error codes meaning "this deployment has no Atlas Search": CommandNotFound,
+# CommandNotSupported, SearchNotEnabled (atlas-local without mongot) and
+# "Unrecognized pipeline stage name" (a plain mongod given $search).
+_UNSUPPORTED_CODES = {59, 115, 31082, 40324}
+# IndexAlreadyExists: another process created the index after our check.
+_INDEX_EXISTS_CODES = {68}
+MIN_LIST_SECONDS = 1.0
+
+
 class SearchUnavailable(RuntimeError):
-    """The deployment has no Atlas Search support."""
+    """The deployment has no Atlas Search."""
+
+
+def _is_unsupported(error: OperationFailure) -> bool:
+    return error.code in _UNSUPPORTED_CODES or (error.details or {}).get("codeName") == "SearchNotEnabled"
 
 
 def _search_indexes(tickets: Collection) -> dict:
+    """Search indexes by name. Only "no Atlas Search" errors become SearchUnavailable;
+    anything else (e.g. missing permissions) is raised as is."""
     try:
         return {index["name"]: index for index in tickets.list_search_indexes()}
     except OperationFailure as e:
-        raise SearchUnavailable(UNSUPPORTED_HINT) from e
+        if _is_unsupported(e):
+            raise SearchUnavailable(UNSUPPORTED_HINT) from e
+        raise
 
 
 def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: float = 300.0) -> List[str]:
     """Creates the full-text index if it doesn't exist yet. Safe to call repeatedly.
 
     An existing index is left as it is, even if its definition differs: change
-    it in Atlas, or drop it and call this again.
+    it in Atlas, or drop it and call this again. If another process creates
+    the index between the check and the create, that counts as success.
 
     Args:
         wait: Block until the index is queryable (it builds asynchronously).
@@ -68,6 +89,7 @@ def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: floa
 
     Raises:
         SearchUnavailable: on a deployment without Atlas Search.
+        OperationFailure: for other server errors, such as missing permissions.
     """
     created = []
     if TEXT_INDEX not in _search_indexes(tickets):
@@ -75,9 +97,13 @@ def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: floa
             tickets.create_search_index(
                 SearchIndexModel(name=TEXT_INDEX, type="search", definition=TEXT_INDEX_DEFINITION)
             )
+            created.append(TEXT_INDEX)
         except OperationFailure as e:
-            raise SearchUnavailable(UNSUPPORTED_HINT) from e
-        created.append(TEXT_INDEX)
+            if _is_unsupported(e):
+                raise SearchUnavailable(UNSUPPORTED_HINT) from e
+            already_exists = e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            if not (already_exists and TEXT_INDEX in _search_indexes(tickets)):
+                raise
     if wait:
         wait_until_queryable(tickets, TEXT_INDEX, timeout)
     return created
@@ -88,18 +114,30 @@ def wait_until_queryable(
 ) -> None:
     """Polls until the named search index reports queryable.
 
+    Each listing runs under a client-side timeout bounded by the time left,
+    so a stalled server can't hold the loop past `timeout`.
+
     Raises:
         TimeoutError: if it isn't queryable within `timeout` seconds.
     """
     deadline = time.monotonic() + timeout
     while True:
-        index = _search_indexes(tickets).get(name)
+        # Bound each listing by the time left (at least MIN_LIST_SECONDS, so
+        # even timeout=0 gets one real check).
+        remaining = max(deadline - time.monotonic(), MIN_LIST_SECONDS)
+        try:
+            with pymongo.timeout(remaining):
+                index = _search_indexes(tickets).get(name)
+        except PyMongoError as e:
+            if getattr(e, "timeout", False):
+                raise TimeoutError(f"Search index {name}: listing indexes timed out after {timeout:.0f}s") from e
+            raise
         if index and index.get("queryable"):
             return
         if time.monotonic() >= deadline:
             status = index.get("status") if index else "missing"
             raise TimeoutError(f"Search index {name} not queryable after {timeout:.0f}s (status: {status})")
-        time.sleep(poll_seconds)
+        time.sleep(min(poll_seconds, max(deadline - time.monotonic(), 0)))
 
 
 def build_search_pipeline(query: str, status: Optional[str] = None, limit: int = 20) -> List[dict]:
@@ -118,6 +156,8 @@ def build_search_pipeline(query: str, status: Optional[str] = None, limit: int =
         ],
         "minimumShouldMatch": 1,
     }
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError(f"limit must be a positive integer, got {limit!r}")
     if status:
         compound["filter"] = [{"equals": {"path": "status", "value": status}}]
     return [
@@ -141,7 +181,7 @@ def search_tickets(tickets: Collection, query: str, status: Optional[str] = None
     """Full-text search over ticket subjects and comment bodies, best match first.
 
     Raises:
-        ValueError: for an empty query.
+        ValueError: for an empty query or a limit below 1.
         SearchUnavailable: on a deployment without Atlas Search.
     """
     if not query or not query.strip():
@@ -149,8 +189,7 @@ def search_tickets(tickets: Collection, query: str, status: Optional[str] = None
     try:
         return list(tickets.aggregate(build_search_pipeline(query.strip(), status, limit)))
     except OperationFailure as e:
-        # 40324: "Unrecognized pipeline stage name", which a plain mongod returns.
-        if getattr(e, "code", None) == 40324 or "$search" in str(e):
+        if _is_unsupported(e):
             raise SearchUnavailable(UNSUPPORTED_HINT) from e
         raise
 
@@ -165,27 +204,59 @@ def highlight_text(result: dict) -> str:
     return " … ".join(passages)
 
 
+# Characters that would act on a terminal rather than print: C0/C1 controls
+# (ESC starts ANSI/OSC sequences) and bidi overrides, which can reorder text.
+_TERMINAL_UNSAFE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def terminal_safe(text) -> str:
+    """Text safe to print on one terminal line.
+
+    Ticket text is customer-written; newlines and tabs become spaces, and
+    other control characters are shown escaped (e.g. "\\x1b") instead of
+    being sent to the terminal.
+    """
+    text = str(text if text is not None else "").replace("\n", " ").replace("\t", " ")
+    return _TERMINAL_UNSAFE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m decision_engine.search", description="Atlas full-text ticket search.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    ensure = commands.add_parser("ensure", help=f"create the {TEXT_INDEX} index if missing")
+    ensure.add_argument("--wait", action="store_true", help="wait until the index is queryable")
+    ensure.add_argument("--timeout", type=float, default=300.0, help="seconds to wait (default 300)")
+    query = commands.add_parser("query", help="search ticket subjects and comments")
+    query.add_argument("text")
+    query.add_argument("--status", help="only tickets with this exact status")
+    query.add_argument("--limit", type=int, default=20)
+    return parser
+
+
 def main(argv: List[str]) -> int:
     from .persistence import get_tickets_collection
 
-    if argv[:1] == ["ensure"]:
-        created = ensure_search_indexes(get_tickets_collection(), wait="--wait" in argv)
+    args = _parser().parse_args(argv)  # exits with usage on bad arguments
+    if args.command == "ensure":
+        created = ensure_search_indexes(get_tickets_collection(), wait=args.wait, timeout=args.timeout)
         print(f"Created: {', '.join(created)}" if created else f"{TEXT_INDEX} already exists.")
         return 0
-    if argv[:1] == ["query"] and len(argv) >= 2:
-        status = argv[argv.index("--status") + 1] if "--status" in argv else None
-        for result in search_tickets(get_tickets_collection(), argv[1], status):
-            print(f"{result['score']:.2f}  {result['zendesk_id']}  [{result.get('status')}]  {result.get('subject')}")
-            if result.get("highlights"):
-                print(f"        {highlight_text(result)[:200]}")
-        return 0
-    print(__doc__)
-    return 2
+    try:
+        results = search_tickets(get_tickets_collection(), args.text, args.status, args.limit)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    for result in results:
+        print(f"{result['score']:.2f}  {terminal_safe(result['zendesk_id'])}  [{terminal_safe(result.get('status'))}]  "
+              f"{terminal_safe(result.get('subject'))}")
+        if result.get("highlights"):
+            print(f"        {terminal_safe(highlight_text(result))[:200]}")
+    return 0
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except SearchUnavailable as e:
+    except (SearchUnavailable, TimeoutError) as e:
         print(e, file=sys.stderr)
         sys.exit(1)

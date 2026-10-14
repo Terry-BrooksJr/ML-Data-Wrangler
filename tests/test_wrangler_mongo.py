@@ -164,15 +164,20 @@ from wrangler import clean_text  # noqa: E402
     "raw, expected",
     [
         ("Hi&nbsp;team,&nbsp;\nthanks", "Hi team,\nthanks"),
-        ("R&amp;D &lt;script&gt; &quot;x&quot; &#39;y&#39; &#8217;", "R&D <script> \"x\" 'y' ’"),
-        ("double &amp;nbsp; escaped &amp;amp;", "double escaped &"),
-        ("zero​width﻿ and nbsp narrow", "zerowidth and nbsp narrow"),
-        ("a    b\t\tc   \nline two   ", "a b c\nline two"),
+        ("R&amp;D &lt;script&gt; &quot;x&quot; &#39;y&#39; &#8217;", "R&D <script> \"x\" 'y' \u2019"),
+        ("double&amp;nbsp;escaped &amp;amp;", "double escaped &"),
+        ("zero\u200bwidth\ufeff\u2060 and\u00a0nbsp\u202fnarrow", "zerowidth and nbsp narrow"),
+        ("trailing   \nline two\t ", "trailing\nline two"),
         ("keeps\n\nparagraphs", "keeps\n\nparagraphs"),
+        ("def f():\n    if x:\n\treturn  1  # aligned", "def f():\n    if x:\n\treturn  1  # aligned"),
+        ("crlf\r\nand\rcr", "crlf\nand\ncr"),
+        ("esc &#27;]52;c;evil&#7; bell \x1b[31mred\x9b", "esc ]52;c;evil bell [31mred"),
+        ("family \U0001F468\u200d\U0001F469 and \u0645\u200c\u06cc", "family \U0001F468\u200d\U0001F469 and \u0645\u200c\u06cc"),
         ("", ""),
         (None, None),
     ],
-    ids=["nbsp", "named_and_numeric", "double_escaped", "unicode_spaces", "runs_of_spaces", "newlines", "empty", "none"],
+    ids=["nbsp", "named_and_numeric", "double_escaped", "unicode_spaces", "trailing_spaces", "newlines",
+         "indentation_kept", "line_endings", "control_chars", "joiners_kept", "empty", "none"],
 )
 def test_clean_text(raw, expected):
     assert clean_text(raw) == expected
@@ -225,7 +230,7 @@ def test_clean_stored_tickets_backfills(tickets):
     ])
 
     preview = DataWrangler.clean_stored_tickets(tickets, dry_run=True)
-    assert preview == {"scanned": 2, "tickets_changed": 1, "comments_changed": 1}
+    assert preview == {"scanned": 2, "tickets_changed": 1, "comments_changed": 1, "skipped_changed": 0}
     assert tickets.find_one({"zendesk_id": "1"})["subject"] == "A&nbsp;B"  # dry run wrote nothing
 
     assert DataWrangler.clean_stored_tickets(tickets) == preview
@@ -235,3 +240,61 @@ def test_clean_stored_tickets_backfills(tickets):
     assert first["awaiting_review"] is False  # review state untouched
 
     assert DataWrangler.clean_stored_tickets(tickets)["tickets_changed"] == 0  # idempotent
+
+
+def test_concurrent_ingest_appends_a_comment_once(wrangler, tickets, data_dir, monkeypatch):
+    wrangler.write_ticket_to_mongo(101, tickets)
+    stale = tickets.find_one({"zendesk_id": "101"}, {"transcript": 1})
+    new = comment(3, 555, "Any update?", "2026-08-20T09:00:00Z")
+    (data_dir / "comments" / "101.json").write_text(json.dumps(COMMENTS + [new]))
+
+    # Both writers read the transcript before either appends.
+    real_find_one = tickets.find_one
+    monkeypatch.setattr(tickets, "find_one", lambda f, p=None: stale if p == {"transcript": 1} else real_find_one(f, p))
+    first = wrangler.write_ticket_to_mongo(101, tickets)
+    second = wrangler.write_ticket_to_mongo(101, tickets)
+
+    transcript = real_find_one({"zendesk_id": "101"})["transcript"]
+    assert [c["comment_id"] for c in transcript] == ["1", "2", "3"]
+    assert first["new_comments"] == 1 and second["new_comments"] == 0
+
+
+def test_concurrent_ingest_without_comment_ids(wrangler, tickets, data_dir, monkeypatch):
+    entity_data_dir(data_dir, comment_ids=False)
+    wrangler.write_ticket_to_mongo(101, tickets)
+    tickets.update_one({"zendesk_id": "101"}, {"$set": {"transcript": []}})
+    stale = tickets.find_one({"zendesk_id": "101"}, {"transcript": 1})
+
+    real_find_one = tickets.find_one
+    monkeypatch.setattr(tickets, "find_one", lambda f, p=None: stale if p == {"transcript": 1} else real_find_one(f, p))
+    wrangler.write_ticket_to_mongo(101, tickets)
+    wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert len(real_find_one({"zendesk_id": "101"})["transcript"]) == 1
+
+
+def test_reingest_cleans_bodies_stored_by_older_versions(wrangler, tickets, data_dir):
+    wrangler.write_ticket_to_mongo(101, tickets)
+    tickets.update_one({"zendesk_id": "101"}, {"$set": {"transcript.1.body": "Escalated&nbsp;to engineering."}})
+
+    summary = wrangler.write_ticket_to_mongo(101, tickets)
+
+    assert summary["new_comments"] == 0
+    assert tickets.find_one({"zendesk_id": "101"})["transcript"][1]["body"] == "Escalated to engineering."
+
+
+def test_backfill_does_not_revert_newer_text(tickets, monkeypatch):
+    tickets.insert_one({"zendesk_id": "1", "subject": "Old&nbsp;subject", "transcript": [{"body": "a&amp;b"}]})
+    real_update_one = tickets.update_one
+
+    def ingest_lands_first(query, update, *args, **kwargs):
+        # Another writer updates the subject after the backfill read it.
+        real_update_one({"zendesk_id": "1"}, {"$set": {"subject": "Newer subject"}})
+        return real_update_one(query, update, *args, **kwargs)
+
+    monkeypatch.setattr(tickets, "update_one", ingest_lands_first)
+    summary = DataWrangler.clean_stored_tickets(tickets)
+
+    stored = tickets.find_one({"zendesk_id": "1"})
+    assert stored["subject"] == "Newer subject"
+    assert summary["skipped_changed"] == 1 and summary["tickets_changed"] == 0
