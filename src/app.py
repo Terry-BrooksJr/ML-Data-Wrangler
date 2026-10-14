@@ -27,6 +27,12 @@ from PyQt5.QtWidgets import (
     QDialog,
     QTabWidget,
 )
+from dotenv import load_dotenv
+
+# Before the local imports: topic_store and decision_engine read env vars at
+# import time. .env wins over the shell so a stale exported MONGO_URI (e.g. an
+# old Atlas user) can't silently replace the project's credentials.
+load_dotenv(override=True)
 
 import topic_store
 from decision_engine.persistence import get_database
@@ -552,6 +558,7 @@ class MainWindow(QMainWindow, QDialog):
             colorize=True,
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="INFO",
+            diagnose=False,
         )
         logger.add(
             sink="./wrangle_log.log",
@@ -559,6 +566,7 @@ class MainWindow(QMainWindow, QDialog):
             serialize=True,
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="DEBUG",
+            diagnose=False,
         )
 
     def update_progressBar(self, value):

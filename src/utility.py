@@ -36,6 +36,7 @@ class QTextEditLogger:
             self._write_to_text_edit,
             format="{time:w} | {level} | {message}",
             level="INFO",
+            diagnose=False,
         )
 
     def _write_to_text_edit(self, message):
