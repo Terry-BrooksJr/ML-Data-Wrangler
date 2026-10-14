@@ -307,3 +307,106 @@ def test_unreachable_mongo_shows_connection_hint(qapp, configured, dialogs):
 
     assert dialogs[-1][0] == "critical"
     assert "Atlas IP access list" in dialogs[-1][1]
+
+
+# --- batch summary, engine errors and feedback --------------------------------
+
+
+def test_review_all_shows_batch_summary(qapp, configured, dialogs, stored):
+    summary = {"classified": 1, "manual_fallback": 0, "skipped": 0, "errored": 2, "stopped": None, "usage": {}}
+    tab = make_tab(stored, review_batch=lambda tickets: summary)
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert dialogs[-1][0] == "information"
+    assert "Engine errors (left in the queue to retry): 2" in dialogs[-1][1]
+
+
+def test_review_all_warns_when_batch_stopped(qapp, configured, dialogs, stored):
+    summary = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0,
+               "stopped": "AuthenticationError: bad key", "usage": {}}
+    tab = make_tab(stored, review_batch=lambda tickets: summary)
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert dialogs[-1][0] == "warning"
+    assert "Stopped early" in dialogs[-1][1]
+
+
+def test_format_review_shows_overrides_engine_error_and_audit(stored):
+    row = {
+        "zendesk_id": "1",
+        "subject": "s",
+        "outcomes": [{"review_id": "r1", "outcome": "bad", "detection_method": "manual", "detail": "wrong"}],
+        "review": review(
+            "manual_triage", 1, review_id="r1",
+            guard_overrides=["Downgraded from flag_solve"], engine_error="cut off",
+            audit={"usage": {"input_tokens": 10, "output_tokens": 5}, "latency_ms": 12,
+                   "request_id": "req_1", "prompt_version": "abc"},
+        ),
+    }
+    text = format_review(row)
+    assert "Overridden by code checks:\n  - Downgraded from flag_solve" in text
+    assert "Engine error" in text
+    assert "Outcome: bad (manual): wrong" in text
+    assert "10 in / 5 out tokens" in text and "request req_1" in text
+
+
+def test_feedback_buttons_need_a_selection(qapp, configured, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    assert not tab.mark_good_button.isEnabled()
+
+    tab.table.selectRow(0)
+    assert tab.mark_good_button.isEnabled() and tab.mark_bad_button.isEnabled()
+
+
+def test_mark_correct_records_outcome(qapp, configured, dialogs, tickets, monkeypatch):
+    from bson import ObjectId
+
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    ticket["awaiting_review"] = False
+    ticket["agent_reviews"] = [review("flag_solve", 5, review_id=ObjectId())]
+    ticket["outcomes"] = []
+    tickets.insert_one(ticket)
+    tab = make_tab(tickets)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    tab.table.selectRow(0)
+    tab.mark_selected_correct()
+    wait_until_idle(qapp, tab)
+
+    outcomes = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})["outcomes"]
+    assert [o["outcome"] for o in outcomes] == ["good"]
+
+
+def test_mark_misclassified_logs_entry(qapp, configured, dialogs, tickets, monkeypatch):
+    from bson import ObjectId
+    from PyQt5.QtWidgets import QInputDialog
+
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    ticket["awaiting_review"] = False
+    ticket["agent_reviews"] = [review("flag_solve", 5, review_id=ObjectId())]
+    tickets.insert_one(ticket)
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: ("flag_reengage", True))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("customer never confirmed", True))
+    tab = make_tab(tickets)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    tab.table.selectRow(0)
+    tab.mark_selected_misclassified()
+    wait_until_idle(qapp, tab)
+
+    entry = tickets.database.misclassification_log.find_one()
+    assert entry["correct_classification"] == "flag_reengage"
+    assert entry["misread_signal"] == "customer never confirmed"
+
+
+def test_accuracy_report_dialog(qapp, configured, dialogs, stored):
+    tab = make_tab(stored)
+    tab.show_accuracy_report()
+    wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "information" and "flag_solve" in dialogs[-1][1]

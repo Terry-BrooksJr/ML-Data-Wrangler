@@ -7,6 +7,7 @@ work. The two [PLACEHOLDER: ...] blocks are intentionally left unfilled.
 TODO(open item #1): leadership @mention recipient-selection logic.
 TODO(open item #4): confirmed list of available signals.
 """
+import hashlib
 
 SYSTEM_INSTRUCTIONS = """You are a ticket triage agent for API Support. You review Zendesk tickets (with
 optional linked Jira issues) and classify each one into exactly one category, or
@@ -166,3 +167,7 @@ Respond with a single JSON object:
   "leadership_recipient": string | null  // only for escalate_leadership
 }
 """
+
+# Recorded on every review so a classification can be traced to the exact
+# prompt text that produced it (issue #16). Changes whenever the prompt does.
+PROMPT_VERSION = hashlib.sha256(SYSTEM_INSTRUCTIONS.encode("utf-8")).hexdigest()[:12]

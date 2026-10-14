@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -31,7 +32,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from decision_engine import persistence
+from decision_engine import feedback, persistence
+from decision_engine.guards import CLASSIFICATIONS
 from utility import ThreadWorker
 
 # Reading reviews only touches Mongo; classifying also needs B2 and the primary
@@ -106,7 +108,7 @@ def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> Lis
         {"$unwind": "$agent_reviews"},
         {"$sort": {"agent_reviews.reviewed_at": -1}},
         {"$limit": limit},
-        {"$project": {"_id": 0, "zendesk_id": 1, "subject": 1, "review": "$agent_reviews"}},
+        {"$project": {"_id": 0, "zendesk_id": 1, "subject": 1, "outcomes": 1, "review": "$agent_reviews"}},
     ]
     return list(tickets.aggregate(pipeline))
 
@@ -143,7 +145,31 @@ def format_review(row: dict) -> str:
         ]
     if review.get("leadership_recipient"):
         lines += ["", f"Leadership recipient: {review['leadership_recipient']}"]
+    if review.get("guard_overrides"):
+        lines += ["", "Overridden by code checks:", *[f"  - {o}" for o in review["guard_overrides"]]]
+    if review.get("engine_error"):
+        lines += ["", f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}"]
+    outcome = latest_outcome(row)
+    if outcome:
+        lines += ["", f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
+                  + (f": {outcome['detail']}" if outcome.get("detail") else "")]
+    audit = review.get("audit") or {}
+    if audit:
+        usage = audit.get("usage") or {}
+        lines += [
+            "",
+            f"Audit: {usage.get('input_tokens', 0)} in / {usage.get('output_tokens', 0)} out tokens "
+            f"({usage.get('cache_read_input_tokens', 0)} cache read), {audit.get('latency_ms')} ms, "
+            f"request {audit.get('request_id') or '-'}, prompt {audit.get('prompt_version')}",
+        ]
     return "\n".join(lines)
+
+
+def latest_outcome(row: dict) -> Optional[dict]:
+    """The newest outcome recorded for this row's review, or None."""
+    review_id = row["review"].get("review_id")
+    matches = [o for o in row.get("outcomes") or [] if o.get("review_id") == review_id]
+    return matches[-1] if matches else None
 
 
 class TriageTab(QWidget):
@@ -234,9 +260,26 @@ class TriageTab(QWidget):
         self.detail.setReadOnly(True)
         self.detail.setPlaceholderText("Select a review to see its reasoning, note and draft message.")
 
+        self.mark_good_button = QPushButton("Mark Correct")
+        self.mark_good_button.clicked.connect(self.mark_selected_correct)
+        self.mark_bad_button = QPushButton("Mark Misclassified…")
+        self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
+        self.accuracy_button = QPushButton("Accuracy Report")
+        self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        feedback_row = QHBoxLayout()
+        feedback_row.addWidget(self.mark_good_button)
+        feedback_row.addWidget(self.mark_bad_button)
+        feedback_row.addStretch()
+        feedback_row.addWidget(self.accuracy_button)
+        detail_pane = QWidget()
+        detail_layout = QVBoxLayout(detail_pane)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.addWidget(self.detail)
+        detail_layout.addLayout(feedback_row)
+
         splitter = QSplitter(QtCore.Qt.Vertical)
         splitter.addWidget(self.table)
-        splitter.addWidget(self.detail)
+        splitter.addWidget(detail_pane)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
@@ -321,8 +364,11 @@ class TriageTab(QWidget):
             label: Text for the busy bar and, when busy, the status label.
         """
 
-        for button in (self.refresh_button, self.review_all_button, self.review_one_button):
+        for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button):
             button.setEnabled(not busy)
+        has_selection = self._selected_row() is not None
+        for button in (self.mark_good_button, self.mark_bad_button):
+            button.setEnabled(not busy and has_selection)
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
@@ -461,14 +507,20 @@ class TriageTab(QWidget):
             self._review_all_done,
         )
 
-    def _review_all_done(self, _result) -> None:
+    def _review_all_done(self, summary) -> None:
         """Logs and announces batch completion, then refreshes the list.
 
         Args:
-            _result: The batch's return value (unused).
+            summary: The batch's counts from run_review_batch, or None.
         """
         logger.success("Review batch finished.")
-        QMessageBox.information(self, "Review Complete", "Review batch finished. Results are listed below.")
+        message = "Review batch finished. Results are listed below."
+        if isinstance(summary, dict):
+            message += "\n\n" + persistence.format_batch_summary(summary)
+        if isinstance(summary, dict) and summary.get("stopped"):
+            QMessageBox.warning(self, "Review Stopped Early", message)
+        else:
+            QMessageBox.information(self, "Review Complete", message)
         self.refresh()
 
     def start_review_one(self) -> None:
@@ -508,6 +560,8 @@ class TriageTab(QWidget):
             QMessageBox.information(self, "Not Classified", message)
             return
         message = f"Ticket {zendesk_id}: {result['classification']} (confidence {result['confidence']})"
+        if result.get("engine_error"):
+            message += f"\n\nThe engine failed repeatedly, so the ticket was routed to manual triage: {result['engine_error']}"
         logger.success(message)
         note = optional_models_note()
         QMessageBox.information(self, "Ticket Classified", message + (f"\n\nWarning:\n{note}" if note else ""))
@@ -561,9 +615,78 @@ class TriageTab(QWidget):
         cell, so it stays correct after the user re-sorts the table. Clears the
         pane when nothing is selected.
         """
-        selected = self.table.selectedItems()
-        if not selected:
+        row = self._selected_row()
+        enabled = row is not None and not self.is_busy()
+        self.mark_good_button.setEnabled(enabled)
+        self.mark_bad_button.setEnabled(enabled)
+        if row is None:
             self.detail.clear()
             return
-        row_index = self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)
-        self.detail.setPlainText(format_review(self._rows[row_index]))
+        self.detail.setPlainText(format_review(row))
+
+    def _selected_row(self) -> Optional[dict]:
+        """The loaded row behind the selected table row, or None."""
+        selected = self.table.selectedItems() if hasattr(self, "table") else []
+        if not selected:
+            return None
+        return self._rows[self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)]
+
+    # --- feedback ----------------------------------------------------------------
+
+    def mark_selected_correct(self) -> None:
+        """Records a manual "good" outcome for the selected review."""
+        row = self._selected_row()
+        if row is None or not self._configured(READ_ENV, notify=True):
+            return
+        zendesk_id, review_id = row["zendesk_id"], row["review"]["review_id"]
+        self._run(
+            lambda: feedback.record_outcome(self.collection_factory(), zendesk_id, review_id, "good"),
+            f"Recording outcome for ticket {zendesk_id}",
+            lambda _: self._feedback_done(f"Ticket {zendesk_id}: review marked correct."),
+        )
+
+    def mark_selected_misclassified(self) -> None:
+        """Asks for the correct category and logs the selected review as misclassified."""
+        row = self._selected_row()
+        if row is None or not self._configured(READ_ENV, notify=True):
+            return
+        zendesk_id, review = row["zendesk_id"], row["review"]
+        choices = [c for c in CLASSIFICATIONS if c != review.get("classification")]
+        correct, ok = QInputDialog.getItem(
+            self, "Mark Misclassified", f"Ticket {zendesk_id} was classified {review.get('classification')}. "
+            "What should it have been?", choices, 0, False,
+        )
+        if not ok:
+            return
+        misread, ok = QInputDialog.getText(self, "Mark Misclassified", "Which signal was misread? (optional)")
+        if not ok:
+            return
+
+        def log_it():
+            tickets = self.collection_factory()
+            log, _ = feedback.get_feedback_collections(tickets.database)
+            return feedback.log_misclassification(tickets, log, zendesk_id, review["review_id"], correct, misread.strip())
+
+        self._run(
+            log_it,
+            f"Logging misclassification for ticket {zendesk_id}",
+            lambda _: self._feedback_done(f"Ticket {zendesk_id}: logged as misclassified (should be {correct})."),
+        )
+
+    def _feedback_done(self, message: str) -> None:
+        logger.success(message)
+        self.status_label.setText(message)
+        self.refresh()
+
+    def show_accuracy_report(self) -> None:
+        """Shows accuracy per category from the recorded outcomes."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        self._run(
+            lambda: feedback.accuracy_report(self.collection_factory()),
+            "Building accuracy report",
+            lambda report: QMessageBox.information(
+                self, "Accuracy Report",
+                feedback.format_accuracy_report(report) if report else "No reviews yet.",
+            ),
+        )

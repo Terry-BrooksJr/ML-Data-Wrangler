@@ -1,23 +1,47 @@
+"""Zendesk ticket triage decision engine (Module 2).
+
+Reads mapped ticket documents from Mongo, asks an LLM (via Cheaper Inference)
+for one of five triage classifications, and appends the result to
+tickets.agent_reviews. Never writes to Zendesk; write-back is Module 3.
+"""
 import json
 import os
+import time
 from functools import lru_cache
 from typing import Optional
 
 import anthropic
 from loguru import logger
 
-from .prompts import SYSTEM_INSTRUCTIONS
+from .guards import SOLVE_CONFIDENCE_FLOOR, InvalidReply, apply_guards, validate_reply
+from .prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
 
 CHEAPER_INFERENCE_BASE_URL = "https://api.cheaperinference.com"  # no /v1 — SDK appends /v1/messages
 
-# TODO: confirm the model ID Cheaper Inference expects. The brief specifies
+# TODO(#15): confirm the model ID Cheaper Inference expects. The brief specifies
 # "claude-opus-4.8"; Anthropic's own ID for that model is "claude-opus-4-8".
 MODEL_VERSION = os.environ.get("DECISION_ENGINE_MODEL", "claude-opus-4.8")
-SOLVE_CONFIDENCE_FLOOR = 75  # mirrors the prompt's own stated bar — enforced
-                             # here as a hard backstop, not just trusted from
-                             # the model's self-report
+# Reasoning, an internal note and a drafted message must all fit; a reply cut
+# off at this limit is an engine error, not an abstention.
+MAX_TOKENS = 4096
+REQUEST_TIMEOUT_SECONDS = 120.0
+MAX_RETRIES = 3  # the SDK retries only 408/409/429/5xx and connection errors
 CONFIRMATION_CONFIDENCE_FLOOR = SOLVE_CONFIDENCE_FLOOR  # below this, re-check
                                                         # with the confirmation model
+
+
+class EngineError(Exception):
+    """The model answered, but not with a usable classification.
+
+    Raised for a reply cut off at max_tokens, one with no JSON object, or JSON
+    that fails validation. Unlike a manual_triage answer (a deliberate
+    abstention), this is a failure: the ticket should stay in the queue.
+    """
+
+    def __init__(self, message: str, model: str, audit: Optional[dict] = None):
+        super().__init__(message)
+        self.model = model
+        self.audit = audit or {}
 
 
 def primary_model() -> str:
@@ -27,7 +51,7 @@ def primary_model() -> str:
 # Secondary and confirmation have no default: when unset, that step is
 # skipped rather than re-running the ticket on a model that already saw it.
 def secondary_model() -> Optional[str]:
-    """Used only when the primary call raises an API error."""
+    """Used only when the primary call fails (API error or unusable reply)."""
     return os.environ.get("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME") or None
 
 
@@ -46,14 +70,17 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(
         api_key=os.environ["CHEAPER_INFERENCE_API_KEY"],
         base_url=os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        max_retries=MAX_RETRIES,
     )
 
 
-def classify_ticket(ticket_payload: str) -> dict:
+def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
     """Classifies one ticket, escalating through the configured models.
 
-    The primary model classifies first; if that call raises an API error the
-    secondary model is tried instead. A manual_triage result, or one below
+    The primary model classifies first; if that call fails (an API error, or
+    an EngineError for an unusable reply) the secondary model is tried
+    instead. A manual_triage result, or one below
     CONFIRMATION_CONFIDENCE_FLOOR, is then re-classified by the confirmation
     model, whose answer is returned. The answer it replaced is kept under
     "confirmation_of" for audit. If the confirmation call itself fails, the
@@ -62,17 +89,25 @@ def classify_ticket(ticket_payload: str) -> dict:
     A ticket is never sent twice to the same model: an unset secondary or
     confirmation model, or one naming the model that already answered, skips
     that step (the primary error is re-raised, or the first answer is kept).
+
+    Args:
+        ticket_payload: The output of build_ticket_payload.
+        reengage_count: Re-engage attempts the ticket already has, for the
+            re-engage limit guard.
+
+    Raises:
+        anthropic.APIError or EngineError: when no model gave a usable answer.
     """
     primary = primary_model()
     try:
-        result = _classify_with(primary, ticket_payload)
-    except anthropic.APIError as e:
+        result = _classify_with(primary, ticket_payload, reengage_count)
+    except (anthropic.APIError, EngineError) as e:
         secondary = secondary_model()
         if secondary in (None, primary):
             logger.error(f"Primary model failed ({e}) and no distinct secondary model is set.")
             raise
         logger.warning(f"Primary model failed ({e}); retrying on secondary model.")
-        result = _classify_with(secondary, ticket_payload)
+        result = _classify_with(secondary, ticket_payload, reengage_count)
 
     if not needs_confirmation(result):
         return result
@@ -84,12 +119,12 @@ def classify_ticket(ticket_payload: str) -> dict:
         )
         return result
     try:
-        confirmed = _classify_with(confirmation, ticket_payload)
-    except anthropic.APIError as e:
+        confirmed = _classify_with(confirmation, ticket_payload, reengage_count)
+    except (anthropic.APIError, EngineError) as e:
         logger.warning(f"Confirmation model failed ({e}); keeping the first result.")
         return result
     confirmed["confirmation_of"] = {
-        key: result.get(key) for key in ("model_version", "classification", "confidence", "reasoning")
+        key: result.get(key) for key in ("model_version", "classification", "confidence", "reasoning", "audit")
     }
     return confirmed
 
@@ -101,10 +136,39 @@ def needs_confirmation(result: dict) -> bool:
     )
 
 
-def _classify_with(model: str, ticket_payload: str) -> dict:
+def extract_json(text: str):
+    """Parses the first JSON object in the reply.
+
+    Tolerates markdown code fences and prose around the object, which
+    json.loads alone rejects.
+
+    Raises:
+        ValueError: if the text contains no JSON object.
+    """
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            value, _ = decoder.raw_decode(text, start)
+            return value
+        except json.JSONDecodeError:
+            start = text.find("{", start + 1)
+    raise ValueError("no JSON object found")
+
+
+def _usage(response) -> dict:
+    usage = getattr(response, "usage", None)
+    return {
+        key: getattr(usage, key, None) or 0
+        for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+    }
+
+
+def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> dict:
+    started = time.monotonic()
     response = get_client().messages.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=MAX_TOKENS,
         system=[
             {
                 "type": "text",
@@ -118,39 +182,27 @@ def _classify_with(model: str, ticket_payload: str) -> dict:
     # Take the first text block rather than content[0], which may be a
     # thinking block on models that think by default.
     raw_text = next((b.text for b in response.content if b.type == "text"), "")
-
-    try:
-        result = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return _manual_triage_fallback(
-            reason=f"Non-JSON response from model: {raw_text[:500]}",
-            model=model,
-        )
-
-    # Hard backstop: don't trust a self-reported Solve under the stated bar.
-    if result.get("classification") == "flag_solve" and result.get("confidence", 0) < SOLVE_CONFIDENCE_FLOOR:
-        result["classification"] = "manual_triage"
-        result["tag"] = "manual_triage"
-        result["reasoning"] = (
-            f"Downgraded from flag_solve: confidence {result.get('confidence')} "
-            f"is below the {SOLVE_CONFIDENCE_FLOOR} floor. Original reasoning: "
-            + result.get("reasoning", "")
-        )
-
-    result["model_version"] = model
-    return result
-
-
-def _manual_triage_fallback(reason: str, model: str) -> dict:
-    return {
-        "ticket_id": None,
-        "classification": "manual_triage",
-        "confidence": 0,
-        "signals_matched": [],
-        "reasoning": reason,
-        "tag": "manual_triage",
-        "internal_note": "Auto-routed: model did not return valid JSON.",
-        "draft_message": None,
-        "leadership_recipient": None,
-        "model_version": model,
+    stop_reason = getattr(response, "stop_reason", None)
+    audit = {
+        "usage": _usage(response),
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "request_id": getattr(response, "_request_id", None),
+        "prompt_version": PROMPT_VERSION,
+        "stop_reason": stop_reason,
+        "raw_response": raw_text,
     }
+
+    if stop_reason == "max_tokens":
+        logger.error(f"{model}: reply cut off at max_tokens ({MAX_TOKENS}).")
+        raise EngineError(f"Reply cut off at max_tokens ({MAX_TOKENS})", model, audit)
+    try:
+        result = validate_reply(extract_json(raw_text))
+    except ValueError as e:  # InvalidReply is a ValueError too
+        kind = "Invalid reply" if isinstance(e, InvalidReply) else "Non-JSON response"
+        logger.error(f"{model}: {kind.lower()}: {e}")
+        raise EngineError(f"{kind} from model: {e}. Reply: {raw_text[:500]}", model, audit) from e
+
+    apply_guards(result, reengage_count)
+    result["model_version"] = model
+    result["audit"] = audit
+    return result

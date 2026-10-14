@@ -349,7 +349,8 @@ class DataWrangler(QObject):
                 )
             return (output1, output2)
 
-    def _cleanse(self, body_of_text: str) -> str:
+    @staticmethod
+    def _cleanse(body_of_text: str) -> str:
         """Cleanses the provided text by normalizing and unescaping it, then
         dropping words that are emails, URLs, UUIDs, MD5 hashes, IPv4 addresses
         or contain no letters or digits."""
@@ -825,6 +826,22 @@ class DataWrangler(QObject):
         self.corpus_creation_finished.emit()
         logger.success("Corpus Successfully Created")
         return self.corpus
+
+    @classmethod
+    def mongo_ticket_document(cls, ticket_doc: dict) -> str:
+        """Builds the topic-modelling document for a Mongo `tickets` document.
+
+        Matches ticket_documents (cleansed subject, then each comment), so a
+        saved topic model can be applied to tickets read back from Mongo.
+        """
+        return " ".join(
+            [cls._cleanse(ticket_doc.get("subject"))]
+            + [cls._cleanse(entry.get("body")) for entry in ticket_doc.get("transcript") or []]
+        )
+
+    def ticket_ids(self) -> List[str]:
+        """Zendesk IDs of the wrangled tickets, in ticket_documents order."""
+        return [str(ticket.id) for ticket in self.wrangled_tickets]
 
     def ticket_documents(self) -> List[str]:
         """Returns one cleansed document per wrangled ticket, for topic modelling.

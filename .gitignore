@@ -168,3 +168,8 @@ tickets.json
 comments
 .claude/settings.local.json
 tickets-only.json
+
+# Saved topic-model runs (model files, charts) — see src/topic_store.py
+topic_models/
+# Hand-labelled evaluation sets hold real customer text
+eval_sets/
