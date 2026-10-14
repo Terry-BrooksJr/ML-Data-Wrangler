@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -146,6 +147,27 @@ def missing_required() -> List[str]:
     return [s.name for s in SETTINGS if s.required and not os.environ.get(s.name)]
 
 
+def _write_atomically(path: pathlib.Path, text: str) -> None:
+    """Replaces path with text, leaving the old file intact if writing fails.
+
+    Writes a temporary file in the same directory, then renames it over path,
+    so a full disk or a crash can't leave a truncated settings file that
+    would stop the next launch. mkstemp creates it owner-only (0600): it
+    holds API keys and the Mongo password.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 def save(values: Dict[str, str]) -> List[str]:
     """Writes settings to the user file and applies them to os.environ.
 
@@ -165,13 +187,7 @@ def save(values: Dict[str, str]) -> List[str]:
             restart_needed.append(setting.name)
         if value:
             saved[setting.name] = value
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Holds API keys and the Mongo password, so create it owner-only.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(saved, f, indent=2)
-    path.chmod(0o600)
+    _write_atomically(settings_path(), json.dumps(saved, indent=2))
     for setting in SETTINGS:
         if setting.name in saved:
             os.environ[setting.name] = saved[setting.name]

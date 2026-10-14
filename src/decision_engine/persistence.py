@@ -12,7 +12,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from .classify import EngineError, classify_ticket
+from .classify import EngineError, classify_ticket, get_client
 from .payload import build_ticket_payload
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -33,6 +33,17 @@ def get_database() -> Database:
     """
     mongo = MongoClient(os.environ["MONGO_URI"])
     return mongo[os.environ.get("MONGO_DB", "support_db")]
+
+
+def reset_clients() -> None:
+    """Drops the cached Mongo database and model client.
+
+    Call after changing MONGO_URI, MONGO_DB or the Cheaper Inference settings;
+    the next get_database() / get_client() builds them from the new values.
+    Jobs already running keep the clients they hold.
+    """
+    get_database.cache_clear()
+    get_client.cache_clear()
 
 
 def get_tickets_collection() -> Collection:

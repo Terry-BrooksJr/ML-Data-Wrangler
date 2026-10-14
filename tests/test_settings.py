@@ -52,3 +52,17 @@ def test_saved_settings_override_shell(config, monkeypatch):
     monkeypatch.setattr(settings, "is_frozen", lambda: True)
     settings.load()
     assert os.environ["MONGO_DB"] == "from_settings"
+
+
+def test_failed_write_keeps_previous_settings(config, monkeypatch):
+    settings.save({"MONGO_URI": "mongodb://old"})
+
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", fail)
+    with pytest.raises(OSError):
+        settings.save({"MONGO_URI": "mongodb://new"})
+    assert json.loads(config.read_text()) == {"MONGO_URI": "mongodb://old"}
+    assert os.environ["MONGO_URI"] == "mongodb://old"
+    assert [p.name for p in config.parent.iterdir()] == ["settings.json"]

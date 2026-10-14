@@ -936,3 +936,25 @@ def test_api_base_url_strips_trailing_v1(monkeypatch):
                   "https://api.cheaperinference.com"):
         monkeypatch.setenv("CHEAPER_INFERENCE_API_URL", value)
         assert classify.api_base_url() == "https://api.cheaperinference.com"
+
+
+def test_reset_clients_rebuilds_from_new_settings(monkeypatch):
+    monkeypatch.setenv("CHEAPER_INFERENCE_API_KEY", "old-key")
+    monkeypatch.setenv("MONGO_URI", "mongodb://old-host")
+    monkeypatch.setenv("MONGO_DB", "old_db")
+    persistence.reset_clients()
+    try:
+        old_db = persistence.get_database()
+        assert classify.get_client().api_key == "old-key"
+        monkeypatch.setenv("CHEAPER_INFERENCE_API_KEY", "new-key")
+        monkeypatch.setenv("MONGO_URI", "mongodb://new-host")
+        monkeypatch.setenv("MONGO_DB", "new_db")
+        persistence.reset_clients()
+        new_db = persistence.get_database()
+        assert new_db.name == "new_db"
+        assert new_db.client is not old_db.client
+        assert classify.get_client().api_key == "new-key"
+        old_db.client.close()
+        new_db.client.close()
+    finally:
+        persistence.reset_clients()

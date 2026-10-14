@@ -36,7 +36,7 @@ settings.load()
 settings.use_workspace()
 
 import topic_store
-from decision_engine.persistence import get_database
+from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
@@ -249,7 +249,11 @@ class MainWindow(QMainWindow, QDialog):
 
     def open_settings(self) -> None:
         """Shows the settings dialog; saved values apply to the next action."""
-        if SettingsDialog(self).exec_() == QDialog.Accepted and self.triage_tab._loaded and not self.triage_tab.is_busy():
+        if SettingsDialog(self).exec_() != QDialog.Accepted:
+            return
+        # The Mongo and model clients are cached; rebuild them from the new values.
+        reset_clients()
+        if self.triage_tab._loaded and not self.triage_tab.is_busy():
             self.triage_tab.refresh()
 
     def prompt_for_missing_settings(self) -> None:
