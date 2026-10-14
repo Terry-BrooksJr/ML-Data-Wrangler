@@ -929,3 +929,10 @@ def test_live_labelled_set_report():
 def test_live_classification(ticket, expected):
     result = classify.classify_ticket(build_ticket_payload(ticket))
     assert result["classification"] == expected, result.get("reasoning")
+
+
+def test_api_base_url_strips_trailing_v1(monkeypatch):
+    for value in ("https://api.cheaperinference.com/v1", "https://api.cheaperinference.com/v1/",
+                  "https://api.cheaperinference.com"):
+        monkeypatch.setenv("CHEAPER_INFERENCE_API_URL", value)
+        assert classify.api_base_url() == "https://api.cheaperinference.com"

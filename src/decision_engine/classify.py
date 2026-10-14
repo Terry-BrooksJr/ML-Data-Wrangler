@@ -60,6 +60,16 @@ def confirmation_model() -> Optional[str]:
     return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
 
 
+def api_base_url() -> str:
+    """CHEAPER_INFERENCE_API_URL without a trailing /v1, which the SDK adds.
+
+    A base URL ending in /v1 would send requests to /v1/v1/messages, which
+    Cheaper Inference answers with a 404 HTML page.
+    """
+    url = (os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL).rstrip("/")
+    return url[: -len("/v1")] if url.endswith("/v1") else url
+
+
 @lru_cache(maxsize=1)
 def get_client() -> anthropic.Anthropic:
     """Builds the client on first use so importing this module needs no secrets.
@@ -69,7 +79,7 @@ def get_client() -> anthropic.Anthropic:
     """
     return anthropic.Anthropic(
         api_key=os.environ["CHEAPER_INFERENCE_API_KEY"],
-        base_url=os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL,
+        base_url=api_base_url(),
         timeout=REQUEST_TIMEOUT_SECONDS,
         max_retries=MAX_RETRIES,
     )
