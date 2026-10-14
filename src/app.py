@@ -499,7 +499,7 @@ class MainWindow(QMainWindow, QDialog):
         see DataWrangler.write_ticket_to_mongo. Independent of Process Data.
         """
         if not os.getenv("MONGO_URI"):
-            message = "MONGO_URI is not set. Set it in File > Settings…"
+            message = "MONGO_URI is not set. Set it in Settings (Preferences on macOS)."
             logger.error(message)
             QMessageBox.warning(self, "MongoDB Not Configured", message)
             return
