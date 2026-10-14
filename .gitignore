@@ -166,3 +166,5 @@ completed_data/
 completed/
 tickets.json
 comments
+.claude/settings.local.json
+tickets-only.json

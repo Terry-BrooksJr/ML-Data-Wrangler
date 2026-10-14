@@ -50,6 +50,8 @@ def process_one_ticket(zendesk_id: str, tickets: Collection = None):
         "internal_note": result.get("internal_note", ""),
         "draft_message": result.get("draft_message"),
         "leadership_recipient": result.get("leadership_recipient"),
+        # Set when the confirmation model replaced the first answer.
+        "confirmation_of": result.get("confirmation_of"),
     }
 
     # Matching on awaiting_review again means a concurrent run that already

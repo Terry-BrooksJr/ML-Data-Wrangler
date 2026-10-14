@@ -87,8 +87,8 @@ def qapp():
 
 @pytest.fixture
 def configured(monkeypatch):
-    monkeypatch.setenv("MONGO_URI", "mongodb://test")
-    monkeypatch.setenv("CHEAPER_INFERENCE_API_KEY", "test")
+    for name in (*triage_tab.REVIEW_ENV, *triage_tab.OPTIONAL_MODEL_ENV):
+        monkeypatch.setenv(name, "test")
 
 
 @pytest.fixture
@@ -144,9 +144,73 @@ def test_selecting_a_row_shows_its_detail(qapp, configured, stored):
     assert "Classification:" in tab.detail.toPlainText()
 
 
-def test_missing_env_blocks_actions(qapp, monkeypatch, dialogs, stored):
-    monkeypatch.delenv("MONGO_URI", raising=False)
-    monkeypatch.setenv("CHEAPER_INFERENCE_API_KEY", "test")
+def test_refresh_shows_no_dialog(qapp, configured, dialogs, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    assert dialogs == []
+
+
+def test_refresh_needs_only_mongo(qapp, monkeypatch, dialogs, stored):
+    for name in triage_tab.REVIEW_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MONGO_URI", "mongodb://test")
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    assert tab.table.rowCount() == 3
+    assert dialogs == []
+
+
+def test_review_needs_model_settings(qapp, configured, monkeypatch, dialogs, stored):
+    monkeypatch.delenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME")
+    calls = []
+    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+
+    tab.start_review_all()
+
+    assert calls == []
+    assert dialogs[0][0] == "warning"
+    assert "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME" in tab.status_label.text()
+
+
+@pytest.mark.parametrize(
+    "optional", ["CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME"]
+)
+def test_review_runs_without_optional_models(qapp, configured, monkeypatch, dialogs, stored, optional):
+    monkeypatch.delenv(optional, raising=False)
+    calls = []
+    tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
+
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert calls == [stored]
+    assert f"{optional} is not set" in dialogs[0][1]
+
+
+def test_no_optional_warning_when_all_set(qapp, configured, dialogs, stored):
+    tab = make_tab(stored, review_batch=lambda tickets: None)
+    tab.start_review_all()
+    wait_until_idle(qapp, tab)
+
+    assert "Warning" not in dialogs[0][1]
+
+
+def test_review_one_warns_about_unset_confirmation(qapp, configured, monkeypatch, dialogs, stored):
+    monkeypatch.delenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME")
+    tab = make_tab(stored, review_one=lambda zendesk_id, tickets: {"classification": "manual_triage", "confidence": 40})
+    tab.ticket_id_input.setText("123")
+    tab.start_review_one()
+    wait_until_idle(qapp, tab)
+
+    assert "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME is not set" in dialogs[0][1]
+
+
+def test_missing_env_blocks_actions(qapp, configured, monkeypatch, dialogs, stored):
+    monkeypatch.delenv("MONGO_URI")
     calls = []
     tab = make_tab(stored, review_batch=lambda tickets: calls.append(tickets))
 
@@ -164,7 +228,11 @@ def test_review_all_confirms_then_runs_batch(qapp, configured, dialogs, stored):
     tab.start_review_all()
     wait_until_idle(qapp, tab)
 
-    assert [kind for kind, _ in dialogs][:2] == ["question", "information"]
+    # Exactly one confirm and one completion: the count and refresh are silent.
+    assert dialogs == [
+        ("question", dialogs[0][1]),
+        ("information", "Review batch finished. Results are listed below."),
+    ]
     assert "Send 1 ticket(s)" in dialogs[0][1]
     assert calls == [stored]
 
@@ -205,6 +273,7 @@ def test_review_one_passes_trimmed_id(qapp, configured, dialogs, stored):
 
     assert calls == ["123"]
     assert tab.ticket_id_input.text() == ""
+    assert dialogs == [("information", "Ticket 123: flag_solve (confidence 90)")]
 
 
 def test_review_one_reports_not_awaiting(qapp, configured, dialogs, stored):

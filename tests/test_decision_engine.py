@@ -4,6 +4,8 @@ import os
 import pathlib
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import mongomock
 import pytest
 
@@ -26,6 +28,26 @@ class FakeClient:
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=self.text)])
 
 
+class RoutingClient:
+    """Answers per model name; an Exception value is raised instead."""
+
+    def __init__(self, replies: dict):
+        self.replies = replies
+        self.models = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        self.models.append(kwargs["model"])
+        reply = self.replies[kwargs["model"]]
+        if isinstance(reply, Exception):
+            raise reply
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=reply)])
+
+
+def api_error():
+    return anthropic.APIConnectionError(request=httpx.Request("POST", "https://test"))
+
+
 def model_reply(classification, confidence=90, **extra):
     reply = {
         "ticket_id": "x",
@@ -46,6 +68,20 @@ def model_reply(classification, confidence=90, **extra):
 def fake_model(monkeypatch):
     def install(text):
         client = FakeClient(text)
+        monkeypatch.setattr(classify, "get_client", lambda: client)
+        return client
+
+    return install
+
+
+@pytest.fixture
+def routed_model(monkeypatch):
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "primary")
+    monkeypatch.setenv("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "secondary")
+    monkeypatch.setenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "confirmation")
+
+    def install(**replies):
+        client = RoutingClient(replies)
         monkeypatch.setattr(classify, "get_client", lambda: client)
         return client
 
@@ -117,6 +153,111 @@ def test_solve_at_floor_is_kept(fake_model):
     assert classify.classify_ticket("payload")["classification"] == "flag_solve"
 
 
+# --- model routing ---------------------------------------------------------
+
+
+def test_confident_primary_skips_confirmation(routed_model):
+    client = routed_model(primary=model_reply("flag_solve", confidence=90))
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary"]
+    assert result["model_version"] == "primary"
+    assert "confirmation_of" not in result
+
+
+@pytest.mark.parametrize(
+    "first",
+    [model_reply("manual_triage", confidence=95), model_reply("escalation_internal", confidence=60), "not json"],
+    ids=["manual_triage", "low_confidence", "non_json"],
+)
+def test_uncertain_result_is_replaced_by_confirmation(routed_model, first):
+    client = routed_model(primary=first, confirmation=model_reply("escalation_internal", confidence=88))
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary", "confirmation"]
+    assert result["classification"] == "escalation_internal"
+    assert result["model_version"] == "confirmation"
+    assert result["confirmation_of"]["model_version"] == "primary"
+
+
+def test_downgraded_solve_is_confirmed(routed_model):
+    client = routed_model(
+        primary=model_reply("flag_solve", confidence=74),
+        confirmation=model_reply("flag_solve", confidence=92),
+    )
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary", "confirmation"]
+    assert result["classification"] == "flag_solve"
+    assert result["confirmation_of"]["classification"] == "manual_triage"
+
+
+def test_primary_api_error_falls_back_to_secondary(routed_model):
+    client = routed_model(primary=api_error(), secondary=model_reply("flag_solve", confidence=90))
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary", "secondary"]
+    assert result["model_version"] == "secondary"
+
+
+def test_secondary_result_is_still_confirmed(routed_model):
+    client = routed_model(
+        primary=api_error(),
+        secondary=model_reply("manual_triage", confidence=50),
+        confirmation=model_reply("flag_reengage", confidence=80),
+    )
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary", "secondary", "confirmation"]
+    assert result["confirmation_of"]["model_version"] == "secondary"
+
+
+def test_confirmation_error_keeps_first_result(routed_model):
+    routed_model(primary=model_reply("manual_triage", confidence=40), confirmation=api_error())
+    result = classify.classify_ticket("payload")
+
+    assert result["model_version"] == "primary"
+    assert "confirmation_of" not in result
+
+
+def test_unset_secondary_does_not_rerun_primary(routed_model, monkeypatch):
+    monkeypatch.delenv("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME")
+    client = routed_model(primary=api_error())
+    with pytest.raises(anthropic.APIError):
+        classify.classify_ticket("payload")
+
+    assert client.models == ["primary"]
+
+
+def test_unset_confirmation_keeps_first_result(routed_model, monkeypatch):
+    monkeypatch.delenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME")
+    client = routed_model(primary=model_reply("manual_triage", confidence=40))
+    result = classify.classify_ticket("payload")
+
+    assert client.models == ["primary"]
+    assert result["model_version"] == "primary"
+    assert "confirmation_of" not in result
+
+
+@pytest.mark.parametrize("same_as", ["primary", "secondary"])
+def test_confirmation_skipped_when_it_names_the_answering_model(routed_model, monkeypatch, same_as):
+    monkeypatch.setenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", same_as)
+    replies = {same_as: model_reply("manual_triage", confidence=40)}
+    if same_as == "secondary":
+        replies["primary"] = api_error()
+    client = routed_model(**replies)
+    result = classify.classify_ticket("payload")
+
+    assert client.models.count(same_as) == 1
+    assert "confirmation_of" not in result
+
+
+def test_primary_and_secondary_errors_propagate(routed_model):
+    routed_model(primary=api_error(), secondary=api_error())
+    with pytest.raises(anthropic.APIError):
+        classify.classify_ticket("payload")
+
+
 # --- persistence -----------------------------------------------------------
 
 
@@ -135,6 +276,22 @@ def test_each_category_is_persisted(category, fake_model, tickets):
     assert review["classification"] == category
     assert review["tag_applied"] == category
     assert review["review_id"] is not None
+
+
+def test_confirmation_is_persisted(routed_model, tickets):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["escalation_internal"])
+    tickets.insert_one(ticket)
+    routed_model(
+        primary=model_reply("manual_triage", confidence=40),
+        confirmation=model_reply("escalation_internal", confidence=85),
+    )
+
+    persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+
+    review = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})["agent_reviews"][0]
+    assert review["classification"] == "escalation_internal"
+    assert review["model_version"] == "confirmation"
+    assert review["confirmation_of"]["classification"] == "manual_triage"
 
 
 def test_process_one_ticket_is_idempotent(fake_model, tickets):
