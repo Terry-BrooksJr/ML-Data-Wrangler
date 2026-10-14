@@ -13,12 +13,50 @@ from xml.etree import ElementTree as ET
 from loguru import logger
 from pymongo import MongoClient
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
 
 # Control characters that XML 1.0 cannot represent, even escaped.
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
+# Unicode spaces Zendesk text carries (mostly from &nbsp;), turned into plain spaces.
+_SPECIAL_SPACES = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+# Invisible characters with no meaning in ticket text. U+200C/U+200D (joiners)
+# are kept: they shape emoji sequences and some scripts.
+_ZERO_WIDTH = re.compile(r"[\u200b\u2060\ufeff]")
+# C0/C1 control characters other than tab and newline. ESC (from e.g. &#27;)
+# would otherwise reach terminals as ANSI/OSC sequences.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_TRAILING_SPACES = re.compile(r"[ \t]+$", re.MULTILINE)
+
+
+def clean_text(text: Optional[str]) -> Optional[str]:
+    """Decodes HTML entities in ticket text before it is stored in Mongo.
+
+    Entities are decoded until the text stops changing, so double-escaped
+    (or deeper) ones like "&amp;nbsp;" are handled too. Line endings become "\n",
+    non-breaking and other special spaces become plain spaces, and control
+    characters and invisible zero-width characters are removed. Trailing
+    whitespace is stripped from each line, but spaces and tabs inside or at
+    the start of a line are kept, so code and indentation survive. Words are
+    not removed: unlike _cleanse, which prepares topic-modelling text, this
+    keeps the real wording the decision engine needs. Idempotent.
+
+    Returns:
+        The cleaned text, or None when given None.
+    """
+    if text is None:
+        return None
+    # Decode to a fixed point, so cleaning is idempotent however deeply the
+    # text was escaped. Terminates: every pass that changes the text shortens it.
+    while (decoded := unescape(text)) != text:
+        text = decoded
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _CONTROL_CHARS.sub("", _ZERO_WIDTH.sub("", _SPECIAL_SPACES.sub(" ", text)))
+    return _TRAILING_SPACES.sub("", text)
 
 
 class MyEncoder(json.JSONEncoder):
@@ -626,7 +664,9 @@ class DataWrangler(QObject):
         """Identifies a transcript entry for de-duplication across ingests.
 
         Uses the Zendesk comment ID when there is one, otherwise falls back to
-        Author + Date + Text, as the ingestion requirements allow.
+        Author + Date + Text, as the ingestion requirements allow. The text is
+        compared after clean_text, so bodies stored before cleaning was added
+        still match their cleaned re-ingested copies.
         """
         if entry.get("comment_id") is not None:
             return ("id", entry["comment_id"])
@@ -634,15 +674,17 @@ class DataWrangler(QObject):
         if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
             # pymongo returns naive UTC datetimes, so compare in that form.
             timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-        return ("content", entry.get("author"), timestamp, entry.get("body"))
+        return ("content", entry.get("author"), timestamp, clean_text(entry.get("body")))
 
     def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
         """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
 
         The shape follows the `tickets` collection in
         AI_CODER_INTEGRATION_BRIEF.md (section 4.2), which the decision engine
-        reads. Comment text is stored verbatim, not cleansed, because the
-        decision engine needs the real wording.
+        reads. The subject and comment text go through clean_text (HTML
+        entities decoded, control characters removed) but are not cleansed:
+        no words are dropped, because the decision engine needs the real
+        wording. raw_xml keeps the original text.
 
         Args:
             ticket: A raw Zendesk ticket dict, or a ticket ID to look up in
@@ -691,7 +733,8 @@ class DataWrangler(QObject):
                     # Only the requester can be identified without a Zendesk
                     # users lookup; every other author's role stays unknown.
                     "role": "requester" if author is not None and author == requester_id else None,
-                    "body": raw_comment.get("plain_body"),
+                    # Entities decoded here; raw_xml keeps the original text.
+                    "body": clean_text(raw_comment.get("plain_body")),
                     "timestamp": self._parse_zendesk_time(raw_comment.get("created_at")),
                     "is_internal_note": not raw_comment.get("public", True),
                 }
@@ -699,7 +742,7 @@ class DataWrangler(QObject):
 
         return {
             "zendesk_id": str(ticket["id"]),
-            "subject": ticket.get("subject"),
+            "subject": clean_text(ticket.get("subject")),
             "received_via": (ticket.get("via") or {}).get("channel"),
             "status": ticket.get("status"),
             "status_category": ticket.get("status"),
@@ -770,21 +813,125 @@ class DataWrangler(QObject):
                     "last_ingest": {"at": now, "new_comments": len(document["transcript"])},
                 }
             )
-            collection.insert_one(document)
-            logger.success(f"Inserted ticket {zendesk_id} into Mongo")
-            return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+            try:
+                collection.insert_one(document)
+                logger.success(f"Inserted ticket {zendesk_id} into Mongo")
+                return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+            except DuplicateKeyError:
+                # Another writer inserted it first (needs a unique index on
+                # zendesk_id); merge into theirs instead.
+                document = self.ticket_to_document(ticket)
+                existing = collection.find_one({"zendesk_id": zendesk_id}, {"transcript": 1})
 
-        seen = {self._transcript_key(entry) for entry in existing.get("transcript", [])}
-        new_comments = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+        stored = existing.get("transcript", [])
+        seen = {self._transcript_key(entry) for entry in stored}
+        candidates = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+
+        # Each push is conditional on the comment not being in the stored
+        # transcript, checked atomically by the server, so two writers
+        # ingesting the same ticket can't both append it.
+        appended = 0
+        for entry in candidates:
+            appended += collection.update_one(
+                {"zendesk_id": zendesk_id, **self._absent_from_transcript(entry)},
+                {"$push": {"transcript": entry}, "$set": {"awaiting_review": True}},
+            ).modified_count
+
+        # Bodies stored before clean_text existed (or by an older app version)
+        # are cleaned as the ticket is re-ingested. Guarded on the old value,
+        # so a newer write is never overwritten.
+        for index, entry in enumerate(stored):
+            body = entry.get("body")
+            cleaned = clean_text(body)
+            if cleaned != body:
+                collection.update_one(
+                    {"zendesk_id": zendesk_id, f"transcript.{index}.body": body},
+                    {"$set": {f"transcript.{index}.body": cleaned}},
+                )
 
         # raw_xml is refreshed too, so it always matches the latest payload.
-        update = {"$set": {**document, "last_ingest": {"at": now, "new_comments": len(new_comments)}}}
-        if new_comments:
-            update["$push"] = {"transcript": {"$each": new_comments}}
-            update["$set"]["awaiting_review"] = True
-        collection.update_one({"zendesk_id": zendesk_id}, update)
-        logger.success(f"Updated ticket {zendesk_id} in Mongo ({len(new_comments)} new comments)")
-        return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": len(new_comments)}
+        collection.update_one(
+            {"zendesk_id": zendesk_id},
+            {"$set": {**document, "last_ingest": {"at": now, "new_comments": appended}}},
+        )
+        logger.success(f"Updated ticket {zendesk_id} in Mongo ({appended} new comments)")
+        return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": appended}
+
+    @staticmethod
+    def _absent_from_transcript(entry: dict) -> dict:
+        """A query matching tickets whose transcript doesn't contain `entry` yet."""
+        if entry.get("comment_id") is not None:
+            return {"transcript.comment_id": {"$ne": entry["comment_id"]}}
+        match = {"author": entry.get("author"), "timestamp": entry.get("timestamp"), "body": entry.get("body")}
+        return {"transcript": {"$not": {"$elemMatch": match}}}
+
+    @staticmethod
+    def clean_stored_tickets(collection: Optional[Collection] = None, dry_run: bool = False) -> dict:
+        """Applies clean_text to tickets already in Mongo (subject and comment bodies).
+
+        For tickets stored before cleaning was added; new writes are cleaned
+        by ticket_to_document, and re-ingesting a ticket also cleans its older
+        bodies. Each update only applies if the fields still hold the values
+        that were read, so text written in the meantime is never reverted;
+        such tickets are counted as skipped_changed and picked up by a re-run.
+        Run it again once no older app version is writing to the collection.
+        Review state is left alone. Safe to re-run.
+
+        Args:
+            dry_run: Count what would change without writing anything.
+
+        Returns:
+            Counts: scanned, tickets_changed, comments_changed, skipped_changed.
+        """
+        collection = collection if collection is not None else DataWrangler.get_tickets_collection()
+        summary = {"scanned": 0, "tickets_changed": 0, "comments_changed": 0, "skipped_changed": 0}
+        for doc in collection.find({}, {"zendesk_id": 1, "subject": 1, "transcript": 1}):
+            summary["scanned"] += 1
+            update, guard = {}, {"_id": doc["_id"]}
+            subject = clean_text(doc.get("subject"))
+            if subject != doc.get("subject"):
+                update["subject"] = subject
+                guard["subject"] = doc.get("subject")
+            for index, entry in enumerate(doc.get("transcript") or []):
+                body = clean_text(entry.get("body"))
+                if body != entry.get("body"):
+                    update[f"transcript.{index}.body"] = body
+                    guard[f"transcript.{index}.body"] = entry.get("body")
+            if not update:
+                continue
+            if not dry_run and collection.update_one(guard, {"$set": update}).matched_count == 0:
+                summary["skipped_changed"] += 1
+                continue
+            summary["tickets_changed"] += 1
+            summary["comments_changed"] += sum(key.startswith("transcript.") for key in update)
+        logger.info(f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}")
+        return summary
+
+    @staticmethod
+    def ensure_ticket_indexes(collection: Collection) -> bool:
+        """Creates the unique index on zendesk_id if the collection has none.
+
+        Uniqueness is what makes concurrent inserts of the same new ticket
+        safe: the losing insert raises DuplicateKeyError and
+        write_ticket_to_mongo merges into the winner's document. An existing
+        non-unique index on zendesk_id is left alone with a warning, since
+        converting it needs collMod or a drop and rebuild. Idempotent.
+
+        Returns:
+            True if a unique index on zendesk_id is in place.
+        """
+        for name, info in collection.index_information().items():
+            if list(info.get("key", [])) == [("zendesk_id", 1)]:
+                if info.get("unique"):
+                    return True
+                logger.warning(
+                    f"Index {name} on zendesk_id is not unique; concurrent inserts of a new ticket can create "
+                    "duplicates. Recreate it with unique=True."
+                )
+                return False
+        collection.create_index("zendesk_id", unique=True, name="zendesk_id_1")
+        logger.info("Created unique index zendesk_id_1")
+        return True
 
     def write_tickets_to_mongo(
         self,
@@ -797,6 +944,7 @@ class DataWrangler(QObject):
             One write_ticket_to_mongo summary per ticket.
         """
         collection = collection if collection is not None else self.get_tickets_collection()
+        self.ensure_ticket_indexes(collection)
         if tickets is None:
             with open(self.ticket_file, "r") as tickets_file:
                 tickets = json.load(tickets_file)
