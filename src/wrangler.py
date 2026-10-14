@@ -21,6 +21,37 @@ from PyQt5.QtWidgets import QMessageBox
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
 
+# Unicode spaces Zendesk text carries (mostly from &nbsp;), turned into plain spaces.
+_SPECIAL_SPACES = re.compile(r"[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]")
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200d\u2060\ufeff]")
+_RUNS_OF_SPACES = re.compile(r"[ \t]{2,}")
+_TRAILING_SPACES = re.compile(r"[ \t]+$", re.MULTILINE)
+
+
+def clean_text(text: Optional[str]) -> Optional[str]:
+    """Decodes HTML entities in ticket text before it is stored in Mongo.
+
+    Entities are decoded until the text stops changing, so double-escaped
+    ones ("&amp;nbsp;") are handled too. Non-breaking and other special
+    spaces become plain spaces, zero-width characters are removed, and runs
+    of spaces are collapsed. Line breaks are kept. Words are not removed:
+    unlike _cleanse, which prepares topic-modelling text, this keeps the
+    real wording the decision engine needs. Idempotent.
+
+    Returns:
+        The cleaned text, or None when given None.
+    """
+    if text is None:
+        return None
+    for _ in range(5):  # entities nested deeper than this aren't real text
+        decoded = unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    text = _ZERO_WIDTH.sub("", _SPECIAL_SPACES.sub(" ", text))
+    return _TRAILING_SPACES.sub("", _RUNS_OF_SPACES.sub(" ", text))
+
+
 class MyEncoder(json.JSONEncoder):
     """Custom JSON encoder for serializing specific object types.
 
@@ -626,7 +657,9 @@ class DataWrangler(QObject):
         """Identifies a transcript entry for de-duplication across ingests.
 
         Uses the Zendesk comment ID when there is one, otherwise falls back to
-        Author + Date + Text, as the ingestion requirements allow.
+        Author + Date + Text, as the ingestion requirements allow. The text is
+        compared after clean_text, so bodies stored before cleaning was added
+        still match their cleaned re-ingested copies.
         """
         if entry.get("comment_id") is not None:
             return ("id", entry["comment_id"])
@@ -634,7 +667,7 @@ class DataWrangler(QObject):
         if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
             # pymongo returns naive UTC datetimes, so compare in that form.
             timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-        return ("content", entry.get("author"), timestamp, entry.get("body"))
+        return ("content", entry.get("author"), timestamp, clean_text(entry.get("body")))
 
     def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
         """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
@@ -691,7 +724,8 @@ class DataWrangler(QObject):
                     # Only the requester can be identified without a Zendesk
                     # users lookup; every other author's role stays unknown.
                     "role": "requester" if author is not None and author == requester_id else None,
-                    "body": raw_comment.get("plain_body"),
+                    # Entities decoded here; raw_xml keeps the original text.
+                    "body": clean_text(raw_comment.get("plain_body")),
                     "timestamp": self._parse_zendesk_time(raw_comment.get("created_at")),
                     "is_internal_note": not raw_comment.get("public", True),
                 }
@@ -699,7 +733,7 @@ class DataWrangler(QObject):
 
         return {
             "zendesk_id": str(ticket["id"]),
-            "subject": ticket.get("subject"),
+            "subject": clean_text(ticket.get("subject")),
             "received_via": (ticket.get("via") or {}).get("channel"),
             "status": ticket.get("status"),
             "status_category": ticket.get("status"),
@@ -785,6 +819,40 @@ class DataWrangler(QObject):
         collection.update_one({"zendesk_id": zendesk_id}, update)
         logger.success(f"Updated ticket {zendesk_id} in Mongo ({len(new_comments)} new comments)")
         return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": len(new_comments)}
+
+    @staticmethod
+    def clean_stored_tickets(collection: Optional[Collection] = None, dry_run: bool = False) -> dict:
+        """Applies clean_text to tickets already in Mongo (subject and comment bodies).
+
+        For tickets stored before cleaning was added; new writes are cleaned
+        by ticket_to_document. Only documents whose text actually changes are
+        written, and review state is left alone. Safe to re-run.
+
+        Args:
+            dry_run: Count what would change without writing anything.
+
+        Returns:
+            Counts: scanned, tickets_changed, comments_changed.
+        """
+        collection = collection if collection is not None else DataWrangler.get_tickets_collection()
+        summary = {"scanned": 0, "tickets_changed": 0, "comments_changed": 0}
+        for doc in collection.find({}, {"zendesk_id": 1, "subject": 1, "transcript": 1}):
+            summary["scanned"] += 1
+            update = {}
+            subject = clean_text(doc.get("subject"))
+            if subject != doc.get("subject"):
+                update["subject"] = subject
+            for index, entry in enumerate(doc.get("transcript") or []):
+                body = clean_text(entry.get("body"))
+                if body != entry.get("body"):
+                    update[f"transcript.{index}.body"] = body
+                    summary["comments_changed"] += 1
+            if update:
+                summary["tickets_changed"] += 1
+                if not dry_run:
+                    collection.update_one({"_id": doc["_id"]}, {"$set": update})
+        logger.info(f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}")
+        return summary
 
     def write_tickets_to_mongo(
         self,

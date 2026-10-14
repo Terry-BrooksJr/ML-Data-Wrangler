@@ -153,3 +153,85 @@ def test_stored_document_feeds_decision_engine(wrangler, tickets):
     data = json.loads(payload.split("\n\n", 1)[1])
     assert data["ticket_id"] == "101"
     assert len(data["transcript"]) == 2
+
+
+# --- HTML entity cleaning ------------------------------------------------------
+
+from wrangler import clean_text  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Hi&nbsp;team,&nbsp;\nthanks", "Hi team,\nthanks"),
+        ("R&amp;D &lt;script&gt; &quot;x&quot; &#39;y&#39; &#8217;", "R&D <script> \"x\" 'y' ’"),
+        ("double &amp;nbsp; escaped &amp;amp;", "double escaped &"),
+        ("zero​width﻿ and nbsp narrow", "zerowidth and nbsp narrow"),
+        ("a    b\t\tc   \nline two   ", "a b c\nline two"),
+        ("keeps\n\nparagraphs", "keeps\n\nparagraphs"),
+        ("", ""),
+        (None, None),
+    ],
+    ids=["nbsp", "named_and_numeric", "double_escaped", "unicode_spaces", "runs_of_spaces", "newlines", "empty", "none"],
+)
+def test_clean_text(raw, expected):
+    assert clean_text(raw) == expected
+
+
+def test_clean_text_is_idempotent():
+    once = clean_text("A&amp;amp;B&nbsp;&nbsp;C")
+    assert clean_text(once) == once
+
+
+def entity_data_dir(data_dir, comment_ids=True):
+    ticket = {**TICKET, "subject": "Import&nbsp;fails &amp; stalls"}
+    comments = [
+        comment(1 if comment_ids else None, 555, "The&nbsp;import fails.&nbsp;\n&lt;details&gt;", "2026-08-18T18:53:13Z"),
+    ]
+    (data_dir / "tickets-only.json").write_text(json.dumps([ticket]))
+    (data_dir / "comments" / "101.json").write_text(json.dumps(comments))
+    return data_dir
+
+
+def test_ticket_text_is_cleaned_when_written(wrangler, tickets, data_dir):
+    entity_data_dir(data_dir)
+    wrangler.write_ticket_to_mongo(101, tickets)
+
+    stored = tickets.find_one({"zendesk_id": "101"})
+    assert stored["subject"] == "Import fails & stalls"
+    assert stored["transcript"][0]["body"] == "The import fails.\n<details>"
+    assert "&nbsp;" in stored["raw_xml"] or "&amp;nbsp;" in stored["raw_xml"]  # archive keeps the original
+
+
+def test_reingest_matches_bodies_stored_before_cleaning(wrangler, tickets, data_dir):
+    entity_data_dir(data_dir, comment_ids=False)
+    wrangler.write_ticket_to_mongo(101, tickets)
+    # Simulate a ticket stored before cleaning existed.
+    tickets.update_one({"zendesk_id": "101"}, {"$set": {
+        "transcript.0.body": "The&nbsp;import fails.&nbsp;\n&lt;details&gt;", "awaiting_review": False}})
+
+    summary = wrangler.write_ticket_to_mongo(101, tickets)
+
+    stored = tickets.find_one({"zendesk_id": "101"})
+    assert summary["new_comments"] == 0
+    assert len(stored["transcript"]) == 1 and stored["awaiting_review"] is False
+
+
+def test_clean_stored_tickets_backfills(tickets):
+    tickets.insert_many([
+        {"zendesk_id": "1", "subject": "A&nbsp;B", "awaiting_review": False,
+         "transcript": [{"body": "clean"}, {"body": "x&amp;y"}, {"body": None}]},
+        {"zendesk_id": "2", "subject": "Already clean", "transcript": [{"body": "fine"}]},
+    ])
+
+    preview = DataWrangler.clean_stored_tickets(tickets, dry_run=True)
+    assert preview == {"scanned": 2, "tickets_changed": 1, "comments_changed": 1}
+    assert tickets.find_one({"zendesk_id": "1"})["subject"] == "A&nbsp;B"  # dry run wrote nothing
+
+    assert DataWrangler.clean_stored_tickets(tickets) == preview
+    first = tickets.find_one({"zendesk_id": "1"})
+    assert first["subject"] == "A B"
+    assert [c["body"] for c in first["transcript"]] == ["clean", "x&y", None]
+    assert first["awaiting_review"] is False  # review state untouched
+
+    assert DataWrangler.clean_stored_tickets(tickets)["tickets_changed"] == 0  # idempotent
