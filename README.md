@@ -15,25 +15,33 @@ No zero-shot or fine-tuning code exists yet. See
 
 ## Setup
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) and pinned in
+`uv.lock`. This installs everything, including the dev tools and the spaCy
+`en_core_web_lg` model (about 560 MB, fetched from its GitHub release):
+
 ```bash
-poetry install
+uv sync
 cp .env.example .env   # then fill in values
 ```
 
-The LDA app also needs a spaCy model and the NLTK stopword list, which
-`poetry install` doesn't provide:
+`requirements.txt` is exported from the lock for pip users. Regenerate it
+after changing dependencies:
 
 ```bash
-poetry run python -m spacy download en_core_web_lg
-poetry run python -c "import nltk; nltk.download('stopwords')"
+uv export --format requirements-txt --no-dev --no-hashes -o requirements.txt
 ```
 
-Both commands fetch from `raw.githubusercontent.com`. If your network breaks
-SSL to that host, install from the GitHub release and the jsDelivr mirror
-instead:
+The LDA app also needs the NLTK stopword list, which the package doesn't
+include. It downloads on first run; to fetch it up front:
 
 ```bash
-poetry run pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl
+uv run python -c "import nltk; nltk.download('stopwords')"
+```
+
+That fetches from `raw.githubusercontent.com`. If your network breaks SSL to
+that host, use the jsDelivr mirror instead:
+
+```bash
 mkdir -p ~/nltk_data/corpora && curl -sSfL -o ~/nltk_data/corpora/stopwords.zip https://cdn.jsdelivr.net/gh/nltk/nltk_data@gh-pages/packages/corpora/stopwords.zip && unzip -oq ~/nltk_data/corpora/stopwords.zip -d ~/nltk_data/corpora
 ```
 
@@ -45,7 +53,7 @@ Run from the repo root. Output files are written relative to the directory
 you launch from.
 
 ```bash
-poetry run python src/app.py
+uv run python src/app.py
 ```
 
 1. **Select Path to Ticket File** (`tickets-only.json`) and **Select Path to Comments Directory** (`comments/`).
@@ -56,8 +64,9 @@ Training runs in a background thread with a progress dialog. It treats each
 ticket as one document, then trains a model for every topic count from 2 up
 to the number you entered and keeps the one with the highest `c_v`
 coherence. When it finishes, it:
-- opens a Gradio page in your browser with that model's topics, ranked by share of tickets, and a coherence-by-topic-count plot;
-- writes `lda_model.html` (an interactive pyLDAvis chart, also opened in the browser) and `coherence.png`.
+- writes `lda_model.html` (an interactive pyLDAvis chart) and `coherence.png`;
+- opens a results window with that model's topics, ranked by share of tickets, and the coherence-by-topic-count plot;
+- opens `lda_model.html` in the browser. The results window can reopen it.
 
 ### Data handling
 
@@ -156,7 +165,7 @@ process_one_ticket("30882")      # a single ticket
 ### Tests
 
 ```bash
-poetry run pytest
+uv run pytest
 ```
 
 The tests stub the model and use `mongomock`, so they need no credentials.
@@ -164,7 +173,7 @@ The live eval sends all five category fixtures plus a precedence-conflict
 ticket to the real model. It spends money, so it only runs on request:
 
 ```bash
-RUN_LIVE_EVAL=1 CHEAPER_INFERENCE_API_KEY=... poetry run pytest -k live
+RUN_LIVE_EVAL=1 CHEAPER_INFERENCE_API_KEY=... uv run pytest -k live
 ```
 
 ### Known gaps (open items)

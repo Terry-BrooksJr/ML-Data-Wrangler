@@ -121,8 +121,8 @@ class QTextEditStream:
     def isatty(self) -> bool:
         """Reports that this stream is not a terminal.
 
-        Libraries that replace sys.stdout's role check this, e.g. uvicorn
-        (started by Gradio) when deciding whether to colour its logs.
+        Libraries that write to sys.stdout check this when deciding whether
+        to colour their output.
         """
         return False
 

@@ -3,11 +3,8 @@ import os
 import pathlib
 import sys
 import time
-import webbrowser
 from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
-import gradio as gr
-import pandas as pd
 from loguru import logger
 from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
 from PyQt5.QtGui import QFont
@@ -34,6 +31,7 @@ from PyQt5.QtWidgets import (
 import topic_store
 from decision_engine.persistence import get_database
 from LDA_logic import LatentDirichletAllocator, stopwords
+from results_dialog import ResultsDialog
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker
 from wrangler import DataWrangler
@@ -606,11 +604,11 @@ class MainWindow(QMainWindow, QDialog):
 
     def present_results(self, run: dict) -> None:
         """
-        Displays the results of a saved training run in a browser.
+        Displays the results of a saved training run.
 
-        Opens a Gradio page with the run's topics and coherence plot, and opens
-        the run's interactive pyLDAvis chart in its own tab. Works for the run
-        just trained and for previous runs.
+        Shows the run's topics and coherence plot in a results window, and
+        opens the run's interactive pyLDAvis chart in the browser. Works for
+        the run just trained and for previous runs.
 
         Args:
             run: A run document from topic_store.
@@ -618,38 +616,23 @@ class MainWindow(QMainWindow, QDialog):
         Returns:
             None
         """
-        chart_path = (run.get("charts") or {}).get("lda_html")
-        if chart_path and not pathlib.Path(chart_path).exists():
-            chart_path = None
-        topic_lines = "\n".join(topic_store.format_run(run))
-        coherence = pd.DataFrame(
-            {
-                "Number of Topics": [c["num_topics"] for c in run.get("coherence") or []],
-                "Coherence": [c["coherence"] for c in run.get("coherence") or []],
-            }
+        charts = run.get("charts") or {}
+        # Paths from an older run may point at files since deleted.
+        chart_path, plot_path = (
+            path if path and pathlib.Path(path).exists() else None
+            for path in (charts.get("lda_html"), charts.get("coherence_png"))
         )
-
-        with gr.Blocks(title=f"LDA Results · {run['run_id']}") as results_UI:
-            gr.Markdown(
-                f"# Topics ({run.get('best_num_topics')}, the most coherent model)\n\n"
-                f"Run `{run['run_id']}`: {topic_store.describe_run(run)}\n\n"
-                + (topic_lines or "No topics were found.")
-            )
-            gr.LinePlot(
-                coherence,
-                x="Number of Topics",
-                y="Coherence",
-                title="Coherence by Number of Topics",
-            )
-            gr.Markdown(
-                f"Interactive topic chart: `{chart_path}`"
-                if chart_path
-                else "Error: Loading LDA Graph"
-            )
-
-        results_UI.launch(inbrowser=True, prevent_thread_lock=True)
-        if chart_path:
-            webbrowser.open(pathlib.Path(chart_path).as_uri())
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.results_dialog = ResultsDialog(
+            best_num_topics=run.get("best_num_topics"),
+            topics=[(t["topic_id"], t["share"], t["words"]) for t in run.get("topics") or []],
+            chart_path=chart_path,
+            plot_path=plot_path,
+            parent=self,
+        )
+        self.results_dialog.setWindowTitle(f"LDA Results · {topic_store.describe_run(run)}")
+        self.results_dialog.show()
+        self.results_dialog.open_chart()
 
     def _runs_collection(self):
         """The topic_model_runs collection, or None to read runs from disk."""

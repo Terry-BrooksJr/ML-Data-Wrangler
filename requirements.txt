@@ -1,94 +1,271 @@
-aiofiles==23.2.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-annotated-types==0.7.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-anyio==4.6.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-blis==0.7.11 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-catalogue==2.0.10 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-certifi==2024.8.30 ; python_version >= "3.10" and python_full_version < "4.0.0"
-charset-normalizer==3.4.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-click==8.1.7 ; python_version >= "3.10" and python_full_version < "4.0.0"
-cloudpathlib==0.19.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-colorama==0.4.6 ; python_version >= "3.10" and python_full_version < "4.0.0" and (platform_system == "Windows" or sys_platform == "win32")
-confection==0.1.5 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-contourpy==1.3.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-cycler==0.12.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-cymem==2.0.8 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-exceptiongroup==1.2.2 ; python_version >= "3.10" and python_version < "3.11"
-fastapi==0.115.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-ffmpy==0.4.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-filelock==3.16.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-fonttools==4.54.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-fsspec==2024.9.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-funcy==2.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-gensim==4.3.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-gradio-client==1.4.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-gradio==5.0.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-h11==0.14.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-httpcore==1.0.6 ; python_version >= "3.10" and python_full_version < "4.0.0"
-httpx==0.27.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-huggingface-hub==0.25.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-idna==3.10 ; python_version >= "3.10" and python_full_version < "4.0.0"
-jinja2==3.1.4 ; python_version >= "3.10" and python_full_version < "4.0.0"
-joblib==1.4.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-kiwisolver==1.4.7 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-langcodes==3.4.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-language-data==1.2.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-loguru==0.7.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-marisa-trie==1.2.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-markdown-it-py==3.0.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-markupsafe==2.1.5 ; python_version >= "3.10" and python_full_version < "4.0.0"
-matplotlib==3.9.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-mdurl==0.1.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-murmurhash==1.0.10 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-nltk==3.9.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-numexpr==2.10.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-numpy==1.26.4 ; python_version >= "3.10" and python_full_version < "4.0.0"
-orjson==3.10.7 ; python_version >= "3.10" and python_full_version < "4.0.0"
-packaging==24.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pandas==2.2.3 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pillow==10.4.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-preshed==3.0.9 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-pydantic-core==2.23.4 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pydantic==2.9.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pydub==0.25.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pygments==2.18.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pyldavis==3.4.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-pyparsing==3.1.4 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-pyqt5-qt5==5.15.15 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-pyqt5-sip==12.15.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-pyqt5==5.15.11 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-python-dateutil==2.9.0.post0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-python-multipart==0.0.12 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pytz==2024.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-pyyaml==6.0.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-regex==2024.9.11 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-requests==2.32.3 ; python_version >= "3.10" and python_full_version < "4.0.0"
-rich==13.9.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-ruff==0.6.9 ; python_version >= "3.10" and python_full_version < "4.0.0" and sys_platform != "emscripten"
-scikit-learn==1.5.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-scipy==1.12.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-seaborn==0.13.2 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-semantic-version==2.10.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-setuptools==75.1.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-shellingham==1.5.4 ; python_version >= "3.10" and python_full_version < "4.0.0"
-six==1.16.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-smart-open==7.0.5 ; python_full_version >= "3.10.0" and python_version < "4.0"
-sniffio==1.3.1 ; python_version >= "3.10" and python_full_version < "4.0.0"
-spacy-legacy==3.0.12 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-spacy-loggers==1.0.5 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-spacy==3.7.5 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-srsly==2.4.8 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-starlette==0.38.6 ; python_version >= "3.10" and python_full_version < "4.0.0"
-thinc==8.2.5 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-threadpoolctl==3.5.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-tomlkit==0.12.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-tqdm==4.66.5 ; python_version >= "3.10" and python_full_version < "4.0.0"
-typer==0.12.5 ; python_version >= "3.10" and python_full_version < "4.0.0"
-typing-extensions==4.12.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-tzdata==2024.2 ; python_version >= "3.10" and python_full_version < "4.0.0"
-urllib3==2.2.3 ; python_version >= "3.10" and python_full_version < "4.0.0"
-uvicorn==0.31.1 ; python_version >= "3.10" and python_full_version < "4.0.0" and sys_platform != "emscripten"
-wasabi==1.1.3 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-weasel==0.4.1 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0"
-websockets==12.0 ; python_version >= "3.10" and python_full_version < "4.0.0"
-win32-setctime==1.1.0 ; python_full_version >= "3.10.0" and python_full_version < "4.0.0" and sys_platform == "win32"
-wrapt==1.16.0 ; python_full_version >= "3.10.0" and python_version < "4.0"
+# This file was autogenerated by uv via the following command:
+#    uv export --frozen --format requirements-txt --no-dev --no-hashes -o requirements.txt
+anthropic==1.13.0
+    # via ml-data-wrangler
+anyio==4.15.1
+    # via
+    #   anthropic
+    #   httpx2
+blis==0.7.11
+    # via thinc
+catalogue==2.0.10
+    # via
+    #   spacy
+    #   srsly
+    #   thinc
+    #   weasel
+certifi==2026.7.22
+    # via requests
+charset-normalizer==3.5.2
+    # via requests
+click==8.5.0
+    # via
+    #   nltk
+    #   typer
+cloudpickle==3.1.2
+    # via joblib
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via
+    #   loguru
+    #   tqdm
+    #   wasabi
+confection==0.0.4
+    # via
+    #   thinc
+    #   weasel
+contourpy==1.3.2 ; python_full_version < '3.11'
+    # via matplotlib
+contourpy==1.3.3 ; python_full_version >= '3.11'
+    # via matplotlib
+cycler==0.12.1
+    # via matplotlib
+cymem==2.0.13
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
+defusedxml==0.7.1
+    # via nltk
+dnspython==2.8.0 ; python_full_version < '3.11'
+    # via pymongo
+dnspython==2.9.0 ; python_full_version >= '3.11'
+    # via pymongo
+docstring-parser==0.18.0
+    # via anthropic
+en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl
+    # via ml-data-wrangler
+exceptiongroup==1.3.1 ; python_full_version < '3.11'
+    # via anyio
+fonttools==4.65.0 ; python_full_version < '3.11'
+    # via matplotlib
+fonttools==4.66.1 ; python_full_version >= '3.11'
+    # via matplotlib
+funcy==2.1
+    # via pyldavis
+gensim==4.4.0
+    # via
+    #   ml-data-wrangler
+    #   pyldavis
+h11==0.16.0 ; sys_platform != 'emscripten'
+    # via httpcore2
+httpcore2==2.13.1 ; sys_platform != 'emscripten'
+    # via httpx2
+httpx2==2.13.1
+    # via anthropic
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
+idna==3.20
+    # via
+    #   anyio
+    #   httpx2
+    #   requests
+jinja2==3.1.6
+    # via
+    #   pyldavis
+    #   spacy
+jiter==0.17.0
+    # via anthropic
+joblib==1.6.0
+    # via
+    #   nltk
+    #   pyldavis
+    #   scikit-learn
+kiwisolver==1.5.1
+    # via matplotlib
+langcodes==3.5.1
+    # via spacy
+loguru==0.7.3
+    # via ml-data-wrangler
+markupsafe==3.0.4
+    # via jinja2
+matplotlib==3.10.9 ; python_full_version < '3.11'
+    # via
+    #   ml-data-wrangler
+    #   seaborn
+matplotlib==3.11.2 ; python_full_version >= '3.11'
+    # via
+    #   ml-data-wrangler
+    #   seaborn
+murmurhash==1.0.15
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
+narwhals==2.27.1 ; python_full_version >= '3.11'
+    # via scikit-learn
+nltk==3.10.3
+    # via ml-data-wrangler
+numexpr==2.14.1 ; python_full_version < '3.11'
+    # via pyldavis
+numexpr==2.14.2 ; python_full_version >= '3.11'
+    # via pyldavis
+numpy==1.26.4
+    # via
+    #   blis
+    #   contourpy
+    #   gensim
+    #   matplotlib
+    #   numexpr
+    #   pandas
+    #   pyldavis
+    #   scikit-learn
+    #   scipy
+    #   seaborn
+    #   spacy
+    #   thinc
+packaging==26.3
+    # via
+    #   matplotlib
+    #   spacy
+    #   thinc
+    #   weasel
+pandas==2.3.3 ; python_full_version < '3.11' or python_full_version >= '3.14'
+    # via
+    #   ml-data-wrangler
+    #   pyldavis
+    #   seaborn
+pandas==3.0.6 ; python_full_version >= '3.11' and python_full_version < '3.14'
+    # via
+    #   ml-data-wrangler
+    #   pyldavis
+    #   seaborn
+pathlib-abc==0.5.2
+    # via pathy
+pathy==0.14.2
+    # via weasel
+pillow==12.3.0
+    # via matplotlib
+preshed==3.0.13
+    # via
+    #   spacy
+    #   thinc
+pydantic==1.10.26
+    # via
+    #   anthropic
+    #   confection
+    #   spacy
+    #   thinc
+    #   weasel
+pyldavis==3.4.1
+    # via ml-data-wrangler
+pymongo==4.18.3
+    # via ml-data-wrangler
+pyparsing==3.3.3
+    # via matplotlib
+pyqt5==5.15.11
+    # via ml-data-wrangler
+pyqt5-qt5==5.15.19
+    # via pyqt5
+pyqt5-sip==12.20.0
+    # via pyqt5
+python-dateutil==2.9.0.post0
+    # via
+    #   matplotlib
+    #   pandas
+pytz==2026.5 ; python_full_version < '3.11' or python_full_version >= '3.14'
+    # via pandas
+regex==2026.9.29
+    # via nltk
+requests==2.34.2
+    # via
+    #   spacy
+    #   weasel
+scikit-learn==1.7.2 ; python_full_version < '3.11'
+    # via pyldavis
+scikit-learn==1.9.1 ; python_full_version >= '3.11'
+    # via pyldavis
+scipy==1.12.0
+    # via
+    #   gensim
+    #   ml-data-wrangler
+    #   pyldavis
+    #   scikit-learn
+seaborn==0.13.2
+    # via ml-data-wrangler
+setuptools==84.0.0
+    # via
+    #   pyldavis
+    #   spacy
+    #   thinc
+six==1.17.0
+    # via python-dateutil
+smart-open==8.0.3
+    # via
+    #   gensim
+    #   pathy
+sniffio==1.3.1
+    # via anthropic
+spacy==3.7.5
+    # via
+    #   en-core-web-lg
+    #   ml-data-wrangler
+spacy-legacy==3.0.12
+    # via spacy
+spacy-loggers==1.0.5
+    # via spacy
+srsly==2.5.4
+    # via
+    #   confection
+    #   spacy
+    #   thinc
+    #   weasel
+thinc==8.2.5
+    # via spacy
+threadpoolctl==3.7.0
+    # via scikit-learn
+tqdm==4.70.1
+    # via
+    #   nltk
+    #   spacy
+truststore==0.10.5 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
+typer==0.7.0
+    # via
+    #   spacy
+    #   weasel
+typing-extensions==4.16.0
+    # via
+    #   anthropic
+    #   anyio
+    #   exceptiongroup
+    #   httpx2
+    #   pydantic
+tzdata==2026.5 ; python_full_version < '3.11' or python_full_version >= '3.14' or sys_platform == 'emscripten' or sys_platform == 'win32'
+    # via pandas
+urllib3==2.8.0
+    # via requests
+validators==0.34.0
+    # via ml-data-wrangler
+wasabi==1.1.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
+weasel==0.1.1
+    # via spacy
+win32-setctime==1.2.0 ; sys_platform == 'win32'
+    # via loguru
+wrapt==2.5.0
+    # via smart-open
