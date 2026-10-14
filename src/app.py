@@ -144,7 +144,7 @@ class MainWindow(QMainWindow, QDialog):
             "Identify two file locations.\n"
             "1. The Ticket File Path from the ZenDesk Tickets API.\n"
             "2. The path to the comments directory with JSON comments for each ticket.\n\n"
-            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs Mongo URI in File > Settings…)."
+            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs Mongo URI in Settings; Preferences on macOS)."
         )
         warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
         warning_label.setStyleSheet("color: red;")
