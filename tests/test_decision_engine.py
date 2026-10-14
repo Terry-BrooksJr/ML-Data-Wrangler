@@ -958,3 +958,32 @@ def test_reset_clients_rebuilds_from_new_settings(monkeypatch):
         new_db.client.close()
     finally:
         persistence.reset_clients()
+
+
+@pytest.mark.parametrize("url", ["http://api.cheaperinference.com", "http://10.0.0.5:8080",
+                                 "api.cheaperinference.com", "ftp://api.cheaperinference.com", "https://"])
+def test_api_url_must_be_https(monkeypatch, url):
+    monkeypatch.setenv("CHEAPER_INFERENCE_API_URL", url)
+    with pytest.raises(classify.InsecureApiUrl):
+        classify.api_base_url()
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8080", "http://127.0.0.1:4000/v1", "http://[::1]:9000"])
+def test_plain_http_allowed_only_on_this_machine(monkeypatch, url):
+    monkeypatch.setenv("CHEAPER_INFERENCE_API_URL", url)
+    assert classify.api_base_url().startswith("http://")
+
+
+def test_insecure_api_url_stops_the_batch(monkeypatch, tickets):
+    monkeypatch.setenv("CHEAPER_INFERENCE_API_KEY", "test")
+    monkeypatch.setenv("CHEAPER_INFERENCE_API_URL", "http://api.example.com")
+    classify.get_client.cache_clear()
+    for name in ("flag_solve", "manual_triage"):
+        tickets.insert_one(copy.deepcopy(CATEGORY_FIXTURES[name]))
+    try:
+        summary = persistence.run_review_batch(tickets)
+    finally:
+        classify.get_client.cache_clear()
+    assert summary["stopped"] and "InsecureApiUrl" in summary["stopped"]
+    assert summary["classified"] == 0 and summary["errored"] == 0
+    assert tickets.count_documents({"awaiting_review": True}) == 2

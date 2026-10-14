@@ -13,7 +13,8 @@ import pathlib
 import sys
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, List
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -52,7 +53,8 @@ SETTINGS: List[Setting] = [
     Setting("MONGO_COLLECTION", "Tickets collection", "MongoDB", default="tickets"),
     Setting("CHEAPER_INFERENCE_API_KEY", "API key", "Decision Engine", secret=True, required=True),
     Setting("CHEAPER_INFERENCE_API_URL", "API URL", "Decision Engine", required=True,
-            default="https://api.cheaperinference.com"),
+            default="https://api.cheaperinference.com",
+            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
     Setting("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "Primary model", "Decision Engine", required=True,
             help="Classifies each ticket."),
     Setting("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "Secondary model", "Decision Engine",
@@ -98,13 +100,43 @@ def settings_path() -> pathlib.Path:
     return config_dir() / "settings.json"
 
 
-def stored() -> Dict[str, str]:
-    """The values saved in settings_path(), or {} if there is no file yet."""
+# Set by load() when the settings file couldn't be read; the app shows it.
+load_error: Optional[str] = None
+
+
+def stored() -> Dict[str, Optional[str]]:
+    """The values saved in settings_path(), or {} if there is no file yet.
+
+    A None value is a setting the user blanked: load() removes it from the
+    environment, so a value in .env or the shell doesn't come back.
+
+    Raises:
+        OSError, ValueError: The file can't be read or isn't a JSON object
+            (JSONDecodeError and UnicodeDecodeError are ValueErrors).
+    """
     path = settings_path()
     if not path.exists():
         return {}
     with open(path, encoding="utf-8") as f:
-        return {k: str(v) for k, v in json.load(f).items()}
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    return {k: None if v is None else str(v) for k, v in data.items()}
+
+
+def _set_aside(path: pathlib.Path, error: Exception) -> str:
+    """Moves an unreadable settings file out of the way, keeping it for recovery.
+
+    Returns:
+        A message for the user saying what happened and where the file went.
+    """
+    backup = path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+    try:
+        path.replace(backup)
+        kept = f"It was moved to {backup}."
+    except OSError:
+        kept = "Saving settings will replace it."
+    return f"Could not read the settings file {path} ({error}). {kept} Re-enter your settings."
 
 
 def workspace_dir() -> pathlib.Path:
@@ -120,12 +152,27 @@ def load() -> None:
     """Loads settings into os.environ, before modules that read them at import.
 
     A project .env (when running from source) is loaded first, then the user
-    settings file, so values saved from the dialog win. Both override the
-    shell, so a stale exported MONGO_URI can't silently replace them.
+    settings file, so values saved from the dialog win, and settings blanked
+    in the dialog are removed. Both override the shell, so a stale exported
+    MONGO_URI can't silently replace them.
+
+    An unreadable settings file is set aside and reported in load_error
+    rather than stopping the app, so the user can re-enter settings.
     """
+    global load_error
+    load_error = None
     if not is_frozen():
         load_dotenv(override=True)
-    os.environ.update(stored())
+    try:
+        values = stored()
+    except (OSError, ValueError) as e:
+        load_error = _set_aside(settings_path(), e)
+        return
+    for name, value in values.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def use_workspace() -> pathlib.Path:
@@ -147,17 +194,69 @@ def missing_required() -> List[str]:
     return [s.name for s in SETTINGS if s.required and not os.environ.get(s.name)]
 
 
+# Owner and SYSTEM only, not inherited from the parent folder ("P"); OICI
+# passes it on to files created in the folder.
+_OWNER_ONLY_SDDL = "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)"
+
+
+def _restrict_to_owner(path: pathlib.Path) -> None:
+    """On Windows, replaces path's ACL with owner-only access.
+
+    Mode bits don't protect files on Windows: os.open's 0600 and chmod only
+    toggle read-only, so a file would otherwise inherit whatever ACL its
+    folder has. No-op elsewhere, where mkstemp's 0600 already applies.
+
+    Raises:
+        OSError: Windows refused the change.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    dacl_security_information = 0x00000004
+    protected_dacl_security_information = 0x80000000
+
+    descriptor = ctypes.c_void_p()
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        _OWNER_ONLY_SDDL, 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not advapi32.SetFileSecurityW(
+            str(path), dacl_security_information | protected_dacl_security_information, descriptor
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
 def _write_atomically(path: pathlib.Path, text: str) -> None:
     """Replaces path with text, leaving the old file intact if writing fails.
 
     Writes a temporary file in the same directory, then renames it over path,
     so a full disk or a crash can't leave a truncated settings file that
-    would stop the next launch. mkstemp creates it owner-only (0600): it
-    holds API keys and the Mongo password.
+    would stop the next launch. The file holds API keys and the Mongo
+    password, so it is owner-only before anything is written to it: mkstemp
+    creates it 0600, and on Windows _restrict_to_owner sets its ACL (the
+    rename keeps it). The folder is restricted too.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_to_owner(path.parent)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
+        try:
+            _restrict_to_owner(pathlib.Path(tmp))
+        except BaseException:
+            # Windows can't delete a file that is still open.
+            os.close(fd)
+            raise
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
@@ -171,7 +270,9 @@ def _write_atomically(path: pathlib.Path, text: str) -> None:
 def save(values: Dict[str, str]) -> List[str]:
     """Writes settings to the user file and applies them to os.environ.
 
-    An empty value removes the setting, so the code's default applies.
+    An empty value removes the setting, so the code's default applies. If
+    .env or the shell would set it again on the next launch (or it was
+    blanked before), the file records it as null so load() removes it.
 
     Args:
         values: Setting name to value, as entered in the dialog.
@@ -179,7 +280,11 @@ def save(values: Dict[str, str]) -> List[str]:
     Returns:
         Names of changed settings that only take effect after a restart.
     """
-    saved = {}
+    try:
+        previous = stored()
+    except (OSError, ValueError):
+        previous = {}
+    saved: Dict[str, Optional[str]] = {}
     restart_needed = []
     for setting in SETTINGS:
         value = values.get(setting.name, "").strip()
@@ -187,9 +292,11 @@ def save(values: Dict[str, str]) -> List[str]:
             restart_needed.append(setting.name)
         if value:
             saved[setting.name] = value
+        elif os.environ.get(setting.name) or (setting.name in previous and previous[setting.name] is None):
+            saved[setting.name] = None
     _write_atomically(settings_path(), json.dumps(saved, indent=2))
     for setting in SETTINGS:
-        if setting.name in saved:
+        if saved.get(setting.name):
             os.environ[setting.name] = saved[setting.name]
         else:
             os.environ.pop(setting.name, None)

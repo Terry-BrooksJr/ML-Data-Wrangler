@@ -25,13 +25,20 @@ cp .env.example .env   # then fill in values
 ```
 
 Instead of `.env`, you can enter the same values in the app under
-**File > Settings…** (**Preferences…** in the macOS app menu). They're saved to
+**Settings** (**File > Settings…** on Windows and Linux, **Lasso > Preferences…**
+on macOS). They're saved to
 `settings.json` in your user config folder (`~/Library/Application
 Support/Lasso/` on macOS, `%APPDATA%\Lasso\` on
 Windows), readable only by you, and override `.env` and the shell. On launch
 the app offers to open Settings if any required value is missing. Most
 changes apply immediately; the collection names and `DECISION_ENGINE_MODEL`
-need a restart.
+need a restart. Blanking a field makes the code's default apply, even if
+`.env` or the shell sets it. If the file can't be read, the app renames it to
+`settings.json.corrupt-<date>` and asks you to re-enter your settings.
+
+`CHEAPER_INFERENCE_API_URL` must be `https://`, since the API key and ticket
+text go there. Plain `http://` is accepted only for `localhost`/loopback, with
+a warning; anything else stops the review batch.
 
 `requirements.txt` is exported from the lock for pip users. Regenerate it
 after changing dependencies:

@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 import settings
+from decision_engine.classify import api_url_problem, is_loopback_url
 
 
 class SettingsDialog(QDialog):
@@ -36,7 +37,8 @@ class SettingsDialog(QDialog):
 
         intro = QLabel(
             "Fields marked * are needed by the Decision Engine (Mongo URI also by "
-            f"Write Tickets to MongoDB). Saved to:\n{settings.settings_path()}"
+            "Write Tickets to MongoDB). Leave a field blank to use its default, even if "
+            f".env or your shell sets it. Saved to:\n{settings.settings_path()}"
         )
         intro.setWordWrap(True)
 
@@ -92,8 +94,31 @@ class SettingsDialog(QDialog):
         """The entered value of each setting."""
         return {name: field.text() for name, field in self.fields.items()}
 
+    def _api_url_ok(self) -> bool:
+        """Refuses an unencrypted API URL; asks before allowing http:// to localhost."""
+        url = self.fields["CHEAPER_INFERENCE_API_URL"].text().strip()
+        if not url:
+            return True
+        problem = api_url_problem(url)
+        if problem:
+            QMessageBox.critical(self, "Insecure API URL", problem)
+            return False
+        if url.startswith("http://") and is_loopback_url(url):
+            answer = QMessageBox.warning(
+                self,
+                "Unencrypted API URL",
+                f"{url} is plain http. The API key and ticket text will be sent unencrypted to a "
+                "service on this machine.\n\nUse it anyway?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            return answer == QMessageBox.Yes
+        return True
+
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
+        if not self._api_url_ok():
+            return
         try:
             restart_needed = settings.save(self.values())
         except OSError as e:

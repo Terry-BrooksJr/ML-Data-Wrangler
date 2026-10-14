@@ -257,7 +257,11 @@ class MainWindow(QMainWindow, QDialog):
             self.triage_tab.refresh()
 
     def prompt_for_missing_settings(self) -> None:
-        """On launch, offers the settings dialog if required settings are unset."""
+        """On launch, reports an unreadable settings file and offers the
+        settings dialog if required settings are unset."""
+        if settings.load_error:
+            logger.error(settings.load_error)
+            QMessageBox.warning(self, "Settings Not Loaded", settings.load_error)
         missing = settings.missing_required()
         if not missing:
             return
@@ -713,7 +717,7 @@ class MainWindow(QMainWindow, QDialog):
     def start_assign_topics(self) -> None:
         """Loads a saved run and writes its topics to every ticket in MongoDB."""
         if not os.getenv("MONGO_URI"):
-            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it in File > Settings…")
+            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it in Settings (Preferences on macOS).")
             return
         run = self._choose_run("Assign Topics from Saved Run")
         if run is None:

@@ -12,7 +12,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from .classify import EngineError, classify_ticket, get_client
+from .classify import EngineError, InsecureApiUrl, classify_ticket, get_client
 from .payload import build_ticket_payload
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -55,7 +55,9 @@ def default_worker_id() -> str:
 
 
 def is_fatal(error: Exception) -> bool:
-    """True for errors that will hit every ticket (bad key, out of credit)."""
+    """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
+    if isinstance(error, InsecureApiUrl):
+        return True
     return isinstance(error, anthropic.APIStatusError) and error.status_code in FATAL_STATUS_CODES
 
 
