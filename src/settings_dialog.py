@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
 
 import settings
 from decision_engine.classify import api_url_problem, is_loopback_url
+from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 
 
 class SettingsDialog(QDialog):
@@ -94,30 +95,46 @@ class SettingsDialog(QDialog):
         """The entered value of each setting."""
         return {name: field.text() for name, field in self.fields.items()}
 
-    def _api_url_ok(self) -> bool:
+    # URL settings that receive an API key and ticket text.
+    API_URL_SETTINGS = ("CHEAPER_INFERENCE_API_URL", "EMBEDDING_API_URL")
+
+    def _api_urls_ok(self) -> bool:
         """Refuses an unencrypted API URL; asks before allowing http:// to localhost."""
-        url = self.fields["CHEAPER_INFERENCE_API_URL"].text().strip()
-        if not url:
-            return True
-        problem = api_url_problem(url)
-        if problem:
-            QMessageBox.critical(self, "Insecure API URL", problem)
-            return False
-        if url.startswith("http://") and is_loopback_url(url):
-            answer = QMessageBox.warning(
-                self,
-                "Unencrypted API URL",
-                f"{url} is plain http. The API key and ticket text will be sent unencrypted to a "
-                "service on this machine.\n\nUse it anyway?",
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Cancel,
+        for name in self.API_URL_SETTINGS:
+            url = self.fields[name].text().strip()
+            if not url:
+                continue
+            problem = api_url_problem(url)
+            if problem:
+                QMessageBox.critical(self, "Insecure API URL", problem)
+                return False
+            if url.startswith("http://") and is_loopback_url(url):
+                answer = QMessageBox.warning(
+                    self,
+                    "Unencrypted API URL",
+                    f"{url} is plain http. The API key and ticket text will be sent unencrypted to a "
+                    "service on this machine.\n\nUse it anyway?",
+                    QMessageBox.Yes | QMessageBox.Cancel,
+                    QMessageBox.Cancel,
+                )
+                if answer != QMessageBox.Yes:
+                    return False
+        return True
+
+    def _dimensions_ok(self) -> bool:
+        """Refuses an embedding size Voyage doesn't offer."""
+        value = self.fields["EMBEDDING_DIMENSIONS"].text().strip()
+        if value and parse_dimensions(value) is None:
+            QMessageBox.critical(
+                self, "Invalid Dimensions",
+                f"Dimensions must be one of {', '.join(map(str, ALLOWED_DIMENSIONS))}, or blank for 1024.",
             )
-            return answer == QMessageBox.Yes
+            return False
         return True
 
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
-        if not self._api_url_ok():
+        if not self._api_urls_ok() or not self._dimensions_ok():
             return
         try:
             restart_needed = settings.save(self.values())

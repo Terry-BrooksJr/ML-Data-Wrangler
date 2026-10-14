@@ -3,9 +3,9 @@
 Needs an Atlas cluster or the mongodb/mongodb-atlas-local Docker image: a
 plain mongod has no $search or search indexes.
 
-Vector search is deliberately not set up yet. Nothing populates `embedding`,
-and the index's numDimensions depends on an embedding model that hasn't been
-chosen.
+Also creates the vector index over each ticket's `embedding`, which
+src/embeddings.py fills in from Voyage AI (ensure_vector_index). Nothing
+queries it yet.
 
     python -m decision_engine.search ensure [--wait]
     python -m decision_engine.search query "import fails" [--status open]
@@ -58,6 +58,24 @@ class SearchUnavailable(RuntimeError):
     """The deployment has no Atlas Search."""
 
 
+class VectorIndexMismatch(ValueError):
+    """The vector index exists with different dimensions than the embeddings."""
+
+
+VECTOR_INDEX = "tickets_vector"
+VECTOR_PATH = "embedding"
+
+
+def vector_index_definition(dimensions: int) -> dict:
+    """Cosine similarity over `embedding`, filterable by status."""
+    return {
+        "fields": [
+            {"type": "vector", "path": VECTOR_PATH, "numDimensions": dimensions, "similarity": "cosine"},
+            {"type": "filter", "path": "status"},
+        ]
+    }
+
+
 def _is_unsupported(error: OperationFailure) -> bool:
     return error.code in _UNSUPPORTED_CODES or (error.details or {}).get("codeName") == "SearchNotEnabled"
 
@@ -106,6 +124,44 @@ def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: floa
                 raise
     if wait:
         wait_until_queryable(tickets, TEXT_INDEX, timeout)
+    return created
+
+
+def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False, timeout: float = 300.0) -> bool:
+    """Creates the vector index if it doesn't exist yet. Safe to call repeatedly.
+
+    Returns:
+        True if this call created it.
+
+    Raises:
+        VectorIndexMismatch: it exists with a different numDimensions (after
+            changing EMBEDDING_DIMENSIONS). Drop it in Atlas and call again.
+        SearchUnavailable: on a deployment without Atlas Search.
+    """
+    existing = _search_indexes(tickets).get(VECTOR_INDEX)
+    created = False
+    if existing:
+        definition = existing.get("latestDefinition") or existing.get("definition") or {}
+        current = next((f.get("numDimensions") for f in definition.get("fields", []) if f.get("type") == "vector"), None)
+        if current is not None and current != dimensions:
+            raise VectorIndexMismatch(
+                f"{VECTOR_INDEX} indexes {current}-dimension vectors but EMBEDDING_DIMENSIONS is {dimensions}. "
+                f"Drop {VECTOR_INDEX} in Atlas, then embed and create it again."
+            )
+    else:
+        try:
+            tickets.create_search_index(
+                SearchIndexModel(name=VECTOR_INDEX, type="vectorSearch", definition=vector_index_definition(dimensions))
+            )
+            created = True
+        except OperationFailure as e:
+            if _is_unsupported(e):
+                raise SearchUnavailable(UNSUPPORTED_HINT) from e
+            already_exists = e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            if not (already_exists and VECTOR_INDEX in _search_indexes(tickets)):
+                raise
+    if wait:
+        wait_until_queryable(tickets, VECTOR_INDEX, timeout)
     return created
 
 

@@ -541,3 +541,56 @@ def test_no_new_jobs_after_shutdown_requested(qapp, configured, stored):
     tab.request_shutdown()
     tab.refresh()
     assert not tab.is_busy()
+
+
+# --- embeddings ----------------------------------------------------------------
+
+
+def test_embed_tickets_asks_then_embeds_and_reports(qapp, configured, monkeypatch, dialogs, stored):
+    import numpy as np
+
+    from decision_engine import search
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.delenv("EMBEDDING_DIMENSIONS", raising=False)
+    sent = []
+
+    def fake_embed(texts, cfg, input_type="document"):
+        sent.extend(texts)
+        return np.zeros((len(texts), cfg.dimensions), dtype=np.float32), 5
+
+    def no_search(*args):
+        raise search.SearchUnavailable("no Atlas Search here")
+
+    monkeypatch.setattr(triage_tab.embeddings, "embed", fake_embed)
+    monkeypatch.setattr(triage_tab.search, "ensure_vector_index", no_search)
+    tab = make_tab(stored)
+    tab.start_embed_tickets()
+    wait_until_idle(qapp, tab)
+
+    kinds = [kind for kind, _ in dialogs]
+    assert kinds == ["question", "information"]
+    assert "3 ticket(s) need embeddings" in dialogs[0][1]
+    assert "Embedded: 3" in dialogs[1][1] and "not created: no Atlas Search here" in dialogs[1][1]
+    assert len(sent) == 3
+    assert stored.count_documents({"embedding_meta.model": "voyage-3.5"}) == 3
+
+
+def test_embed_tickets_needs_a_key(qapp, configured, monkeypatch, dialogs, stored):
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    tab = make_tab(stored)
+    tab.start_embed_tickets()
+    assert dialogs and dialogs[0][0] == "warning" and "EMBEDDING_API_KEY" in dialogs[0][1]
+    assert not tab.is_busy()
+
+
+def test_embed_tickets_cancel_sends_nothing(qapp, configured, monkeypatch, dialogs, stored):
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
+    called = []
+    monkeypatch.setattr(triage_tab.embeddings, "embed_tickets", lambda *a, **k: called.append(1))
+    tab = make_tab(stored)
+    tab.start_embed_tickets()
+    wait_until_idle(qapp, tab)
+    assert called == []
+    assert stored.count_documents({"embedding": {"$exists": True}}) == 0

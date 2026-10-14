@@ -33,7 +33,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from decision_engine import feedback, persistence
+import embeddings
+from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
 from utility import ThreadWorker
 
@@ -46,6 +47,8 @@ REVIEW_ENV = READ_ENV + (
     "CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
 )
+# Embedding tickets reads and writes Mongo and calls Voyage AI.
+EMBED_ENV = READ_ENV + ("EMBEDDING_API_KEY",)
 # Optional models, with what is lost when each is unset.
 OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME": "no fallback if the primary model call fails",
@@ -260,6 +263,12 @@ class TriageTab(QWidget):
         one_row.addWidget(self.ticket_id_input, stretch=1)
         one_row.addWidget(self.review_one_button)
 
+        self.embed_button = QPushButton("Embed Tickets (Voyage AI)…")
+        self.embed_button.setToolTip(
+            "Stores a Voyage embedding on each new or changed ticket and creates the vector index."
+        )
+        self.embed_button.clicked.connect(self.start_embed_tickets)
+
         # Range 0..0 makes the bar an indeterminate "busy" indicator:
         # run_review_batch reports no progress.
         self.busy_bar = QProgressBar()
@@ -308,6 +317,7 @@ class TriageTab(QWidget):
         layout.addLayout(status_row)
         layout.addWidget(self.review_all_button)
         layout.addLayout(one_row)
+        layout.addWidget(self.embed_button)
         layout.addWidget(self.busy_bar)
         layout.addWidget(QLabel(f"Recent reviews (newest {RECENT_REVIEW_LIMIT})"))
         layout.addWidget(splitter, stretch=1)
@@ -419,7 +429,8 @@ class TriageTab(QWidget):
             label: Text for the busy bar and, when busy, the status label.
         """
 
-        for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button):
+        for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button,
+                       self.embed_button):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
@@ -575,6 +586,55 @@ class TriageTab(QWidget):
             f"Reviewing {awaiting} ticket(s)",
             self._review_all_done,
         )
+
+    def start_embed_tickets(self) -> None:
+        """Counts tickets needing embeddings, then asks before sending them to Voyage."""
+        if not self._configured(EMBED_ENV, notify=True):
+            return
+        try:
+            cfg = embeddings.config()
+        except embeddings.EmbeddingNotConfigured as e:
+            self.status_label.setText(str(e))
+            QMessageBox.warning(self, "Embeddings Not Configured", str(e))
+            return
+        self._run(
+            lambda: len(embeddings.stale_tickets(self.collection_factory(), cfg)),
+            "Finding tickets that need embeddings",
+            lambda count: self._confirm_embed(cfg, count),
+        )
+
+    def _confirm_embed(self, cfg, count: int) -> None:
+        """Asks before the paid calls, then embeds and ensures the vector index."""
+        if count:
+            answer = QMessageBox.question(
+                self,
+                "Embed Tickets",
+                f"{count} ticket(s) need embeddings.\n\nEach one's subject and first requester comment "
+                f"will be sent to {cfg.url} ({cfg.model}, {cfg.dimensions} dimensions). These are paid calls. "
+                "Tickets with a current embedding are skipped.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        def embed_and_index():
+            tickets = self.collection_factory()
+            summary = (embeddings.embed_tickets(tickets, cfg, should_stop=self._cancel.is_set) if count
+                       else {"embedded": 0, "tokens": 0, "cancelled": 0})
+            try:
+                created = search.ensure_vector_index(tickets, cfg.dimensions)
+                summary["index"] = f"{search.VECTOR_INDEX} {'created' if created else 'already exists'}"
+            except (search.SearchUnavailable, search.VectorIndexMismatch) as e:
+                summary["index"] = f"not created: {e}"
+            return summary
+
+        self._run(embed_and_index, f"Embedding {count} ticket(s)", self._embed_done)
+
+    def _embed_done(self, summary: dict) -> None:
+        message = embeddings.format_summary(summary)
+        logger.success(message.replace("\n", "; "))
+        QMessageBox.information(self, "Embedding Complete", message)
 
     def _review_all_done(self, summary) -> None:
         """Logs and announces batch completion, then refreshes the list.

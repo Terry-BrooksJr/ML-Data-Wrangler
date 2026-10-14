@@ -176,3 +176,6 @@ eval_sets/
 
 # PyInstaller spec is hand-written, not generated
 !packaging/*.spec
+
+# Cached vectors from decision_engine.embedding_eval (derived from customer text)
+embedding_cache/
