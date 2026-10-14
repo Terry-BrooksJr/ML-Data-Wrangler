@@ -298,3 +298,9 @@ def test_backfill_does_not_revert_newer_text(tickets, monkeypatch):
     stored = tickets.find_one({"zendesk_id": "1"})
     assert stored["subject"] == "Newer subject"
     assert summary["skipped_changed"] == 1 and summary["tickets_changed"] == 0
+
+
+def test_clean_text_decodes_any_depth():
+    deep = "a" + "&" + "amp;" * 7 + "nbsp;b"
+    assert clean_text(deep) == "a b"
+    assert clean_text(clean_text(deep)) == clean_text(deep)

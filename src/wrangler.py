@@ -37,7 +37,7 @@ def clean_text(text: Optional[str]) -> Optional[str]:
     """Decodes HTML entities in ticket text before it is stored in Mongo.
 
     Entities are decoded until the text stops changing, so double-escaped
-    ones ("&amp;nbsp;") are handled too. Line endings become "\n",
+    (or deeper) ones like "&amp;nbsp;" are handled too. Line endings become "\n",
     non-breaking and other special spaces become plain spaces, and control
     characters and invisible zero-width characters are removed. Trailing
     whitespace is stripped from each line, but spaces and tabs inside or at
@@ -50,10 +50,9 @@ def clean_text(text: Optional[str]) -> Optional[str]:
     """
     if text is None:
         return None
-    for _ in range(5):  # entities nested deeper than this aren't real text
-        decoded = unescape(text)
-        if decoded == text:
-            break
+    # Decode to a fixed point, so cleaning is idempotent however deeply the
+    # text was escaped. Terminates: every pass that changes the text shortens it.
+    while (decoded := unescape(text)) != text:
         text = decoded
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _CONTROL_CHARS.sub("", _ZERO_WIDTH.sub("", _SPECIAL_SPACES.sub(" ", text)))
