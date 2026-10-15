@@ -13,8 +13,9 @@ share of tickets HDBSCAN left as outliers. --compare-lda rescores a saved LDA
 run's topics on this run's tokens, so the two coherences are comparable.
 
 Runs are saved under BERTOPIC_MODEL_DIR (default bertopic_models/), apart
-from TOPIC_MODEL_DIR, where the app lists and loads every run as an LDA
-model. With --assign, each ticket's topic is written to `embedding_topic`,
+from the LDA runs in TOPIC_MODEL_DIR; run.json's `"method": "bertopic"` also
+keeps topic_store.list_runs from loading one as an LDA model. The app trains
+and shows runs through bertopic_runs. With --assign, each ticket's topic is written to `embedding_topic`,
 never to `topic`, which holds the LDA assignment that feedback reports use.
 
     cd src && python -m bertopic_model [--min-cluster-size N] [--nr-topics N]

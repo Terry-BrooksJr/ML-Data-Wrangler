@@ -151,13 +151,23 @@ def _read_run_file(path: pathlib.Path) -> Optional[dict]:
     return run
 
 
+# run.json's `method` for runs that aren't LDA models (bertopic_model saves "bertopic").
+# A run with no method is LDA: runs saved before the field existed.
+LDA_METHODS = (None, "lda")
+
+
 def list_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
-    """Previous runs, newest first: from Mongo when given, else from the run.json files on disk."""
+    """Previous LDA runs, newest first: from Mongo when given, else from the run.json files on disk.
+
+    Runs of another method (e.g. a BERTopic run.json copied into
+    TOPIC_MODEL_DIR) are skipped: everything listed here is loaded as an LDA model.
+    """
     if runs is not None:
-        return list(runs.find({}, {"_id": 0}).sort("ran_at", -1))
+        return list(runs.find({"method": {"$in": list(LDA_METHODS)}}, {"_id": 0}).sort("ran_at", -1))
     base_dir = base_dir or model_dir()
     found = [_read_run_file(p) for p in base_dir.glob(f"*/{RUN_FILE}")] if base_dir.exists() else []
-    return sorted((r for r in found if r), key=lambda r: str(r.get("ran_at")), reverse=True)
+    return sorted((r for r in found if r and r.get("method") in LDA_METHODS),
+                  key=lambda r: str(r.get("ran_at")), reverse=True)
 
 
 def describe_run(run: dict) -> str:
