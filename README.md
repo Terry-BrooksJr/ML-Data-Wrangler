@@ -112,20 +112,34 @@ instead of retraining: the only difference would be the random seed.
 
 ### Saving models to S3
 
-With **Bucket** set under Settings > Model storage (S3 / Backblaze B2), each
-trained run is also uploaded to `s3://<bucket>/topic-models/<run_id>/` (the
-model, its dictionary, gensim's extra files, the charts and `run.json`, which
-goes last). The location is added to the run in `run.json` and MongoDB.
+With **Bucket** and **Signing key** set under Settings > Model storage (S3 /
+Backblaze B2), each trained run is also uploaded to
+`s3://<bucket>/topic-models/<run_id>/`: the model, its dictionary, gensim's
+extra files, the charts and `run.json`, then a signed `manifest.json` listing
+every file's SHA-256 and size. The location is added to the run in `run.json`
+and MongoDB.
 
 - Backblaze B2: set the key ID, secret key and endpoint (e.g.
   `https://s3.us-west-004.backblazeb2.com`); the region is read from it.
   AWS S3: leave the endpoint blank and set the region.
+- **Signing key:** use the same key on every computer that shares models
+  (`cd src && python -m model_storage new-key` makes one). Model files are
+  Python pickles, which run code when loaded, so a downloaded run is only
+  opened if its manifest's signature verifies with this key and every file
+  matches its listed size and hash. Someone who can edit MongoDB or the bucket
+  but doesn't have the key can't get a model opened.
+- Runs are only ever loaded from this computer's `topic_models/<run_id>/`,
+  never from a path a run record names.
 - A failed upload doesn't lose the run: it stays saved locally and the app
   shows a warning. Retry, or upload runs trained before this was set up, with
-  `cd src && python -m model_storage upload [RUN_ID ...]`.
+  `cd src && python -m model_storage upload [RUN_ID ...]` (this also adds the
+  run to MongoDB if it isn't there yet).
 - A run whose files aren't on this computer (trained elsewhere, or the folder
   was cleared) is downloaded from its upload when you open it with Show
-  Previous Run, Assign Topics from Saved Run, or Use Saved Model.
+  Previous Run, Assign Topics from Saved Run, or Use Saved Model. Only the
+  files the manifest lists are fetched (at most 200 files, 2 GB), into a
+  staging folder that replaces the run's folder only once everything checks
+  out.
 
 ### Data handling
 

@@ -99,6 +99,7 @@ class MainWindow(QMainWindow, QDialog):
         self.pdialog: QProgressDialog = None
         self._allocator_error: str = ""
         self.run_thread: QThread = None
+        self._run_job_callbacks = None
         self.mongo_thread: QThread = None
         # Set when the user closes the window while a job is running; the
         # window closes itself once every job has finished.
@@ -437,28 +438,47 @@ class MainWindow(QMainWindow, QDialog):
                 on_failed()
 
         if topic_store.has_local_files(run):
-            shown(run)
+            # Fast and local: points the chart paths at the run's own folder.
+            try:
+                shown(topic_store.ensure_local(run))
+            except (OSError, ValueError) as e:
+                failed(str(e))
             return
         self._start_run_job(lambda: topic_store.ensure_local(run), f"Downloading run {run['run_id']}", shown,
                             on_error=failed)
 
     def _start_run_job(self, task, description: str, on_done, on_error=None) -> None:
-        """Runs task on run_thread, then calls on_done(result) or on_error(message) on the GUI thread."""
+        """Runs task on run_thread, then calls on_done(result) or on_error(message) on the GUI thread.
+
+        The worker's signals go to this window's own slots (bound methods of
+        a QObject living on the GUI thread), so Qt queues them there; the
+        slots then stop the thread, which is no longer running the task.
+        """
+        self._run_job_callbacks = (on_done, on_error or (lambda m: self.notify_user_of_error((False, m))))
         self.run_thread = QThread()
         self.run_worker = ThreadWorker(task, description)
         self.run_worker.moveToThread(self.run_thread)
-
-        def finish(callback, value):
-            self._stop_run_thread()
-            if self._close_pending:
-                self._finish_pending_close()
-                return
-            callback(value)
-
-        self.run_worker.finished.connect(lambda result: finish(on_done, result))
-        self.run_worker.error.connect(lambda message: finish(on_error or (lambda m: self.notify_user_of_error((False, m))), message))
+        self.run_worker.finished.connect(self._run_job_finished)
+        self.run_worker.error.connect(self._run_job_failed)
         self.run_thread.started.connect(self.run_worker.run)
         self.run_thread.start()
+
+    @pyqtSlot(object)
+    def _run_job_finished(self, result) -> None:
+        self._end_run_job(0, result)
+
+    @pyqtSlot(str)
+    def _run_job_failed(self, message: str) -> None:
+        self._end_run_job(1, message)
+
+    def _end_run_job(self, which: int, value) -> None:
+        callback = self._run_job_callbacks[which]
+        self._run_job_callbacks = None
+        self._stop_run_thread()
+        if self._close_pending:
+            self._finish_pending_close()
+            return
+        callback(value)
 
     def _start_training(self, iterations: int, passes: int, number_of_topics: int) -> None:
         """Preprocesses the corpus and trains on the training thread."""

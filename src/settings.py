@@ -69,6 +69,10 @@ SETTINGS: List[Setting] = [
             help="Backblaze application key ID, or an AWS access key ID."),
     Setting("B2_APPLICATION_KEY", "Secret key", "Model storage (S3 / Backblaze B2)", secret=True,
             help="Backblaze application key, or an AWS secret access key."),
+    Setting("MODEL_SIGNING_KEY", "Signing key", "Model storage (S3 / Backblaze B2)", secret=True,
+            help="Needed with a bucket. Signs uploaded models and verifies downloaded ones, which are only "
+                 "opened if the signature matches. Use the same key on every computer that shares models; "
+                 "generate one with: python -m model_storage new-key"),
     Setting("B2_ENDPOINT_URL", "Endpoint URL", "Model storage (S3 / Backblaze B2)",
             help="e.g. https://s3.us-west-004.backblazeb2.com. Leave blank for AWS S3. Must be https://."),
     Setting("MODEL_STORAGE_REGION", "Region", "Model storage (S3 / Backblaze B2)",
