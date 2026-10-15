@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import anthropic
-import httpx
+import httpx2
 import mongomock
 import pytest
 
@@ -56,12 +56,12 @@ class RoutingClient:
 
 
 def api_error():
-    return anthropic.APIConnectionError(request=httpx.Request("POST", "https://test"))
+    return anthropic.APIConnectionError(request=httpx2.Request("POST", "https://test"))
 
 
 def status_error(code):
-    request = httpx.Request("POST", "https://test")
-    return anthropic.APIStatusError(f"HTTP {code}", response=httpx.Response(code, request=request), body=None)
+    request = httpx2.Request("POST", "https://test")
+    return anthropic.APIStatusError(f"HTTP {code}", response=httpx2.Response(code, request=request), body=None)
 
 
 def model_reply(classification, confidence=90, **extra):
