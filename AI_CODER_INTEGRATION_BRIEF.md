@@ -580,8 +580,11 @@ def classify_ticket(ticket_payload: str) -> dict:
     try:
         result = json.loads(raw_text)
     except json.JSONDecodeError:
+        # Describe the reply; never copy it into the reason. The reason is
+        # stored and shown, and a reply can quote ticket text (names, dates
+        # of birth). Keep raw_text only in an audit record (raw_response).
         return _manual_triage_fallback(
-            reason=f"Non-JSON response from model: {raw_text[:500]}"
+            reason=f"Non-JSON response from model ({len(raw_text)}-character reply)"
         )
 
     # Hard backstop: don't trust a self-reported Solve under the stated bar.

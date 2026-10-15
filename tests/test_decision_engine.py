@@ -987,3 +987,75 @@ def test_insecure_api_url_stops_the_batch(monkeypatch, tickets):
     assert summary["stopped"] and "InsecureApiUrl" in summary["stopped"]
     assert summary["classified"] == 0 and summary["errored"] == 0
     assert tickets.count_documents({"awaiting_review": True}) == 2
+
+
+# --- the model's reply stays out of logs and error messages ----------------------
+
+SECRET = "Student Jane Doe (DOB 2012-04-01) cannot see her results"
+# Every distinctive piece of SECRET, so a partial leak (e.g. the name
+# removed but the date of birth kept) still fails.
+SECRET_FRAGMENTS = ("Jane", "Doe", "2012-04-01", "2012", "04-01", "20120401", "cannot see her results", "DOB")
+
+
+def assert_no_secret(*texts):
+    for text in texts:
+        for fragment in SECRET_FRAGMENTS:
+            assert fragment not in str(text), f"{fragment!r} leaked into: {str(text)[:200]}"
+
+
+@pytest.fixture
+def captured_logs():
+    from loguru import logger
+
+    lines = []
+    handler = logger.add(lambda message: lines.append(str(message)), level="DEBUG")
+    yield lines
+    logger.remove(handler)
+
+
+@pytest.mark.parametrize("reply", [
+    f"I can't classify this. The customer wrote: {SECRET}",                    # no JSON
+    model_reply(SECRET),                                                        # text as classification
+    model_reply("flag_solve", confidence=SECRET),                               # text as confidence
+    json.dumps([SECRET]),                                                        # not an object
+    model_reply("flag_solve", confidence=20120401),                             # DOB as an out-of-range number
+    model_reply(20120401),                                                      # DOB as the classification
+    model_reply("flag_solve", confidence=2012.0401),                            # DOB as a float
+], ids=["non_json", "classification", "confidence", "array", "numeric_confidence", "numeric_classification",
+        "float_confidence"])
+def test_reply_text_is_kept_in_the_audit_not_the_message(fake_model, captured_logs, reply):
+    fake_model(reply)
+    with pytest.raises(classify.EngineError) as raised:
+        classify.classify_ticket("payload")
+    assert_no_secret(raised.value, *captured_logs)
+    assert reply == raised.value.audit["raw_response"]
+
+
+def test_stored_engine_errors_and_fallback_omit_the_reply(fake_model, tickets, captured_logs):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    tickets.insert_one(ticket)
+    fake_model(f"Not sure. Customer said: {SECRET}")
+
+    for _ in range(persistence.MAX_ENGINE_ATTEMPTS):
+        try:
+            result = persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+        except classify.EngineError:
+            continue
+
+    stored = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})
+    error = stored["last_engine_error"]
+    assert_no_secret(error["message"])
+    assert SECRET in error["audit"]["raw_response"]  # still available for debugging
+    review = stored["agent_reviews"][-1]
+    assert review["classification"] == "manual_triage"
+    assert_no_secret(review["reasoning"], result["engine_error"], review.get("engine_error") or "",
+                     review.get("internal_note") or "", *captured_logs)
+
+
+def test_describe_value_never_includes_text():
+    from decision_engine.guards import describe_value
+
+    assert describe_value(SECRET) == f"a {len(SECRET)}-character string"
+    assert describe_value(20120401) == "a number" and describe_value(2012.0401) == "a number"
+    assert describe_value(None) == "null" and describe_value(True) == "a boolean"
+    assert describe_value([SECRET]) == "a list of 1 item(s)" and describe_value({"a": SECRET}) == "an object"

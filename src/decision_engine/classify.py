@@ -252,7 +252,10 @@ def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> 
     except ValueError as e:  # InvalidReply is a ValueError too
         kind = "Invalid reply" if isinstance(e, InvalidReply) else "Non-JSON response"
         logger.error(f"{model}: {kind.lower()}: {e}")
-        raise EngineError(f"{kind} from model: {e}. Reply: {raw_text[:500]}", model, audit) from e
+        # The reply itself stays out of the message: the message is logged and
+        # stored as the ticket's error, and a reply can quote ticket text. It is
+        # kept in full in audit["raw_response"] (stored with last_engine_error).
+        raise EngineError(f"{kind} from model ({len(raw_text)}-character reply): {e}", model, audit) from e
 
     apply_guards(result, reengage_count)
     result["model_version"] = model
