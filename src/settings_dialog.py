@@ -1,6 +1,7 @@
 """Settings dialog: edit the environment variables in settings.SETTINGS."""
 
 from itertools import groupby
+from urllib.parse import urlsplit
 from typing import Dict
 
 from loguru import logger
@@ -108,7 +109,8 @@ class SettingsDialog(QDialog):
             if problem:
                 QMessageBox.critical(self, "Insecure API URL", problem)
                 return False
-            if url.startswith("http://") and is_loopback_url(url):
+            # urlsplit lower-cases the scheme, so HTTP:// gets the warning too.
+            if urlsplit(url).scheme == "http" and is_loopback_url(url):
                 answer = QMessageBox.warning(
                     self,
                     "Unencrypted API URL",

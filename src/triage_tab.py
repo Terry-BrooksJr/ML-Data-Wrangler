@@ -588,7 +588,11 @@ class TriageTab(QWidget):
         )
 
     def start_embed_tickets(self) -> None:
-        """Counts tickets needing embeddings, then asks before sending them to Voyage."""
+        """Checks the vector index and lists stale tickets, then asks before sending them to Voyage.
+
+        The index is checked first so a mismatch stops the run before any
+        paid call; only the tickets in the approved list are sent.
+        """
         if not self._configured(EMBED_ENV, notify=True):
             return
         try:
@@ -597,21 +601,22 @@ class TriageTab(QWidget):
             self.status_label.setText(str(e))
             QMessageBox.warning(self, "Embeddings Not Configured", str(e))
             return
-        self._run(
-            lambda: len(embeddings.stale_tickets(self.collection_factory(), cfg)),
-            "Finding tickets that need embeddings",
-            lambda count: self._confirm_embed(cfg, count),
-        )
 
-    def _confirm_embed(self, cfg, count: int) -> None:
-        """Asks before the paid calls, then embeds and ensures the vector index."""
-        if count:
+        def prepare():
+            tickets = self.collection_factory()
+            status = embeddings.index_status(tickets, cfg)  # raises VectorIndexMismatch
+            return embeddings.plan_backfill(tickets, cfg), status
+
+        self._run(prepare, "Finding tickets that need embeddings",
+                  lambda prepared: self._confirm_embed(cfg, *prepared))
+
+    def _confirm_embed(self, cfg, plan, status: str) -> None:
+        """Asks before the paid calls, then embeds exactly the approved tickets."""
+        if plan.embed:
             answer = QMessageBox.question(
                 self,
                 "Embed Tickets",
-                f"{count} ticket(s) need embeddings.\n\nEach one's subject and first requester comment "
-                f"will be sent to {cfg.url} ({cfg.model}, {cfg.dimensions} dimensions). These are paid calls. "
-                "Tickets with a current embedding are skipped.\n\nContinue?",
+                embeddings.describe_plan(plan, cfg) + " Tickets with a current embedding are skipped.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
@@ -620,16 +625,14 @@ class TriageTab(QWidget):
 
         def embed_and_index():
             tickets = self.collection_factory()
-            summary = (embeddings.embed_tickets(tickets, cfg, should_stop=self._cancel.is_set) if count
-                       else {"embedded": 0, "tokens": 0, "cancelled": 0})
+            summary = embeddings.run_backfill(tickets, cfg, plan, should_stop=self._cancel.is_set)
             try:
-                created = search.ensure_vector_index(tickets, cfg.dimensions)
-                summary["index"] = f"{search.VECTOR_INDEX} {'created' if created else 'already exists'}"
+                embeddings.finish_index(tickets, cfg, summary, status)
             except (search.SearchUnavailable, search.VectorIndexMismatch) as e:
                 summary["index"] = f"not created: {e}"
             return summary
 
-        self._run(embed_and_index, f"Embedding {count} ticket(s)", self._embed_done)
+        self._run(embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done)
 
     def _embed_done(self, summary: dict) -> None:
         message = embeddings.format_summary(summary)

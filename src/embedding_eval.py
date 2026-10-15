@@ -22,6 +22,7 @@ HTTP client (see test_engine_never_references_zendesk_endpoints).
 import argparse
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -98,6 +99,9 @@ class Candidate:
     key_env: Optional[str]
     make: Callable[[], Embedder]
     sends_text: bool
+    # Part of the cache key: another service can return different vectors
+    # for the same model name.
+    endpoint: Optional[str] = None
 
 
 def candidates(voyage_model: str, openai_model: str) -> Dict[str, Candidate]:
@@ -106,9 +110,10 @@ def candidates(voyage_model: str, openai_model: str) -> Dict[str, Candidate]:
         "voyage": Candidate(f"Voyage {voyage_model}", "voyage",
                             f"{voyage_model}@{os.environ.get('EMBEDDING_DIMENSIONS') or embeddings.DEFAULT_DIMENSIONS}",
                             "EMBEDDING_API_KEY",
-                            lambda: voyage_embedder(voyage_model), True),
+                            lambda: voyage_embedder(voyage_model), True,
+                            (os.environ.get("EMBEDDING_API_URL") or embeddings.DEFAULT_URL).strip()),
         "openai": Candidate(f"OpenAI {openai_model}", "openai", openai_model, "OPENAI_API_KEY",
-                            lambda: openai_embedder(openai_model), True),
+                            lambda: openai_embedder(openai_model), True, OPENAI_URL),
     }
 
 
@@ -118,11 +123,16 @@ def cached_embed(candidate: Candidate, view: str, texts: List[str], cache_dir: p
     Returns:
         (vectors, tokens billed this call, whether it came from the cache).
     """
-    digest = hashlib.sha256(json.dumps([candidate.provider, candidate.model, texts]).encode("utf-8")).hexdigest()[:16]
+    key = [candidate.provider, candidate.endpoint, candidate.model, texts]
+    digest = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()[:16]
     path = cache_dir / f"{candidate.provider}-{candidate.model.replace('/', '_')}-{view}-{digest}.npy"
     if path.exists():
         return np.load(path), 0, True
-    vectors, tokens = candidate.make()(texts)
+    try:
+        embedder = candidate.make()
+    except (ImportError, OSError) as e:
+        raise RuntimeError(f"unavailable ({e})") from None
+    vectors, tokens = embedder(texts)
     if vectors.shape[0] != len(texts):
         raise RuntimeError(f"{candidate.name} returned {vectors.shape[0]} vectors for {len(texts)} texts")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -223,6 +233,13 @@ def _confirm(names: List[str], count: int) -> bool:
     return input("Continue? [y/N] ").strip().lower() in ("y", "yes")
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {number}")
+    return number
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m embedding_eval",
                                      description="Compare embedding models on a labelled evaluation set.")
@@ -231,7 +248,7 @@ def _parser() -> argparse.ArgumentParser:
                         default=["spacy", "voyage", "openai"])
     parser.add_argument("--text", nargs="+", choices=list(TEXT_VIEWS), default=["opening"],
                         help="opening: subject + first requester comment; full: all public comments")
-    parser.add_argument("-k", type=int, default=DEFAULT_K, help=f"neighbours per ticket (default {DEFAULT_K})")
+    parser.add_argument("-k", type=_positive_int, default=DEFAULT_K, help=f"neighbours per ticket (default {DEFAULT_K})")
     parser.add_argument("--voyage-model", default=None, help="default: EMBEDDING_MODEL, else voyage-3.5")
     parser.add_argument("--openai-model", default="text-embedding-3-small")
     parser.add_argument("--cache", default="embedding_cache", help="folder for cached embeddings")
@@ -247,15 +264,19 @@ def main(argv: List[str]) -> int:
 
     settings.load()  # .env and the app's saved Settings (EMBEDDING_API_KEY etc.)
     voyage_model = args.voyage_model or os.environ.get("EMBEDDING_MODEL") or embeddings.DEFAULT_MODEL
-    cases = [case for case in load_eval_set(args.eval_set)
-             if any(TEXT_VIEWS[view](case["ticket"]) for view in args.text)]
-    labels = [case["expected"] for case in cases]
-    if len(cases) <= args.k:
-        print(f"error: need more than k={args.k} tickets with text, found {len(cases)}", file=sys.stderr)
-        return 2
-    lonely = [c for c, n in Counter(labels).items() if n == 1]
-    if lonely:
-        print(f"note: only one ticket labelled {', '.join(lonely)}; it can never have a same-label neighbour.")
+    all_cases = load_eval_set(args.eval_set)
+    # Each view is scored on the tickets that have text in that view; an empty
+    # view would embed as a meaningless vector and skew the scores.
+    by_view = {view: [case for case in all_cases if TEXT_VIEWS[view](case["ticket"])] for view in args.text}
+    for view, cases in by_view.items():
+        if len(cases) <= args.k:
+            print(f"error: the {view} view needs more than k={args.k} tickets with text, found {len(cases)}",
+                  file=sys.stderr)
+            return 2
+        lonely = [c for c, n in Counter(case["expected"] for case in cases).items() if n == 1]
+        if lonely:
+            print(f"note ({view}): only one ticket labelled {', '.join(lonely)}; "
+                  "it can never have a same-label neighbour.")
 
     chosen = []
     for key in args.providers:
@@ -263,14 +284,19 @@ def main(argv: List[str]) -> int:
         if candidate.key_env and not os.environ.get(candidate.key_env):
             print(f"skipping {candidate.name}: {candidate.key_env} is not set")
             continue
+        if key == "spacy" and importlib.util.find_spec("en_core_web_lg") is None:
+            print(f"skipping {candidate.name}: the en_core_web_lg model isn't installed")
+            continue
         chosen.append(candidate)
     paid = [c.name for c in chosen if c.sends_text]
-    if paid and not args.yes and not _confirm(paid, len(cases)):
+    sent = len({id(case) for cases in by_view.values() for case in cases})
+    if paid and not args.yes and not _confirm(paid, sent):
         return 1
 
     cache_dir = pathlib.Path(args.cache)
-    for view in args.text:
-        texts = [TEXT_VIEWS[view](case["ticket"]) or " " for case in cases]
+    for view, cases in by_view.items():
+        labels = [case["expected"] for case in cases]
+        texts = [TEXT_VIEWS[view](case["ticket"]) for case in cases]
         results = []
         for candidate in chosen:
             try:

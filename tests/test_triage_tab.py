@@ -563,7 +563,7 @@ def test_embed_tickets_asks_then_embeds_and_reports(qapp, configured, monkeypatc
         raise search.SearchUnavailable("no Atlas Search here")
 
     monkeypatch.setattr(triage_tab.embeddings, "embed", fake_embed)
-    monkeypatch.setattr(triage_tab.search, "ensure_vector_index", no_search)
+    monkeypatch.setattr(search, "check_vector_index", no_search)
     tab = make_tab(stored)
     tab.start_embed_tickets()
     wait_until_idle(qapp, tab)
@@ -571,9 +571,29 @@ def test_embed_tickets_asks_then_embeds_and_reports(qapp, configured, monkeypatc
     kinds = [kind for kind, _ in dialogs]
     assert kinds == ["question", "information"]
     assert "3 ticket(s) need embeddings" in dialogs[0][1]
-    assert "Embedded: 3" in dialogs[1][1] and "not created: no Atlas Search here" in dialogs[1][1]
+    assert "Embedded: 3" in dialogs[1][1] and "skipped: this MongoDB deployment has no Atlas Search" in dialogs[1][1]
     assert len(sent) == 3
     assert stored.count_documents({"embedding_meta.model": "voyage-3.5"}) == 3
+
+
+def test_index_mismatch_stops_before_any_paid_call(qapp, configured, monkeypatch, dialogs, stored):
+    from decision_engine import search
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+
+    def mismatch(*args):
+        raise search.VectorIndexMismatch("tickets_vector indexes 512-dimension vectors")
+
+    called = []
+    monkeypatch.setattr(search, "check_vector_index", mismatch)
+    monkeypatch.setattr(triage_tab.embeddings, "embed", lambda *a, **k: called.append(1))
+    tab = make_tab(stored)
+    tab.start_embed_tickets()
+    wait_until_idle(qapp, tab)
+    assert called == []
+    assert not any(kind == "question" for kind, _ in dialogs)
+    assert any("512-dimension" in text for _, text in dialogs)
+    assert stored.count_documents({"embedding": {"$exists": True}}) == 0
 
 
 def test_embed_tickets_needs_a_key(qapp, configured, monkeypatch, dialogs, stored):
@@ -585,10 +605,13 @@ def test_embed_tickets_needs_a_key(qapp, configured, monkeypatch, dialogs, store
 
 
 def test_embed_tickets_cancel_sends_nothing(qapp, configured, monkeypatch, dialogs, stored):
+    from decision_engine import search
+
     monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(search, "check_vector_index", lambda *a: "missing")
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel)
     called = []
-    monkeypatch.setattr(triage_tab.embeddings, "embed_tickets", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(triage_tab.embeddings, "run_backfill", lambda *a, **k: called.append(1))
     tab = make_tab(stored)
     tab.start_embed_tickets()
     wait_until_idle(qapp, tab)

@@ -127,6 +127,51 @@ def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: floa
     return created
 
 
+def _vector_index_problems(index: dict, dimensions: int) -> List[str]:
+    """How an existing tickets_vector differs from vector_index_definition(dimensions)."""
+    problems = []
+    if index.get("type") not in (None, "vectorSearch"):
+        problems.append(f"it is a {index.get('type')!r} index, not vectorSearch")
+    definition = index.get("latestDefinition") or index.get("definition") or {}
+    actual = definition.get("fields") or []
+    for expected in vector_index_definition(dimensions)["fields"]:
+        match = next((f for f in actual if f.get("path") == expected["path"] and f.get("type") == expected["type"]), None)
+        if match is None:
+            problems.append(f"no {expected['type']} field on {expected['path']!r}")
+            continue
+        for key, value in expected.items():
+            if match.get(key) != value:
+                problems.append(f"{expected['path']}.{key} is {match.get(key)!r}, expected {value!r}")
+    expected_keys = {(f["type"], f["path"]) for f in vector_index_definition(dimensions)["fields"]}
+    for extra in actual:
+        if (extra.get("type"), extra.get("path")) not in expected_keys:
+            problems.append(f"unexpected {extra.get('type')} field on {extra.get('path')!r}")
+    return problems
+
+
+def check_vector_index(tickets: Collection, dimensions: int) -> str:
+    """Checks tickets_vector without changing anything.
+
+    Returns:
+        "ok" if it exists and matches, "missing" if it doesn't exist.
+
+    Raises:
+        VectorIndexMismatch: it exists with any other definition (type, path,
+            dimensions, similarity or filters).
+        SearchUnavailable: on a deployment without Atlas Search.
+    """
+    existing = _search_indexes(tickets).get(VECTOR_INDEX)
+    if not existing:
+        return "missing"
+    problems = _vector_index_problems(existing, dimensions)
+    if problems:
+        raise VectorIndexMismatch(
+            f"{VECTOR_INDEX} doesn't match these settings ({'; '.join(problems)}). "
+            f"Drop {VECTOR_INDEX} in Atlas, then embed again; it is recreated once every ticket is embedded."
+        )
+    return "ok"
+
+
 def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False, timeout: float = 300.0) -> bool:
     """Creates the vector index if it doesn't exist yet. Safe to call repeatedly.
 
@@ -134,21 +179,12 @@ def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False
         True if this call created it.
 
     Raises:
-        VectorIndexMismatch: it exists with a different numDimensions (after
-            changing EMBEDDING_DIMENSIONS). Drop it in Atlas and call again.
+        VectorIndexMismatch: it exists with a different definition (see
+            check_vector_index). Drop it in Atlas and call again.
         SearchUnavailable: on a deployment without Atlas Search.
     """
-    existing = _search_indexes(tickets).get(VECTOR_INDEX)
     created = False
-    if existing:
-        definition = existing.get("latestDefinition") or existing.get("definition") or {}
-        current = next((f.get("numDimensions") for f in definition.get("fields", []) if f.get("type") == "vector"), None)
-        if current is not None and current != dimensions:
-            raise VectorIndexMismatch(
-                f"{VECTOR_INDEX} indexes {current}-dimension vectors but EMBEDDING_DIMENSIONS is {dimensions}. "
-                f"Drop {VECTOR_INDEX} in Atlas, then embed and create it again."
-            )
-    else:
+    if check_vector_index(tickets, dimensions) == "missing":
         try:
             tickets.create_search_index(
                 SearchIndexModel(name=VECTOR_INDEX, type="vectorSearch", definition=vector_index_definition(dimensions))

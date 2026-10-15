@@ -208,15 +208,27 @@ Embeddings (Voyage AI); the endpoint, model (`voyage-3.5`) and dimensions
 (1024) have defaults.
 
 - It embeds each ticket's subject and first requester comment (internal
-  notes never) and asks before sending them; these are paid calls.
-- Each ticket gets `embedding` and `embedding_meta` (model, dimensions, a hash
-  of the embedded text, time). Re-running only embeds tickets whose text,
-  model or dimensions changed, so it is cheap to run after each Write Tickets
-  to MongoDB.
+  notes never; the subject alone if no comment is marked as the requester's).
+  It lists the tickets first and asks; only those approved are sent. These
+  are paid calls.
+- Each ticket gets `embedding` and `embedding_meta` (endpoint, model,
+  dimensions, a hash of the embedded text, time). Re-running only embeds
+  tickets whose text or any of those settings changed, so it is cheap to run
+  after each Write Tickets to MongoDB. A ticket whose text is now empty loses
+  its embedding.
 - Work is saved batch by batch: closing the app or an API error keeps what
-  was already embedded.
-- Changing the dimensions re-embeds every ticket, and the index must be
-  dropped in Atlas first (the app says so rather than mixing sizes).
+  was already embedded. A ticket edited while it was being embedded isn't
+  overwritten with the old text's vector; the next run picks it up.
+- Only one backfill runs at a time (a lock in the `embedding_jobs`
+  collection, which expires after 15 minutes if its holder crashed).
+- The vector index is checked **before** any paid call. If it exists with a
+  different definition (dimensions, path, similarity, filters), nothing is
+  sent: drop it in Atlas first. It is created only once every approved ticket
+  is embedded, never after a cancelled or partial run.
+- Requests are never redirected (that would resend the key and ticket text).
+  Only failures where nothing was processed are retried (429, 502–504,
+  connection refused); timeouts aren't, since Voyage may already have billed
+  them. A batch Voyage rejects as too many tokens is split and retried.
 - Without Atlas Search (a plain `mongod`), embeddings are still stored; only
   the index is skipped.
 - Nothing queries the vectors yet.
