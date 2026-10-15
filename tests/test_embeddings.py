@@ -117,7 +117,7 @@ def test_embed_splits_a_batch_over_the_token_limit(env):
     def fake_post(url, api_key, body):
         sizes.append(len(body["input"]))
         if len(body["input"]) > 2:
-            raise embeddings.ApiError("HTTP 400", 400, "Request to model exceeds max allowed tokens per batch")
+            raise embeddings.ApiError("HTTP 400", 400, token_limit=True)
         return _reply(body["input"])
 
     env.setattr(embeddings, "post_json", fake_post)
@@ -131,7 +131,7 @@ def test_other_client_errors_are_not_split(env):
 
     def fake_post(url, api_key, body):
         calls.append(1)
-        raise embeddings.ApiError("HTTP 400", 400, "invalid model")
+        raise embeddings.ApiError("HTTP 400", 400)
 
     env.setattr(embeddings, "post_json", fake_post)
     with pytest.raises(embeddings.ApiError):
@@ -426,3 +426,33 @@ def test_index_created_only_after_a_complete_backfill(env, summary, status, expe
     embeddings.finish_index(tickets, embeddings.config(), summary, status)
     assert expected in summary["index"]
     assert bool(tickets.created) == (expected == "tickets_vector created")
+
+
+@pytest.mark.parametrize("code", [400, 422, 500])
+def test_error_bodies_echoing_ticket_text_are_never_exposed(monkeypatch, code):
+    """An API or proxy may echo the rejected input; it must not reach messages or logs."""
+    secret = "Student Jane Doe, DOB 2012-04-01, can't see her test"
+    echo = f'{{"detail": "Invalid input: {secret}"}}'.encode()
+    _attempts(monkeypatch, [_http_error(code, echo)])
+    logged = []
+    handler = embeddings.logger.add(lambda m: logged.append(str(m)), level="DEBUG")
+    try:
+        with pytest.raises(embeddings.ApiError) as raised:
+            embeddings.post_json("https://x", "k", {"input": [secret]})
+    finally:
+        embeddings.logger.remove(handler)
+    error = raised.value
+    assert f"HTTP {code}" in str(error)
+    assert secret not in str(error) and "Jane" not in str(error)
+    assert all(secret not in str(value) for value in vars(error).values())
+    assert all(secret not in line for line in logged)
+
+
+def test_token_limit_is_recognised_without_keeping_the_body(monkeypatch):
+    body = b'{"detail": "Request exceeds max allowed tokens per batch: <ticket text here>"}'
+    _attempts(monkeypatch, [_http_error(400, body)])
+    with pytest.raises(embeddings.ApiError) as raised:
+        embeddings.post_json("https://x", "k", {"input": ["x"]})
+    assert raised.value.token_limit is True
+    assert "ticket text" not in str(raised.value)
+    assert "too many tokens" in str(raised.value)

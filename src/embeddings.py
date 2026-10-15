@@ -69,12 +69,19 @@ class EmbeddingNotConfigured(RuntimeError):
 
 
 class ApiError(RuntimeError):
-    """The embedding API refused a request (or redirected it)."""
+    """The embedding API refused a request (or redirected it).
 
-    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+    Carries the HTTP status but never the response body: an API or proxy can
+    echo the rejected input, which is ticket text, and this message reaches
+    the CLI, the app's log and its error dialog.
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None, token_limit: bool = False):
         super().__init__(message)
         self.status = status
-        self.detail = detail
+        # True for a 400 whose body said the batch had too many tokens: the
+        # one thing read from a body, so the batch can be split and retried.
+        self.token_limit = token_limit
 
 
 class BackfillRunning(RuntimeError):
@@ -177,6 +184,24 @@ def _not_sent(error: urllib.error.URLError) -> bool:
     return isinstance(reason, (ConnectionRefusedError, socket.gaierror))
 
 
+def _mentions_token_limit(error: urllib.error.HTTPError) -> bool:
+    """Whether a 400's body says the batch had too many tokens. The body is discarded."""
+    try:
+        body = error.read(4096).decode("utf-8", "replace").lower()
+    except OSError:
+        return False
+    return "token" in body
+
+
+def _status_text(code: int) -> str:
+    from http import HTTPStatus
+
+    try:
+        return HTTPStatus(code).phrase
+    except ValueError:
+        return ""
+
+
 def post_json(url: str, api_key: str, body: dict) -> dict:
     """POSTs JSON. Retries only failures where nothing was processed or billed.
 
@@ -186,8 +211,8 @@ def post_json(url: str, api_key: str, body: dict) -> dict:
     are refused.
 
     Raises:
-        ApiError: with the status and the server's message. Messages never
-            include the request body (it holds ticket text).
+        ApiError: with the HTTP status only. Neither the request nor the
+            response body is included: either can hold ticket text.
     """
     request = urllib.request.Request(
         url,
@@ -203,9 +228,10 @@ def post_json(url: str, api_key: str, body: dict) -> dict:
             if 300 <= e.code < 400:
                 raise ApiError(f"{url} redirected to {e.headers.get('Location')!r} (HTTP {e.code}); not following, "
                                "since that would resend the API key and ticket text.", e.code) from None
-            detail = e.read().decode("utf-8", "replace")[:300]
             if e.code not in RETRYABLE_STATUSES or attempt == MAX_ATTEMPTS:
-                raise ApiError(f"{url}: HTTP {e.code}: {detail}", e.code, detail) from None
+                token_limit = e.code == 400 and _mentions_token_limit(e)
+                reason = " (too many tokens in the batch)" if token_limit else ""
+                raise ApiError(f"{url}: HTTP {e.code} {_status_text(e.code)}{reason}", e.code, token_limit) from None
         except urllib.error.URLError as e:
             if not _not_sent(e) or attempt == MAX_ATTEMPTS:
                 raise ApiError(f"{url}: {e.reason}") from None
@@ -229,7 +255,7 @@ def _batches(texts: List[str]) -> List[Tuple[int, int]]:
 
 
 def _too_many_tokens(error: ApiError) -> bool:
-    return error.status == 400 and "token" in error.detail.lower()
+    return error.status == 400 and error.token_limit
 
 
 def _embed_request(texts: List[str], cfg: Config, input_type: str) -> Tuple[List[list], int]:
