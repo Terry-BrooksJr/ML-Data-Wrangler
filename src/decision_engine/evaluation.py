@@ -23,7 +23,7 @@ from .payload import build_ticket_payload
 ERROR_LABEL = "engine_error"
 # Fields that identify a customer or aren't part of the model's input.
 _DROPPED_FIELDS = ("_id", "raw_xml", "requester_id", "organization_id", "cc_list", "customer_id",
-                   "agent_reviews", "outcomes", "review_claim", "last_engine_error", "embedding")
+                   "agent_reviews", "outcomes", "review_claim", "last_engine_error", "embedding", "embedding_meta")
 
 
 def load_eval_set(path: str) -> List[dict]:

@@ -78,6 +78,16 @@ SETTINGS: List[Setting] = [
     Setting("MODEL_STORAGE_REGION", "Region", "Model storage (S3 / Backblaze B2)",
             help="Optional. Worked out from a Backblaze endpoint; for AWS, the bucket's region (e.g. us-east-1)."),
     Setting("MODEL_PREFIX", "Folder in bucket", "Model storage (S3 / Backblaze B2)", default="topic-models/"),
+    Setting("EMBEDDING_API_KEY", "Voyage API key", "Embeddings (Voyage AI)", secret=True,
+            help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below."),
+  
+    Setting("EMBEDDING_API_URL", "Endpoint", "Embeddings (Voyage AI)",
+            default="https://api.voyageai.com/v1/embeddings",
+            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
+    Setting("EMBEDDING_MODEL", "Model", "Embeddings (Voyage AI)", default="voyage-3.5"),
+    Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
+            help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
+                 "tickets_vector index dropped and recreated."),
     Setting("TOPIC_MODEL_DIR", "Topic model folder", "Storage", default="topic_models",
             help="Where saved topic-model runs go. Relative paths are under the working folder."),
     Setting("TOPIC_RUNS_COLLECTION", "Topic runs collection", "Storage", default="topic_model_runs", restart=True),
