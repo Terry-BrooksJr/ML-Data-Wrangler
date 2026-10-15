@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -203,26 +204,42 @@ def has_local_files(run: dict, base_dir: Optional[pathlib.Path] = None) -> bool:
         return False
 
 
+def _recorded_path(path: str) -> pathlib.PurePath:
+    """A path recorded on whichever computer trained the run, parsed for that platform.
+
+    A Windows path ("C:\\Users\\...\\charts\\lda_model.html") read on macOS
+    or Linux would otherwise be one long file name.
+    """
+    if re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("\\\\") or ("\\" in path and "/" not in path):
+        return pathlib.PureWindowsPath(path)
+    return pathlib.PurePosixPath(path)
+
+
 def _relocate(run: dict, new_dir: pathlib.Path) -> None:
-    """Points the run's model_dir and chart paths at new_dir."""
-    old_dir = pathlib.Path(run.get("model_dir") or "")
+    """Points the run's model_dir and chart paths at new_dir.
+
+    Recorded paths may come from another computer (and platform), so each
+    chart keeps only its part inside the run's folder, e.g. charts/x.html.
+    """
+    old_dir = _recorded_path(str(run.get("model_dir") or ""))
     charts = dict(run.get("charts") or {})
     for name, path in charts.items():
         if path:
-            path = pathlib.Path(path)
+            recorded = _recorded_path(str(path))
+            old = type(recorded)(str(old_dir)) if old_dir.parts else None
             try:
-                relative = path.relative_to(old_dir)
+                relative_parts = recorded.relative_to(old).parts if old else None
             except ValueError:
-                # Recorded elsewhere: keep what follows the run's own folder
-                # (e.g. charts/lda_model.html), else just the file name.
-                parts = path.parts
+                relative_parts = None
+            if relative_parts is None:
+                # Recorded under another layout: keep what follows the run's
+                # own folder, else just the file name.
+                parts = recorded.parts
                 after = max((i for i, part in enumerate(parts) if part == run["run_id"]), default=None)
-                relative = pathlib.Path(*parts[after + 1:]) if after is not None and after + 1 < len(parts) \
-                    else pathlib.Path(path.name)
-            charts[name] = str(new_dir / relative)
+                relative_parts = parts[after + 1:] if after is not None and after + 1 < len(parts) else (recorded.name,)
+            local = new_dir.joinpath(*relative_parts)
             # A recorded chart path can't point outside the run's folder either.
-            if new_dir.resolve() not in pathlib.Path(charts[name]).resolve().parents:
-                charts[name] = None
+            charts[name] = str(local) if new_dir.resolve() in local.resolve().parents else None
     run["charts"] = charts
     run["model_dir"] = str(new_dir)
 

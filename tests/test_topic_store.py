@@ -369,3 +369,36 @@ def test_cached_model_without_dictionary_is_not_usable(trained, tmp_path):
     assert not topic_store.has_local_files(run, base_dir=tmp_path)
     with pytest.raises(FileNotFoundError, match="never uploaded"):
         topic_store.ensure_local(dict(run), base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("model_dir, charts, expected", [
+    # Trained on Windows, opened here.
+    (r"C:\Users\a\topic_models\r1",
+     {"lda_html": r"C:\Users\a\topic_models\r1\charts\lda_model.html", "coherence_png": r"C:\Users\a\topic_models\r1\coherence.png"},
+     {"lda_html": ("charts", "lda_model.html"), "coherence_png": ("coherence.png",)}),
+    # UNC share.
+    (r"\\server\share\models\r1",
+     {"lda_html": r"\\server\share\models\r1\charts\lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+    # Windows, with model_dir recorded differently from the charts: falls back to what follows the run ID.
+    (r"D:\moved\r1-copy",
+     {"lda_html": r"C:\Users\a\topic_models\r1\charts\lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+    # macOS/Linux paths still work.
+    ("/Users/a/topic_models/r1",
+     {"lda_html": "/Users/a/topic_models/r1/charts/lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+])
+def test_recorded_paths_from_any_platform_relocate(tmp_path, model_dir, charts, expected):
+    run = {"run_id": "r1", "model_dir": model_dir, "charts": dict(charts)}
+    topic_store._relocate(run, tmp_path / "r1")
+    for name, parts in expected.items():
+        assert run["charts"][name] == str((tmp_path / "r1").joinpath(*parts))
+    assert run["model_dir"] == str(tmp_path / "r1")
+
+
+@pytest.mark.parametrize("chart", [r"C:\x\r1\..\..\evil.html", "/x/r1/../../evil.html"])
+def test_relocated_charts_cannot_climb_out(tmp_path, chart):
+    run = {"run_id": "r1", "model_dir": "/nowhere", "charts": {"lda_html": chart}}
+    topic_store._relocate(run, tmp_path / "r1")
+    assert run["charts"]["lda_html"] is None
