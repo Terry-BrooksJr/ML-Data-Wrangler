@@ -63,6 +63,15 @@ SETTINGS: List[Setting] = [
             help="Re-checks manual-triage and low-confidence results. Leave blank to skip."),
     Setting("DECISION_ENGINE_MODEL", "Default model", "Decision Engine", default="claude-opus-4.8",
             help="Used when no primary model is set.", restart=True),
+    Setting("EMBEDDING_API_KEY", "Voyage API key", "Embeddings (Voyage AI)", secret=True,
+            help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below."),
+    Setting("EMBEDDING_API_URL", "Endpoint", "Embeddings (Voyage AI)",
+            default="https://api.voyageai.com/v1/embeddings",
+            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
+    Setting("EMBEDDING_MODEL", "Model", "Embeddings (Voyage AI)", default="voyage-3.5"),
+    Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
+            help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
+                 "tickets_vector index dropped and recreated."),
     Setting("B2_KEY_ID", "Key ID", "Backblaze B2", required=True),
     Setting("B2_APPLICATION_KEY", "Application key", "Backblaze B2", secret=True, required=True),
     Setting("B2_ENDPOINT_URL", "Endpoint URL", "Backblaze B2", required=True),
@@ -148,6 +157,20 @@ def workspace_dir() -> pathlib.Path:
     return pathlib.Path.home() / "Documents" / APP_NAME
 
 
+# Restart-required values as this process read them at startup (see
+# Setting.restart). save() compares against these, not os.environ, which
+# save() itself updates: otherwise a second save before restarting would
+# report nothing pending while the import-time constants still hold old values.
+_active_at_start: Optional[Dict[str, str]] = None
+
+
+def _snapshot_restart_values() -> Dict[str, str]:
+    global _active_at_start
+    if _active_at_start is None:
+        _active_at_start = {s.name: os.environ.get(s.name, "") for s in SETTINGS if s.restart}
+    return _active_at_start
+
+
 def load() -> None:
     """Loads settings into os.environ, before modules that read them at import.
 
@@ -159,7 +182,7 @@ def load() -> None:
     An unreadable settings file is set aside and reported in load_error
     rather than stopping the app, so the user can re-enter settings.
     """
-    global load_error
+    global load_error, _active_at_start
     load_error = None
     if not is_frozen():
         load_dotenv(override=True)
@@ -167,12 +190,14 @@ def load() -> None:
         values = stored()
     except (OSError, ValueError) as e:
         load_error = _set_aside(settings_path(), e)
-        return
+        values = {}
     for name, value in values.items():
         if value is None:
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+    _active_at_start = None
+    _snapshot_restart_values()
 
 
 def use_workspace() -> pathlib.Path:
@@ -278,8 +303,11 @@ def save(values: Dict[str, str]) -> List[str]:
         values: Setting name to value, as entered in the dialog.
 
     Returns:
-        Names of changed settings that only take effect after a restart.
+        Restart-required settings whose saved value differs from the one this
+        process started with, including ones changed by an earlier save, so
+        the reminder stays until the app restarts.
     """
+    active = _snapshot_restart_values()
     try:
         previous = stored()
     except (OSError, ValueError):
@@ -288,7 +316,7 @@ def save(values: Dict[str, str]) -> List[str]:
     restart_needed = []
     for setting in SETTINGS:
         value = values.get(setting.name, "").strip()
-        if setting.restart and value != os.environ.get(setting.name, ""):
+        if setting.restart and value != active[setting.name]:
             restart_needed.append(setting.name)
         if value:
             saved[setting.name] = value

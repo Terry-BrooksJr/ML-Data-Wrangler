@@ -199,6 +199,73 @@ run_review_batch()               # every ticket with awaiting_review: true
 process_one_ticket("30882")      # a single ticket
 ```
 
+### Ticket embeddings (Voyage AI)
+
+**Embed Tickets (Voyage AI)…** on the Decision Engine tab stores a Voyage
+embedding on each ticket, then creates the Atlas vector index
+`tickets_vector` (cosine, filterable by `status`). Set the key under Settings >
+Embeddings (Voyage AI); the endpoint, model (`voyage-3.5`) and dimensions
+(1024) have defaults.
+
+- It embeds each ticket's subject and first requester comment (internal
+  notes never; the subject alone if no comment is marked as the requester's).
+  It lists the tickets first and asks; only those approved are sent. These
+  are paid calls.
+- Each ticket gets `embedding` and `embedding_meta` (endpoint, model,
+  dimensions, a hash of the embedded text, time). Re-running only embeds
+  tickets whose text or any of those settings changed, so it is cheap to run
+  after each Write Tickets to MongoDB. A ticket whose text is now empty loses
+  its embedding.
+- Work is saved batch by batch: closing the app or an API error keeps what
+  was already embedded. A ticket edited while it was being embedded isn't
+  overwritten with the old text's vector; the next run picks it up.
+- Only one backfill runs at a time (a lock in the `embedding_jobs`
+  collection, which expires after 15 minutes if its holder crashed).
+- The vector index is checked **before** any paid call. If it exists with a
+  different definition (dimensions, path, similarity, filters), nothing is
+  sent: drop it in Atlas first. It is created only once every approved ticket
+  is embedded, never after a cancelled or partial run.
+- Requests are never redirected (that would resend the key and ticket text).
+  Only failures where nothing was processed are retried (429, 502–504,
+  connection refused); timeouts aren't, since Voyage may already have billed
+  them. A batch Voyage rejects as too many tokens is split and retried.
+- Without Atlas Search (a plain `mongod`), embeddings are still stored; only
+  the index is skipped.
+- Nothing queries the vectors yet.
+
+From the command line:
+
+```bash
+cd src && python -m embeddings check      # one tiny call to test the key; no ticket text
+cd src && python -m embeddings backfill   # same as the button
+```
+
+### Comparing embedding models
+
+`src/embedding_eval.py` compares Voyage with other models on labelled tickets. It embeds every ticket in a labelled evaluation set
+(the same file `decision_engine.evaluation` uses) with each model and checks
+how often a ticket's nearest neighbours share its classification.
+
+```bash
+cd src && python -m embedding_eval ../eval_sets/backlog_sample.json --text opening full --show-neighbours 5
+```
+
+- Models: spaCy `en_core_web_lg` (free, local), Voyage (the app's embedding
+  Settings; `--voyage-model` tries another model) and OpenAI
+  `text-embedding-3-small` (`--openai-model`). Voyage needs
+  `EMBEDDING_API_KEY` and OpenAI `OPENAI_API_KEY`; each is skipped without its
+  key. They are paid calls that
+  send ticket text to that vendor, so the script asks first (`--yes` skips
+  the question).
+- `--text opening` embeds the subject and first requester comment; `full`
+  embeds every public comment (internal notes are never sent).
+- Columns: **top-1** (nearest neighbour has the same label), **P@k** (share of
+  the k neighbours with the same label) and **kNN@k** (the neighbours' majority
+  label is right), with a random-neighbours baseline and P@k per category.
+- Embeddings are cached in `embedding_cache/` (gitignored), so re-runs are free.
+- Use a few hundred labelled tickets with several per category; a category with
+  one ticket can never score.
+
 ### Tests
 
 ```bash
