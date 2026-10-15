@@ -35,6 +35,7 @@ import settings
 settings.load()
 settings.use_workspace()
 
+import chart_viewer
 import model_storage
 import topic_store
 from decision_engine.persistence import get_database, reset_clients
@@ -372,6 +373,11 @@ class MainWindow(QMainWindow, QDialog):
         if self.run_thread is not None:
             QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
             return
+        if self._training_running():
+            # The progress dialog closes at 100%, before charts are saved and the
+            # model uploaded; a second job would replace the running thread.
+            QMessageBox.information(self, "Busy", "Training is still saving the last model. Wait for it to finish.")
+            return
 
         self.train_model_button.setEnabled(False)
         iterations, passes, number_of_topics = int(iterations), int(passes), int(number_of_topics)
@@ -385,6 +391,18 @@ class MainWindow(QMainWindow, QDialog):
             "Looking for a matching saved run",
             lambda match: self._train_or_reuse(match, iterations, passes, number_of_topics),
             on_error=lambda message: self._train_or_reuse(None, iterations, passes, number_of_topics),
+        )
+
+    def _training_running(self) -> bool:
+        """True while the training thread (training, saving charts, uploading) is alive."""
+        # self.thread shadows QObject.thread() only once training has started.
+        thread = getattr(self, "thread", None)
+        return isinstance(thread, QThread) and thread.isRunning()
+
+    def _refresh_train_button(self) -> None:
+        """Enables Train Model only with processed data and no training thread running."""
+        self.train_model_button.setEnabled(
+            self.allocator is not None and self.allocator.prelemma_corpus is not None and not self._training_running()
         )
 
     def _known_runs(self) -> List[dict]:
@@ -416,16 +434,16 @@ class MainWindow(QMainWindow, QDialog):
         box.setDefaultButton(use)
         box.exec_()
         if box.clickedButton() is use:
-            self._open_saved_run(match, on_failed=lambda: self.train_model_button.setEnabled(True))
+            self._open_saved_run(match, on_failed=self._refresh_train_button)
         elif box.clickedButton() is retrain:
             self._start_training(iterations, passes, number_of_topics)
         else:
-            self.train_model_button.setEnabled(True)
+            self._refresh_train_button()
 
     def _open_saved_run(self, run: dict, on_failed=None) -> None:
         """Shows a saved run, downloading its files from S3 first if they aren't here."""
         def shown(local_run):
-            self.train_model_button.setEnabled(self.allocator is not None and self.allocator.prelemma_corpus is not None)
+            self._refresh_train_button()
             try:
                 self.present_results(local_run)
             except Exception as e:
@@ -1064,6 +1082,7 @@ app.setApplicationName("Lasso")
 app.setWindowIcon(QIcon(str(ICON_PATH)))
 window = MainWindow("Lasso — Support Ticket Triage")
 app.aboutToQuit.connect(window.join_threads_on_quit)
+app.aboutToQuit.connect(chart_viewer.shutdown)
 
 if __name__ == "__main__":
     window.show()

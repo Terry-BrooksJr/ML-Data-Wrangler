@@ -104,6 +104,10 @@ coherence. When it finishes, it:
 - writes `lda_model.html` (an interactive pyLDAvis chart) and `coherence.png`;
 - opens a results window with that model's topics, ranked by share of tickets, and the coherence-by-topic-count plot;
 - opens `lda_model.html` in the browser. The results window can reopen it.
+  Charts are never opened as `file://` pages: the app serves each one from
+  `127.0.0.1` at a one-off URL in a browser sandbox (no access to local files,
+  cookies or the network beyond the chart's own d3/LDAvis scripts), since a
+  chart from a downloaded run is HTML with script.
 
 **Before training**, Train Model looks for a saved run (in MongoDB and this
 computer's `topic_models/`) trained on the same tickets, with the same
