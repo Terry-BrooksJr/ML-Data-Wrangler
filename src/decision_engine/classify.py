@@ -4,11 +4,13 @@ Reads mapped ticket documents from Mongo, asks an LLM (via Cheaper Inference)
 for one of five triage classifications, and appends the result to
 tickets.agent_reviews. Never writes to Zendesk; write-back is Module 3.
 """
+import ipaddress
 import json
 import os
 import time
 from functools import lru_cache
 from typing import Optional
+from urllib.parse import urlsplit
 
 import anthropic
 from loguru import logger
@@ -60,6 +62,56 @@ def confirmation_model() -> Optional[str]:
     return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
 
 
+class InsecureApiUrl(ValueError):
+    """CHEAPER_INFERENCE_API_URL would send the API key and tickets unencrypted."""
+
+
+def is_loopback_url(url: str) -> bool:
+    """True if url's host is this machine (localhost, 127.0.0.0/8 or ::1)."""
+    host = urlsplit(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def api_url_problem(url: str) -> Optional[str]:
+    """Why url can't be used as the API URL, or None if it can.
+
+    The API key and ticket text go to this URL, so it must be https://.
+    Plain http:// is allowed only to this machine (a local proxy, say);
+    check is_loopback_url() to warn about that case.
+    """
+    parts = urlsplit(url)
+    if parts.scheme == "https" and parts.hostname:
+        return None
+    if parts.scheme == "http" and is_loopback_url(url):
+        return None
+    if parts.scheme == "http":
+        return f"{url} is not encrypted: the API key and ticket text would be readable on the network. Use https://."
+    return f"{url} is not an https:// URL."
+
+
+def api_base_url() -> str:
+    """CHEAPER_INFERENCE_API_URL without a trailing /v1, which the SDK adds.
+
+    A base URL ending in /v1 would send requests to /v1/v1/messages, which
+    Cheaper Inference answers with a 404 HTML page.
+
+    Raises:
+        InsecureApiUrl: The URL isn't https:// and isn't on this machine.
+    """
+    url = (os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL).strip().rstrip("/")
+    problem = api_url_problem(url)
+    if problem:
+        raise InsecureApiUrl(f"CHEAPER_INFERENCE_API_URL: {problem}")
+    if urlsplit(url).scheme == "http":
+        logger.warning(f"CHEAPER_INFERENCE_API_URL {url} is plain http; allowed only because it is on this machine.")
+    return url[: -len("/v1")] if url.endswith("/v1") else url
+
+
 @lru_cache(maxsize=1)
 def get_client() -> anthropic.Anthropic:
     """Builds the client on first use so importing this module needs no secrets.
@@ -69,7 +121,7 @@ def get_client() -> anthropic.Anthropic:
     """
     return anthropic.Anthropic(
         api_key=os.environ["CHEAPER_INFERENCE_API_KEY"],
-        base_url=os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL,
+        base_url=api_base_url(),
         timeout=REQUEST_TIMEOUT_SECONDS,
         max_retries=MAX_RETRIES,
     )

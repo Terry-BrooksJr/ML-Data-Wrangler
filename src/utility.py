@@ -36,6 +36,7 @@ class QTextEditLogger:
             self._write_to_text_edit,
             format="{time:w} | {level} | {message}",
             level="INFO",
+            diagnose=False,
         )
 
     def _write_to_text_edit(self, message):
@@ -45,6 +46,9 @@ class QTextEditLogger:
             message: The log message to be appended to the QTextEdit.
         """
         self.text_edit_widget.append(message)
+
+
+MAX_ERROR_CHARS = 500  # longer error text is cut from the dialog, not the log
 
 
 class ThreadWorker(QObject):
@@ -74,7 +78,10 @@ class ThreadWorker(QObject):
             result = self.task()
         except Exception as e:
             logger.exception(f"{self.description} failed: {e}")
-            self.error.emit(f"Error: {self.description} failed: {e}")
+            detail = str(e)
+            if len(detail) > MAX_ERROR_CHARS:  # e.g. an HTML error page
+                detail = detail[:MAX_ERROR_CHARS] + "… (truncated; full text in the log)"
+            self.error.emit(f"Error: {self.description} failed: {detail}")
             return
         self.finished.emit(result)
 

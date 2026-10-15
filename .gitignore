@@ -173,3 +173,6 @@ tickets-only.json
 topic_models/
 # Hand-labelled evaluation sets hold real customer text
 eval_sets/
+
+# PyInstaller spec is hand-written, not generated
+!packaging/*.spec

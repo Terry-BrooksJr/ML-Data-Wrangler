@@ -7,7 +7,7 @@ from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
 from loguru import logger
 from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QIcon
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
     QApplication,
@@ -26,12 +26,20 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QDialog,
     QTabWidget,
+    QAction,
 )
+import settings
+
+# Before the local imports: topic_store and decision_engine read env vars at
+# import time. See settings.load() for which source wins.
+settings.load()
+settings.use_workspace()
 
 import topic_store
-from decision_engine.persistence import get_database
+from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
+from settings_dialog import SettingsDialog
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker
 from wrangler import DataWrangler
@@ -107,6 +115,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # GUI Elements
         self.init_ui_components()
+        self.init_menu()
         self.init_logging()
 
         # Set up the main widget and layout
@@ -131,11 +140,11 @@ class MainWindow(QMainWindow, QDialog):
         """
         # Instructions and warnings
         instruction_label = QLabel(
-            "Welcome to the Data Wrangler. \n\n"
+            "Welcome to Lasso. \n\n"
             "Identify two file locations.\n"
             "1. The Ticket File Path from the ZenDesk Tickets API.\n"
             "2. The path to the comments directory with JSON comments for each ticket.\n\n"
-            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs MONGO_URI)."
+            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs Mongo URI in Settings; Preferences on macOS)."
         )
         warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
         warning_label.setStyleSheet("color: red;")
@@ -199,7 +208,7 @@ class MainWindow(QMainWindow, QDialog):
         sys.stdout = QTextEditStream(self.log_output)
         sys.stderr = QTextEditStream(self.log_output)
         self.log_output.setPlainText(
-            f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Learnosity Data Wrangler on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
+            f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Lasso on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
         )
         # Arrange layout
         self.data_entry_layout.addWidget(self.ticket_file_button)
@@ -229,6 +238,44 @@ class MainWindow(QMainWindow, QDialog):
         # Main layout arrangement
         self.main_layout.addWidget(self.tabs, stretch=3)
         self.main_layout.addWidget(self.log_output, stretch=1)
+
+    def init_menu(self) -> None:
+        """Adds the Settings… action (the app menu's Preferences… on macOS)."""
+        settings_action = QAction("Settings…", self)
+        settings_action.setMenuRole(QAction.PreferencesRole)
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.triggered.connect(self.open_settings)
+        self.menuBar().addMenu("&File").addAction(settings_action)
+
+    def open_settings(self) -> None:
+        """Shows the settings dialog; saved values apply to the next action."""
+        if SettingsDialog(self).exec_() != QDialog.Accepted:
+            return
+        # The Mongo and model clients are cached; rebuild them from the new values.
+        reset_clients()
+        if self.triage_tab._loaded and not self.triage_tab.is_busy():
+            self.triage_tab.refresh()
+
+    def prompt_for_missing_settings(self) -> None:
+        """On launch, reports an unreadable settings file and offers the
+        settings dialog if required settings are unset."""
+        if settings.load_error:
+            logger.error(settings.load_error)
+            QMessageBox.warning(self, "Settings Not Loaded", settings.load_error)
+        missing = settings.missing_required()
+        if not missing:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Setup Needed",
+            "These settings are not set yet:\n" + "\n".join(missing)
+            + "\n\nTopic modelling works without them; the Decision Engine and "
+            "Write Tickets to MongoDB do not.\n\nOpen Settings now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            self.open_settings()
 
     def confirm_file_change(self, type: str) -> None:
 
@@ -456,7 +503,7 @@ class MainWindow(QMainWindow, QDialog):
         see DataWrangler.write_ticket_to_mongo. Independent of Process Data.
         """
         if not os.getenv("MONGO_URI"):
-            message = "MONGO_URI is not set. Set it (see .env.example) and restart the app."
+            message = "MONGO_URI is not set. Set it in Settings (Preferences on macOS)."
             logger.error(message)
             QMessageBox.warning(self, "MongoDB Not Configured", message)
             return
@@ -552,6 +599,7 @@ class MainWindow(QMainWindow, QDialog):
             colorize=True,
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="INFO",
+            diagnose=False,
         )
         logger.add(
             sink="./wrangle_log.log",
@@ -559,6 +607,7 @@ class MainWindow(QMainWindow, QDialog):
             serialize=True,
             format="{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}",
             level="DEBUG",
+            diagnose=False,
         )
 
     def update_progressBar(self, value):
@@ -668,7 +717,7 @@ class MainWindow(QMainWindow, QDialog):
     def start_assign_topics(self) -> None:
         """Loads a saved run and writes its topics to every ticket in MongoDB."""
         if not os.getenv("MONGO_URI"):
-            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it (see .env.example) and restart the app.")
+            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it in Settings (Preferences on macOS).")
             return
         run = self._choose_run("Assign Topics from Saved Run")
         if run is None:
@@ -865,10 +914,18 @@ class MainWindow(QMainWindow, QDialog):
             raise RuntimeError("Data processing failed") from e
 
 
+# The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
+ICON_PATH = (
+    pathlib.Path(sys._MEIPASS) / "assets" if settings.is_frozen() else pathlib.Path(__file__).resolve().parents[1] / "packaging"
+) / "icon.png"
+
 app = QApplication(sys.argv)
-window = MainWindow("LRN Support Data Wrangler and LDA Trainer")
+app.setApplicationName("Lasso")
+app.setWindowIcon(QIcon(str(ICON_PATH)))
+window = MainWindow("Lasso — Support Ticket Triage")
 app.aboutToQuit.connect(window.join_threads_on_quit)
 
 if __name__ == "__main__":
     window.show()
+    QTimer.singleShot(0, window.prompt_for_missing_settings)
     sys.exit(app.exec_())
