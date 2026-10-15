@@ -2,24 +2,27 @@
 
 Replaces the Gradio page the app used to start: the topics and the coherence
 plot are shown in the app itself, and the interactive pyLDAvis chart opens in
-the browser.
+the browser, sandboxed (chart_viewer).
 """
 
 import pathlib
-import webbrowser
 from typing import List, Optional, Tuple
 
+from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+import chart_viewer
 
 PLOT_WIDTH = 560
 
@@ -93,5 +96,15 @@ class ResultsDialog(QDialog):
         layout.addWidget(buttons)
 
     def open_chart(self) -> None:
-        if self.chart_path:
-            webbrowser.open(pathlib.Path(self.chart_path).resolve().as_uri())
+        """Opens the interactive chart in the browser, sandboxed (see chart_viewer).
+
+        Never as a file:// page: a chart is HTML with script, and one from a
+        downloaded run may not be safe.
+        """
+        if not self.chart_path:
+            return
+        try:
+            chart_viewer.open_chart(self.chart_path)
+        except OSError as e:
+            logger.error(f"Could not open the topic chart: {e}")
+            QMessageBox.warning(self, "Chart Not Opened", f"Could not open the topic chart:\n{e}")

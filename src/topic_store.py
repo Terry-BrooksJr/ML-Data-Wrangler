@@ -2,8 +2,9 @@
 
 Each training run gets a directory under TOPIC_MODEL_DIR holding the LDA
 model and its dictionary (always saved together), its charts, and run.json.
-Model files stay on local disk: Atlas free tier caps storage at 512 MB, so
-Mongo keeps only each run's details and a pointer to its directory, in the
+Model files stay on local disk (and, when MODEL_BUCKET is set, are copied to
+S3 by model_storage): Atlas free tier caps storage at 512 MB, so Mongo keeps
+only each run's details and a pointer to its directory, in the
 `topic_model_runs` collection. Each ticket's main topic is written to its
 `tickets` document under `topic`, tagged with the run that assigned it;
 re-ingestion never touches that field.
@@ -12,6 +13,8 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -105,10 +108,30 @@ def save_run(
         "charts": {"lda_html": chart_path, "coherence_png": plot_path},
         "warnings": [],
     }
-    with open(run_dir / RUN_FILE, "w") as f:
-        json.dump(run, f, indent=2, default=str)
+    write_run_file(run)
     logger.success(f"Saved topic-model run {run_id} to {run_dir}")
     return run
+
+
+def write_run_file(run: dict) -> None:
+    """Writes the run's details to run.json in its directory, atomically.
+
+    The text is written to a temporary file beside it and swapped in only
+    once complete: a full disk or a crash mid-write (e.g. while recording an
+    upload) must not leave an unreadable run.json, which would hide the run.
+    """
+    run_dir = pathlib.Path(run["model_dir"])
+    text = json.dumps({k: v for k, v in run.items() if k != "_id"}, indent=2, default=str)
+    fd, tmp = tempfile.mkstemp(dir=run_dir, prefix=f".{RUN_FILE}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, run_dir / RUN_FILE)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def record_run(runs: Collection, run: dict) -> None:
@@ -149,10 +172,165 @@ def describe_run(run: dict) -> str:
     )
 
 
-def load_run_model(run: dict) -> Tuple[LdaModel, Dictionary]:
-    """Loads a saved run's model and dictionary, without retraining."""
-    run_dir = pathlib.Path(run["model_dir"])
+def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Path:
+    """Where this computer keeps the run: <TOPIC_MODEL_DIR>/<run_id>.
+
+    The run's recorded model_dir is never used for loading: a record from
+    Mongo could point anywhere, and model files are pickles that run code
+    when loaded. Only this folder, holding runs trained here or downloaded
+    and verified, is trusted.
+
+    Raises:
+        ValueError: the run ID isn't a plain folder name.
+    """
+    import model_storage
+
+    base = (base_dir or model_dir()).resolve()
+    folder = (base / model_storage.check_run_id(run["run_id"])).resolve()
+    if folder.parent != base:
+        raise ValueError(f"Refusing run {run['run_id']!r}: it would be outside {base}.")
+    return folder
+
+
+def _complete(folder: pathlib.Path) -> bool:
+    return (folder / MODEL_FILE).is_file() and (folder / DICTIONARY_FILE).is_file()
+
+
+def has_local_files(run: dict, base_dir: Optional[pathlib.Path] = None) -> bool:
+    """True if the run's model and dictionary are both in this computer's model folder."""
+    try:
+        return _complete(local_dir(run, base_dir))
+    except ValueError:
+        return False
+
+
+def _recorded_path(path: str) -> pathlib.PurePath:
+    """A path recorded on whichever computer trained the run, parsed for that platform.
+
+    A Windows path ("C:\\Users\\...\\charts\\lda_model.html") read on macOS
+    or Linux would otherwise be one long file name.
+    """
+    if re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("\\\\") or ("\\" in path and "/" not in path):
+        return pathlib.PureWindowsPath(path)
+    return pathlib.PurePosixPath(path)
+
+
+def _relocate(run: dict, new_dir: pathlib.Path) -> None:
+    """Points the run's model_dir and chart paths at new_dir.
+
+    Recorded paths may come from another computer (and platform), so each
+    chart keeps only its part inside the run's folder, e.g. charts/x.html.
+    """
+    old_dir = _recorded_path(str(run.get("model_dir") or ""))
+    charts = dict(run.get("charts") or {})
+    for name, path in charts.items():
+        if path:
+            recorded = _recorded_path(str(path))
+            old = type(recorded)(str(old_dir)) if old_dir.parts else None
+            try:
+                relative_parts = recorded.relative_to(old).parts if old else None
+            except ValueError:
+                relative_parts = None
+            if relative_parts is None:
+                # Recorded under another layout: keep what follows the run's
+                # own folder, else just the file name.
+                parts = recorded.parts
+                after = max((i for i, part in enumerate(parts) if part == run["run_id"]), default=None)
+                relative_parts = parts[after + 1:] if after is not None and after + 1 < len(parts) else (recorded.name,)
+            local = new_dir.joinpath(*relative_parts)
+            # A recorded chart path can't point outside the run's folder either.
+            charts[name] = str(local) if new_dir.resolve() in local.resolve().parents else None
+    run["charts"] = charts
+    run["model_dir"] = str(new_dir)
+
+
+def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
+    """Makes the run's files available in this computer's model folder, downloading them if needed.
+
+    Uses <TOPIC_MODEL_DIR>/<run_id> when it has both the model and the
+    dictionary; otherwise downloads and verifies the run's upload (see
+    model_storage.download_run). Updates the run's paths to that folder.
+
+    Raises:
+        FileNotFoundError: the files aren't here and can't be downloaded.
+        ValueError: the run ID isn't a plain folder name.
+        model_storage.UntrustedRun: the upload failed verification.
+    """
+    local = local_dir(run, base_dir)
+    if not _complete(local):
+        if not run.get("storage"):
+            raise FileNotFoundError(f"Run {run['run_id']}'s model files aren't on this computer and it was never uploaded.")
+        import model_storage
+
+        cfg = model_storage.config()
+        if cfg is None:
+            raise FileNotFoundError(
+                f"Run {run['run_id']} isn't on this computer. It was uploaded to {run['storage'].get('url')}; "
+                "set the model storage settings to download it."
+            )
+        model_storage.download_run(run, cfg, local)
+        if not _complete(local):
+            raise FileNotFoundError(f"Run {run['run_id']}'s upload has no {MODEL_FILE} or {DICTIONARY_FILE}.")
+    _relocate(run, local)
+    _persist_local_details(run, local)
+    return run
+
+
+def _persist_local_details(run: dict, local: pathlib.Path) -> None:
+    """Rewrites the local run.json if it doesn't match the relocated run.
+
+    A downloaded run.json was written on the computer that trained the run:
+    its model_dir points there, and it predates the upload, so it has no
+    `storage`. Left as is, list_runs would show the wrong paths and a default
+    `model_storage upload` would pick the run as never uploaded.
+    """
+    current = _read_run_file(local / RUN_FILE) or {}
+    if current.get("model_dir") != run["model_dir"] or current.get("storage") != _jsonable(run.get("storage")):
+        write_run_file(run)
+
+
+def _jsonable(value):
+    """value as run.json stores it (dates become strings), for comparison."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def load_run_model(run: dict, base_dir: Optional[pathlib.Path] = None) -> Tuple[LdaModel, Dictionary]:
+    """Loads a saved run's model and dictionary, without retraining (downloading it if needed).
+
+    Only files in this computer's model folder are loaded (see local_dir).
+    """
+    run_dir = pathlib.Path(ensure_local(run, base_dir)["model_dir"])
     return LdaModel.load(str(run_dir / MODEL_FILE)), Dictionary.load(str(run_dir / DICTIONARY_FILE))
+
+
+def _without_seed(settings: Optional[dict]) -> dict:
+    return {k: v for k, v in (settings or {}).items() if k != "seed"}
+
+
+def find_matching_run(runs: Iterable[dict], dataset: dict, settings: dict, preprocessing: dict) -> Optional[dict]:
+    """The newest run trained on the same tickets with the same settings and preprocessing.
+
+    The seed is ignored: each training run picks its own, so retraining with
+    identical inputs would only differ by chance.
+    """
+    wanted = (dataset, _without_seed(settings), preprocessing)
+    matches = [run for run in runs
+               if (run.get("dataset"), _without_seed(run.get("settings")), run.get("preprocessing")) == wanted]
+    return max(matches, key=lambda run: str(run.get("ran_at")), default=None)
+
+
+def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+    """Runs from Mongo (shared between computers) and this computer's disk, by run_id, newest first."""
+    local = {run["run_id"]: run for run in list_runs(base_dir=base_dir)}
+    merged = dict(local)
+    if runs is not None:
+        # Mongo wins: it has uploads recorded from any computer. A local upload
+        # record survives if Mongo missed it (its update failed).
+        for run in list_runs(runs):
+            if not run.get("storage") and (local.get(run["run_id"]) or {}).get("storage"):
+                run["storage"] = local[run["run_id"]]["storage"]
+            merged[run["run_id"]] = run
+    return sorted(merged.values(), key=lambda r: str(r.get("ran_at")), reverse=True)
 
 
 def topic_assignment(model: LdaModel, bow, run_id: str, now: datetime) -> Optional[dict]:

@@ -134,9 +134,19 @@ class SettingsDialog(QDialog):
             return False
         return True
 
+    def _storage_endpoint_ok(self) -> bool:
+        """Refuses an unencrypted storage endpoint: the secret key signs requests to it."""
+        url = self.fields["B2_ENDPOINT_URL"].text().strip()
+        if not url or url.startswith("https://") or (url.startswith("http://") and is_loopback_url(url)):
+            return True
+        QMessageBox.critical(self, "Insecure Storage Endpoint",
+                             f"{url} must start with https:// (http:// is allowed only for localhost).")
+        return False
+
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
-        if not self._api_urls_ok() or not self._dimensions_ok():
+
+        if not self._api_urls_ok() or not self._dimensions_ok() or not self._storage_endpoint_ok():
             return
         try:
             restart_needed = settings.save(self.values())

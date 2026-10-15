@@ -49,20 +49,32 @@ def test_dialog_handles_missing_outputs(qapp):
     assert not dialog.chart_button.isEnabled()
 
 
-def test_open_chart_opens_file_uri(qapp, monkeypatch, tmp_path):
+def test_open_chart_uses_the_sandboxed_viewer_not_a_file_uri(qapp, monkeypatch, tmp_path):
     opened = []
-    monkeypatch.setattr(results_dialog.webbrowser, "open", opened.append)
+    monkeypatch.setattr(results_dialog.chart_viewer.webbrowser, "open", opened.append)
     chart = tmp_path / "lda_model.html"
+    chart.write_text("<html></html>")
 
     ResultsDialog(2, TOPICS, str(chart), None).open_chart()
 
-    assert opened == [chart.resolve().as_uri()]
+    [url] = opened
+    assert url.startswith("http://127.0.0.1:") and url.endswith("/chart.html")
+    assert not url.startswith("file:")
 
 
 def test_open_chart_without_chart_does_nothing(qapp, monkeypatch):
     opened = []
-    monkeypatch.setattr(results_dialog.webbrowser, "open", opened.append)
+    monkeypatch.setattr(results_dialog.chart_viewer.webbrowser, "open", opened.append)
 
     ResultsDialog(2, TOPICS, None, None).open_chart()
 
     assert opened == []
+
+
+def test_unreadable_chart_warns_instead_of_crashing(qapp, monkeypatch, tmp_path):
+    from PyQt5.QtWidgets import QMessageBox
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    ResultsDialog(2, TOPICS, str(tmp_path / "gone.html"), None).open_chart()
+    assert warned and "Could not open the topic chart" in warned[0]

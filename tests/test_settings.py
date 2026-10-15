@@ -167,3 +167,20 @@ def test_corrupt_settings_file_is_set_aside(config, monkeypatch, contents):
     settings.load()
     assert settings.load_error is None
     assert os.environ["MONGO_URI"] == "mongodb://h"
+
+
+def test_describe_missing_names_only_affected_features():
+    engine_only = settings.describe_missing(["CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME"])
+    assert "CHEAPER_INFERENCE_API_KEY, CHEAPER_INFERENCE_PRIMARY_MODEL_NAME" in engine_only
+    assert "Decision Engine" in engine_only
+    assert "Write Tickets to MongoDB" not in engine_only
+
+    with_mongo = settings.describe_missing(["MONGO_URI", "CHEAPER_INFERENCE_API_KEY"])
+    first, second = with_mongo.split("\n\n")
+    assert "MONGO_URI" in first and "Write Tickets to MongoDB" in first
+    assert "CHEAPER_INFERENCE_API_KEY" in second and "Write Tickets to MongoDB" not in second
+
+
+def test_storage_settings_are_not_required():
+    required = {s.name for s in settings.SETTINGS if s.required}
+    assert not required & {"MODEL_BUCKET", "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_ENDPOINT_URL"}

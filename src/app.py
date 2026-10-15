@@ -7,7 +7,7 @@ from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
 from loguru import logger
 from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QKeySequence
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import (
     QApplication,
@@ -35,6 +35,8 @@ import settings
 settings.load()
 settings.use_workspace()
 
+import chart_viewer
+import model_storage
 import topic_store
 from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
@@ -98,6 +100,7 @@ class MainWindow(QMainWindow, QDialog):
         self.pdialog: QProgressDialog = None
         self._allocator_error: str = ""
         self.run_thread: QThread = None
+        self._run_job_callbacks = None
         self.mongo_thread: QThread = None
         # Set when the user closes the window while a job is running; the
         # window closes itself once every job has finished.
@@ -243,7 +246,10 @@ class MainWindow(QMainWindow, QDialog):
         """Adds the Settings… action (the app menu's Preferences… on macOS)."""
         settings_action = QAction("Settings…", self)
         settings_action.setMenuRole(QAction.PreferencesRole)
-        settings_action.setShortcut("Ctrl+,")
+        # The platform's Preferences shortcut where it has one; Windows defines
+        # none, so fall back to Ctrl+, (Qt maps Ctrl to Command on macOS).
+        standard = QKeySequence.keyBindings(QKeySequence.Preferences)
+        settings_action.setShortcuts(standard or [QKeySequence("Ctrl+,")])
         settings_action.triggered.connect(self.open_settings)
         self.menuBar().addMenu("&File").addAction(settings_action)
 
@@ -268,9 +274,8 @@ class MainWindow(QMainWindow, QDialog):
         answer = QMessageBox.question(
             self,
             "Setup Needed",
-            "These settings are not set yet:\n" + "\n".join(missing)
-            + "\n\nTopic modelling works without them; the Decision Engine and "
-            "Write Tickets to MongoDB do not.\n\nOpen Settings now?",
+            settings.describe_missing(missing)
+            + "\n\nTraining topic models works without these.\n\nOpen Settings now?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
@@ -365,7 +370,136 @@ class MainWindow(QMainWindow, QDialog):
             logger.error(error_message)
             QMessageBox.warning(self, "Input Validation Error", error_message)
             return
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            return
+        if self._training_running():
+            # The progress dialog closes at 100%, before charts are saved and the
+            # model uploaded; a second job would replace the running thread.
+            QMessageBox.information(self, "Busy", "Training is still saving the last model. Wait for it to finish.")
+            return
 
+        self.train_model_button.setEnabled(False)
+        iterations, passes, number_of_topics = int(iterations), int(passes), int(number_of_topics)
+        # A run trained on the same tickets with the same settings would only
+        # differ by its random seed, so offer it instead of retraining.
+        dataset = topic_store.dataset_fingerprint(self.allocator.prelemma_corpus or [], self.allocator.document_ids)
+        wanted = self.allocator.training_settings(number_of_topics, iterations, passes)
+        preprocessing = topic_store.preprocessing_info(nlp, stop_words)
+        self._start_run_job(
+            lambda: topic_store.find_matching_run(self._known_runs(), dataset, wanted, preprocessing),
+            "Looking for a matching saved run",
+            lambda match: self._train_or_reuse(match, iterations, passes, number_of_topics),
+            on_error=lambda message: self._train_or_reuse(None, iterations, passes, number_of_topics),
+        )
+
+    def _training_running(self) -> bool:
+        """True while the training thread (training, saving charts, uploading) is alive."""
+        # self.thread shadows QObject.thread() only once training has started.
+        thread = getattr(self, "thread", None)
+        return isinstance(thread, QThread) and thread.isRunning()
+
+    def _refresh_train_button(self) -> None:
+        """Enables Train Model only with processed data and no training thread running."""
+        self.train_model_button.setEnabled(
+            self.allocator is not None and self.allocator.prelemma_corpus is not None and not self._training_running()
+        )
+
+    def _known_runs(self) -> List[dict]:
+        """Saved runs from Mongo and disk; disk only if Mongo can't be reached. Worker thread."""
+        try:
+            return topic_store.known_runs(self._runs_collection())
+        except Exception as e:
+            logger.warning(f"Could not list runs from MongoDB ({e}); checking this computer's runs only.")
+            return topic_store.known_runs()
+
+    def _train_or_reuse(self, match, iterations: int, passes: int, number_of_topics: int) -> None:
+        """Trains, or, if a matching run exists and the user agrees, opens it instead."""
+        if match is None:
+            self._start_training(iterations, passes, number_of_topics)
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Matching Model Found")
+        box.setIcon(QMessageBox.Question)
+        where = "on this computer" if topic_store.has_local_files(match) else (
+            f"in {match['storage']['url']}" if match.get("storage") else "in MongoDB only (its files may be missing)")
+        box.setText(
+            f"Run {topic_store.describe_run(match)} was trained on the same "
+            f"{(match.get('dataset') or {}).get('ticket_count', '?')} tickets with the same settings and preprocessing. "
+            f"It is saved {where}.\n\nRetraining would give a near-identical model: only the random seed differs."
+        )
+        use = box.addButton("Use Saved Model", QMessageBox.AcceptRole)
+        retrain = box.addButton("Retrain", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(use)
+        box.exec_()
+        if box.clickedButton() is use:
+            self._open_saved_run(match, on_failed=self._refresh_train_button)
+        elif box.clickedButton() is retrain:
+            self._start_training(iterations, passes, number_of_topics)
+        else:
+            self._refresh_train_button()
+
+    def _open_saved_run(self, run: dict, on_failed=None) -> None:
+        """Shows a saved run, downloading its files from S3 first if they aren't here."""
+        def shown(local_run):
+            self._refresh_train_button()
+            try:
+                self.present_results(local_run)
+            except Exception as e:
+                logger.exception(f"Showing run {local_run['run_id']} failed: {e}")
+                self.notify_user_of_error((False, f"Could not show run {local_run['run_id']}: {e}"))
+
+        def failed(message):
+            self.notify_user_of_error((False, f"Could not open run {run['run_id']}: {message}"))
+            if on_failed:
+                on_failed()
+
+        if topic_store.has_local_files(run):
+            # Fast and local: points the chart paths at the run's own folder.
+            try:
+                shown(topic_store.ensure_local(run))
+            except (OSError, ValueError) as e:
+                failed(str(e))
+            return
+        self._start_run_job(lambda: topic_store.ensure_local(run), f"Downloading run {run['run_id']}", shown,
+                            on_error=failed)
+
+    def _start_run_job(self, task, description: str, on_done, on_error=None) -> None:
+        """Runs task on run_thread, then calls on_done(result) or on_error(message) on the GUI thread.
+
+        The worker's signals go to this window's own slots (bound methods of
+        a QObject living on the GUI thread), so Qt queues them there; the
+        slots then stop the thread, which is no longer running the task.
+        """
+        self._run_job_callbacks = (on_done, on_error or (lambda m: self.notify_user_of_error((False, m))))
+        self.run_thread = QThread()
+        self.run_worker = ThreadWorker(task, description)
+        self.run_worker.moveToThread(self.run_thread)
+        self.run_worker.finished.connect(self._run_job_finished)
+        self.run_worker.error.connect(self._run_job_failed)
+        self.run_thread.started.connect(self.run_worker.run)
+        self.run_thread.start()
+
+    @pyqtSlot(object)
+    def _run_job_finished(self, result) -> None:
+        self._end_run_job(0, result)
+
+    @pyqtSlot(str)
+    def _run_job_failed(self, message: str) -> None:
+        self._end_run_job(1, message)
+
+    def _end_run_job(self, which: int, value) -> None:
+        callback = self._run_job_callbacks[which]
+        self._run_job_callbacks = None
+        self._stop_run_thread()
+        if self._close_pending:
+            self._finish_pending_close()
+            return
+        callback(value)
+
+    def _start_training(self, iterations: int, passes: int, number_of_topics: int) -> None:
+        """Preprocesses the corpus and trains on the training thread."""
         self.train_model_button.setEnabled(False)
         self.show_progress_bar("Training LDA Model...")
 
@@ -383,7 +517,7 @@ class MainWindow(QMainWindow, QDialog):
         # the worker's error signal covers anything else.
         self.thread = QThread()
         self.training_worker = ThreadWorker(
-            lambda: self._train_and_save(int(iterations), int(passes), int(number_of_topics)),
+            lambda: self._train_and_save(iterations, passes, number_of_topics),
             "Training the LDA model",
         )
         self.training_worker.moveToThread(self.thread)
@@ -414,6 +548,7 @@ class MainWindow(QMainWindow, QDialog):
             return None
         self.allocator.worker_status.emit("Saving the model and its charts...")
         run = topic_store.save_run(self.allocator, nlp, stop_words)
+        self._upload_run(run)
         if not os.getenv("MONGO_URI"):
             run["warnings"].append("MONGO_URI is not set: the run was saved locally only and no ticket topics were written.")
             return run
@@ -428,6 +563,29 @@ class MainWindow(QMainWindow, QDialog):
             logger.exception(f"Could not record run {run['run_id']} in MongoDB: {e}")
             run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")
         return run
+
+    def _upload_run(self, run: dict) -> None:
+        """Copies the saved run to S3 when MODEL_BUCKET is set. Runs on the worker thread.
+
+        A failure becomes a warning on the run: the model is already saved
+        locally and can be uploaded later with `python -m model_storage upload`.
+        """
+        try:
+            cfg = model_storage.config()
+        except model_storage.StorageNotConfigured as e:
+            run["warnings"].append(f"Not uploaded to S3: {e}")
+            return
+        if cfg is None:
+            return
+        self.allocator.worker_status.emit(f"Uploading the model to s3://{cfg.bucket}/...")
+        try:
+            model_storage.upload_and_record(run, cfg)
+        except Exception as e:
+            logger.exception(f"Could not upload run {run['run_id']} to S3: {e}")
+            run["warnings"].append(
+                f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
+                "Retry with: python -m model_storage upload " + run["run_id"]
+            )
 
     def _remember_allocator_error(self, message: str):
         self._allocator_error = message
@@ -471,6 +629,8 @@ class MainWindow(QMainWindow, QDialog):
             self.notify_user_of_error((False, self._allocator_error or "Training failed; see the log."))
             return
         message = f"LDA Model training has finished successfully.\n\nSaved as run {run['run_id']}."
+        if run.get("storage"):
+            message += f"\nUploaded to {run['storage']['url']}."
         if run.get("assignment"):
             message += f"\nTopics written to {run['assignment']['assigned']} ticket(s) in MongoDB."
         if run.get("warnings"):
@@ -691,11 +851,7 @@ class MainWindow(QMainWindow, QDialog):
 
     def _choose_run(self, title: str):
         """Asks the user to pick a previous run; returns it, or None."""
-        try:
-            runs = topic_store.list_runs(self._runs_collection())
-        except Exception as e:
-            logger.warning(f"Could not list runs from MongoDB ({e}); reading them from disk.")
-            runs = topic_store.list_runs()
+        runs = self._known_runs()
         if not runs:
             QMessageBox.information(self, title, "No saved topic-model runs were found.")
             return None
@@ -705,19 +861,21 @@ class MainWindow(QMainWindow, QDialog):
 
     def show_previous_run(self) -> None:
         """Shows a previous run's topics and coherence."""
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            return
         run = self._choose_run("Previous Topic-Model Runs")
         if run is None:
             return
-        try:
-            self.present_results(run)
-        except Exception as e:
-            logger.exception(f"Showing run {run['run_id']} failed: {e}")
-            self.notify_user_of_error((False, f"Could not show run {run['run_id']}: {e}"))
+        self._open_saved_run(run)
 
     def start_assign_topics(self) -> None:
         """Loads a saved run and writes its topics to every ticket in MongoDB."""
         if not os.getenv("MONGO_URI"):
             QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it in Settings (Preferences on macOS).")
+            return
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
             return
         run = self._choose_run("Assign Topics from Saved Run")
         if run is None:
@@ -771,7 +929,7 @@ class MainWindow(QMainWindow, QDialog):
         # self.thread shadows QObject.thread() until training first runs.
         candidates = [("model training", getattr(self, "thread", None)),
                       ("MongoDB write", self.mongo_thread),
-                      ("topic assignment", self.run_thread)]
+                      ("saved-run job", self.run_thread)]
         return [(label, t) for label, t in candidates if isinstance(t, QThread)]
 
     def running_jobs(self) -> List[str]:
@@ -924,6 +1082,7 @@ app.setApplicationName("Lasso")
 app.setWindowIcon(QIcon(str(ICON_PATH)))
 window = MainWindow("Lasso — Support Ticket Triage")
 app.aboutToQuit.connect(window.join_threads_on_quit)
+app.aboutToQuit.connect(chart_viewer.shutdown)
 
 if __name__ == "__main__":
     window.show()

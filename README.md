@@ -104,6 +104,46 @@ coherence. When it finishes, it:
 - writes `lda_model.html` (an interactive pyLDAvis chart) and `coherence.png`;
 - opens a results window with that model's topics, ranked by share of tickets, and the coherence-by-topic-count plot;
 - opens `lda_model.html` in the browser. The results window can reopen it.
+  Charts are never opened as `file://` pages: the app serves each one from
+  `127.0.0.1` at a one-off URL in a browser sandbox (no access to local files,
+  cookies or the network beyond the chart's own d3/LDAvis scripts), since a
+  chart from a downloaded run is HTML with script.
+
+**Before training**, Train Model looks for a saved run (in MongoDB and this
+computer's `topic_models/`) trained on the same tickets, with the same
+settings and preprocessing. If there is one, it offers **Use Saved Model**
+instead of retraining: the only difference would be the random seed.
+
+### Saving models to S3
+
+With **Bucket** and **Signing key** set under Settings > Model storage (S3 /
+Backblaze B2), each trained run is also uploaded to
+`s3://<bucket>/topic-models/<run_id>/`: the model, its dictionary, gensim's
+extra files, the charts and `run.json`, then a signed `manifest.json` listing
+every file's SHA-256 and size. The location is added to the run in `run.json`
+and MongoDB.
+
+- Backblaze B2: set the key ID, secret key and endpoint (e.g.
+  `https://s3.us-west-004.backblazeb2.com`); the region is read from it.
+  AWS S3: leave the endpoint blank and set the region.
+- **Signing key:** use the same key on every computer that shares models
+  (`cd src && python -m model_storage new-key` makes one). Model files are
+  Python pickles, which run code when loaded, so a downloaded run is only
+  opened if its manifest's signature verifies with this key and every file
+  matches its listed size and hash. Someone who can edit MongoDB or the bucket
+  but doesn't have the key can't get a model opened.
+- Runs are only ever loaded from this computer's `topic_models/<run_id>/`,
+  never from a path a run record names.
+- A failed upload doesn't lose the run: it stays saved locally and the app
+  shows a warning. Retry, or upload runs trained before this was set up, with
+  `cd src && python -m model_storage upload [RUN_ID ...]` (this also adds the
+  run to MongoDB if it isn't there yet).
+- A run whose files aren't on this computer (trained elsewhere, or the folder
+  was cleared) is downloaded from its upload when you open it with Show
+  Previous Run, Assign Topics from Saved Run, or Use Saved Model. Only the
+  files the manifest lists are fetched (at most 200 files, 2 GB), into a
+  staging folder that replaces the run's folder only once everything checks
+  out.
 
 ### Data handling
 

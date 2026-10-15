@@ -20,6 +20,12 @@ TOKENS = [
 IDS = [str(1000 + i) for i in range(len(TOKENS))]
 
 
+@pytest.fixture(autouse=True)
+def local_model_dir(tmp_path, monkeypatch):
+    """Runs load only from TOPIC_MODEL_DIR; tests save their runs under tmp_path."""
+    monkeypatch.setenv("TOPIC_MODEL_DIR", str(tmp_path))
+
+
 @pytest.fixture
 def trained(monkeypatch):
     allocator = LatentDirichletAllocator(num_of_topics=3, seed=7)
@@ -167,3 +173,232 @@ def test_run_file_is_valid_json(trained, tmp_path):
     run = topic_store.save_run(trained, FakeNlp(), [], base_dir=tmp_path)
     data = json.loads((pathlib.Path(run["model_dir"]) / topic_store.RUN_FILE).read_text())
     assert data["run_id"] == run["run_id"]
+
+
+# --- reuse before retraining, and retrieval from S3 -------------------------------
+
+
+def _match_args(allocator, iterations=20, passes=3, max_topics=3, seed=None):
+    if seed is not None:
+        allocator.seed = seed
+    return (
+        topic_store.dataset_fingerprint(allocator.prelemma_corpus, allocator.document_ids),
+        allocator.training_settings(max_topics, iterations, passes),
+        topic_store.preprocessing_info(FakeNlp(), ["a", "the"]),
+    )
+
+
+def test_matching_run_found_regardless_of_seed(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path)
+    runs = topic_store.list_runs(base_dir=tmp_path)
+    match = topic_store.find_matching_run(runs, *_match_args(trained, seed=12345))
+    assert match["run_id"] == run["run_id"]
+
+
+@pytest.mark.parametrize("change", ["iterations", "passes", "max_topics", "tickets", "stopwords"])
+def test_no_match_when_anything_but_the_seed_differs(trained, tmp_path, change):
+    topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path)
+    runs = topic_store.list_runs(base_dir=tmp_path)
+    dataset, settings, preprocessing = _match_args(trained)
+    if change in ("iterations", "passes", "max_topics"):
+        settings[change] += 1
+    elif change == "tickets":
+        dataset = topic_store.dataset_fingerprint(trained.prelemma_corpus[:-1], trained.document_ids[:-1])
+    else:
+        preprocessing = topic_store.preprocessing_info(FakeNlp(), ["a", "the", "an"])
+    assert topic_store.find_matching_run(runs, dataset, settings, preprocessing) is None
+
+
+def test_newest_matching_run_wins(trained, tmp_path):
+    from datetime import datetime, timezone
+
+    old = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path,
+                               now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    new = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path,
+                               now=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    match = topic_store.find_matching_run(topic_store.list_runs(base_dir=tmp_path), *_match_args(trained))
+    assert match["run_id"] == new["run_id"] != old["run_id"]
+
+
+def test_known_runs_merges_mongo_and_disk(trained, tmp_path, db):
+    local_only = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    local_only["storage"] = {"url": "s3://b/p/"}
+    topic_store.write_run_file(local_only)
+    shared = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    runs = db[topic_store.RUNS_COLLECTION]
+    topic_store.record_run(runs, shared)
+    elsewhere = {**shared, "run_id": "20250101T000000Z-remote", "model_dir": "/other/machine/x"}
+    topic_store.record_run(runs, elsewhere)
+    # Mongo's copy of local_only missed its upload record.
+    topic_store.record_run(runs, {**local_only, "storage": None})
+
+    by_id = {r["run_id"]: r for r in topic_store.known_runs(runs, base_dir=tmp_path)}
+    assert set(by_id) == {local_only["run_id"], shared["run_id"], "20250101T000000Z-remote"}
+    assert by_id[local_only["run_id"]]["storage"] == {"url": "s3://b/p/"}
+
+
+def test_ensure_local_keeps_local_runs(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    assert topic_store.ensure_local(dict(run), base_dir=tmp_path)["model_dir"] == run["model_dir"]
+
+
+def test_ensure_local_finds_a_run_in_this_computers_folder(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    moved = {**run, "model_dir": "/another/computer/" + run["run_id"]}
+    local = topic_store.ensure_local(moved, base_dir=tmp_path)
+    assert local["model_dir"] == run["model_dir"]
+    assert local["charts"]["lda_html"] == run["charts"]["lda_html"]
+
+
+def test_ensure_local_without_upload_explains(trained, tmp_path):
+    run = {"run_id": "gone", "model_dir": str(tmp_path / "nope"), "charts": {}}
+    with pytest.raises(FileNotFoundError, match="never uploaded"):
+        topic_store.ensure_local(run, base_dir=tmp_path)
+
+
+def test_uploaded_run_downloads_loads_and_relocates_charts(trained, tmp_path, monkeypatch):
+    import boto3
+    from moto import mock_aws
+
+    import model_storage
+
+    for name, value in {"MODEL_BUCKET": "models", "B2_KEY_ID": "k", "B2_APPLICATION_KEY": "s",
+                        "MODEL_STORAGE_REGION": "us-east-1", "MODEL_SIGNING_KEY": "z" * 40}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("B2_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("MODEL_PREFIX", raising=False)
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1", aws_access_key_id="k", aws_secret_access_key="s")
+        s3.create_bucket(Bucket="models")
+        monkeypatch.setattr(model_storage, "make_client", lambda cfg: s3)
+        run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path / "machine_a")
+        model_storage.upload_and_record(run, model_storage.config())
+
+        # Another computer: only the run's details (e.g. from Mongo), no files.
+        elsewhere = tmp_path / "machine_b"
+        remote = json.loads(json.dumps(run, default=str))
+        remote["model_dir"] = "/Users/someone-else/topic_models/" + run["run_id"]
+        model, dictionary = topic_store.load_run_model(remote, base_dir=elsewhere)
+
+    assert remote["model_dir"] == str((elsewhere / run["run_id"]).resolve())
+    assert pathlib.Path(remote["charts"]["lda_html"]).read_text() == "<html></html>"
+    assert model.num_topics == run["best_num_topics"] and len(dictionary) == len(trained.id2word)
+
+
+def test_recorded_model_dir_is_never_loaded(trained, tmp_path):
+    """A run record (e.g. from Mongo) pointing at a folder elsewhere isn't trusted."""
+    planted = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path / "downloads")
+    record = {**planted, "model_dir": planted["model_dir"]}  # files exist there, but not in the model folder
+    with pytest.raises(FileNotFoundError, match="aren't on this computer"):
+        topic_store.load_run_model(record, base_dir=tmp_path / "topic_models")
+    assert not topic_store.has_local_files(record, base_dir=tmp_path / "topic_models")
+
+
+@pytest.mark.parametrize("run_id", ["../../etc", "..", "a/b", "/abs"])
+def test_traversal_run_ids_are_refused_before_any_download(tmp_path, monkeypatch, run_id):
+    import model_storage
+
+    called = []
+    monkeypatch.setattr(model_storage, "download_run", lambda *a, **k: called.append(1))
+    run = {"run_id": run_id, "storage": {"bucket": "b", "prefix": f"p/{run_id}/"}, "charts": {}}
+    with pytest.raises(ValueError, match="plain folder name"):
+        topic_store.ensure_local(run, base_dir=tmp_path)
+    assert called == []
+
+
+def test_missing_dictionary_triggers_a_download(trained, tmp_path, monkeypatch):
+    import shutil
+
+    import model_storage
+
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    backup = tmp_path / "backup"
+    shutil.copytree(run["model_dir"], backup)
+    (pathlib.Path(run["model_dir"]) / topic_store.DICTIONARY_FILE).unlink()
+    run["storage"] = {"bucket": "b", "prefix": f"p/{run['run_id']}/"}
+    downloads = []
+
+    def fake_download(run_, cfg, dest):
+        downloads.append(dest)
+        shutil.copy(backup / topic_store.DICTIONARY_FILE, dest / topic_store.DICTIONARY_FILE)
+        return dest
+
+    monkeypatch.setattr(model_storage, "config", lambda: object())
+    monkeypatch.setattr(model_storage, "download_run", fake_download)
+    model, dictionary = topic_store.load_run_model(run, base_dir=tmp_path)
+    assert downloads == [pathlib.Path(run["model_dir"])] and len(dictionary) == len(trained.id2word)
+
+
+def test_chart_paths_outside_the_run_are_dropped(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    run["charts"]["lda_html"] = str(tmp_path / ".." / "evil.html")
+    topic_store.ensure_local(run, base_dir=tmp_path)
+    assert run["charts"]["lda_html"] is None or pathlib.Path(run["charts"]["lda_html"]).parent == pathlib.Path(run["model_dir"])
+
+
+def test_run_file_write_is_atomic(trained, tmp_path, monkeypatch):
+    import os
+
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    before = (pathlib.Path(run["model_dir"]) / topic_store.RUN_FILE).read_text()
+
+    def disk_full(*args):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(os, "fsync", disk_full)
+    run["storage"] = {"url": "s3://b/p/"}
+    with pytest.raises(OSError):
+        topic_store.write_run_file(run)
+    assert (pathlib.Path(run["model_dir"]) / topic_store.RUN_FILE).read_text() == before
+    assert [r["run_id"] for r in topic_store.list_runs(base_dir=tmp_path)] == [run["run_id"]]
+    assert not list(pathlib.Path(run["model_dir"]).glob(".run.json.*"))
+
+
+def test_chart_subfolders_survive_relocation_from_another_layout(tmp_path):
+    run = {"run_id": "r1", "model_dir": "/elsewhere/r1-renamed",
+           "charts": {"lda_html": "/Users/a/topic_models/r1/charts/lda_model.html",
+                      "coherence_png": "/tmp/loose/coherence.png"}}
+    topic_store._relocate(run, tmp_path / "r1")
+    assert run["charts"]["lda_html"] == str(tmp_path / "r1" / "charts" / "lda_model.html")
+    assert run["charts"]["coherence_png"] == str(tmp_path / "r1" / "coherence.png")
+
+
+def test_cached_model_without_dictionary_is_not_usable(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    (pathlib.Path(run["model_dir"]) / topic_store.DICTIONARY_FILE).unlink()
+    assert not topic_store.has_local_files(run, base_dir=tmp_path)
+    with pytest.raises(FileNotFoundError, match="never uploaded"):
+        topic_store.ensure_local(dict(run), base_dir=tmp_path)
+
+
+@pytest.mark.parametrize("model_dir, charts, expected", [
+    # Trained on Windows, opened here.
+    (r"C:\Users\a\topic_models\r1",
+     {"lda_html": r"C:\Users\a\topic_models\r1\charts\lda_model.html", "coherence_png": r"C:\Users\a\topic_models\r1\coherence.png"},
+     {"lda_html": ("charts", "lda_model.html"), "coherence_png": ("coherence.png",)}),
+    # UNC share.
+    (r"\\server\share\models\r1",
+     {"lda_html": r"\\server\share\models\r1\charts\lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+    # Windows, with model_dir recorded differently from the charts: falls back to what follows the run ID.
+    (r"D:\moved\r1-copy",
+     {"lda_html": r"C:\Users\a\topic_models\r1\charts\lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+    # macOS/Linux paths still work.
+    ("/Users/a/topic_models/r1",
+     {"lda_html": "/Users/a/topic_models/r1/charts/lda_model.html"},
+     {"lda_html": ("charts", "lda_model.html")}),
+])
+def test_recorded_paths_from_any_platform_relocate(tmp_path, model_dir, charts, expected):
+    run = {"run_id": "r1", "model_dir": model_dir, "charts": dict(charts)}
+    topic_store._relocate(run, tmp_path / "r1")
+    for name, parts in expected.items():
+        assert run["charts"][name] == str((tmp_path / "r1").joinpath(*parts))
+    assert run["model_dir"] == str(tmp_path / "r1")
+
+
+@pytest.mark.parametrize("chart", [r"C:\x\r1\..\..\evil.html", "/x/r1/../../evil.html"])
+def test_relocated_charts_cannot_climb_out(tmp_path, chart):
+    run = {"run_id": "r1", "model_dir": "/nowhere", "charts": {"lda_html": chart}}
+    topic_store._relocate(run, tmp_path / "r1")
+    assert run["charts"]["lda_html"] is None
