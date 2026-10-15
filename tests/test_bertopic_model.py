@@ -96,7 +96,7 @@ def test_train_finds_one_topic_per_theme(trained):
     assert sorted(s["count"] for s in summaries) == [PER_THEME] * len(THEMES)
     for summary in summaries:
         members = [corpus.ids[i] for i, t in enumerate(result.topics) if t == summary["topic_id"]]
-        themes = {int(m) % len(THEMES) for m in members}
+        themes = {(int(m) - 1000) % len(THEMES) for m in members}
         assert len(themes) == 1
         assert set(summary["words"][:3]) <= set(THEMES[themes.pop()])
 
@@ -109,14 +109,16 @@ def test_train_never_loads_pytorch(trained):
 
 def test_train_reassigns_outliers_by_default():
     corpus, tokens = _corpus()
-    stray = np.random.default_rng(1).normal(size=(3, DIMS)).astype(np.float32) * 20
-    corpus.ids += ["9001", "9002", "9003"]
-    corpus.texts += ["odd one"] * 3
+    # Five near-identical tickets far from the rest: too few for a topic of 10.
+    rng = np.random.default_rng(1)
+    stray = (rng.normal(size=DIMS) * 20 + rng.normal(size=(5, DIMS)) * 0.1).astype(np.float32)
+    corpus.ids += [str(9000 + i) for i in range(5)]
+    corpus.texts += ["odd one"] * 5
     corpus.vectors = np.vstack([corpus.vectors, stray])
-    tokens = tokens + [["odd", "one"]] * 3
+    tokens = tokens + [["odd", "one"]] * 5
 
-    kept = bertopic_model.train(corpus, tokens, bertopic_model.Settings(min_cluster_size=10, reduce_outliers=False))
-    moved = bertopic_model.train(corpus, tokens, bertopic_model.Settings(min_cluster_size=10))
+    kept = bertopic_model.train(corpus, tokens, bertopic_model.Settings(min_cluster_size=10, n_neighbors=4, reduce_outliers=False))
+    moved = bertopic_model.train(corpus, tokens, bertopic_model.Settings(min_cluster_size=10, n_neighbors=4))
 
     assert kept.outliers_before > 0 and kept.topics.count(bertopic_model.OUTLIER) == kept.outliers_before
     assert moved.topics.count(bertopic_model.OUTLIER) == 0
