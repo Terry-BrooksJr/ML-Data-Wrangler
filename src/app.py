@@ -35,9 +35,12 @@ import settings
 settings.load()
 settings.use_workspace()
 
+import bertopic_model
+import bertopic_runs
 import chart_viewer
 import model_storage
 import topic_store
+from bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
 from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
@@ -50,6 +53,12 @@ import en_core_web_lg
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
+
+
+class StatusRelay(QObject):
+    """Carries status text from a worker thread to the GUI thread (queued, as the receiver lives there)."""
+
+    message = pyqtSignal(str)
 
 
 class MainWindow(QMainWindow, QDialog):
@@ -169,6 +178,9 @@ class MainWindow(QMainWindow, QDialog):
         # Saved runs survive a restart, so these work without processing data.
         self.previous_runs_button = QPushButton("Show Previous Run…")
         self.assign_topics_button = QPushButton("Assign Topics from Saved Run…")
+        # BERTopic reads tickets and their embeddings from Mongo, not the files above.
+        self.bertopic_button = QPushButton("Train BERTopic Model…")
+        self.bertopic_runs_button = QPushButton("Show Previous BERTopic Run…")
 
         self.comments_dir.setReadOnly(True)
         self.ticket_file.setReadOnly(True)
@@ -180,6 +192,8 @@ class MainWindow(QMainWindow, QDialog):
         self.train_model_button.clicked.connect(self.start_allocator_worker)
         self.previous_runs_button.clicked.connect(self.show_previous_run)
         self.assign_topics_button.clicked.connect(self.start_assign_topics)
+        self.bertopic_button.clicked.connect(self.start_bertopic_training)
+        self.bertopic_runs_button.clicked.connect(self.show_previous_bertopic_run)
         self.train_model_button.setEnabled(False)
 
         # Form layout for inputs
@@ -222,6 +236,9 @@ class MainWindow(QMainWindow, QDialog):
         self.data_entry_layout.addWidget(self.train_model_button)
         self.data_entry_layout.addWidget(self.previous_runs_button)
         self.data_entry_layout.addWidget(self.assign_topics_button)
+        self.data_entry_layout.addWidget(QLabel("Embedding topics (BERTopic, on tickets in MongoDB):"))
+        self.data_entry_layout.addWidget(self.bertopic_button)
+        self.data_entry_layout.addWidget(self.bertopic_runs_button)
         self.data_entry_layout.addStretch()
 
         # Topic modeling and the decision engine each get a tab; the log pane
@@ -921,6 +938,84 @@ class MainWindow(QMainWindow, QDialog):
             self._finish_pending_close()
             return
         self.notify_user_of_error((False, message))
+
+    # --- BERTopic --------------------------------------------------------------
+
+    def start_bertopic_training(self) -> None:
+        """Asks for BERTopic options, then trains and saves a run on run_thread."""
+        if not os.getenv("MONGO_URI"):
+            QMessageBox.warning(self, "MongoDB Not Configured",
+                                "BERTopic reads tickets and their embeddings from MongoDB. "
+                                "Set MONGO_URI in Settings (Preferences on macOS).")
+            return
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            return
+        dialog = BertopicOptionsDialog(bertopic_runs.lda_runs(), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        options = dialog.options()
+
+        self.bertopic_button.setEnabled(False)
+        # No cancel: a fit in progress can't be interrupted.
+        self.pdialog = QProgressDialog("Training BERTopic model...", None, 0, 0, self)
+        self.pdialog.setWindowTitle("Progress")
+        self.pdialog.setWindowModality(QtCore.Qt.WindowModal)
+        self.pdialog.setMinimumDuration(0)
+        self.pdialog.show()
+        self.bertopic_status = StatusRelay()
+        self.bertopic_status.message.connect(self.update_training_status)
+
+        def done(run):
+            self._end_bertopic_job()
+            message = f"BERTopic training has finished.\n\nSaved as run {run['run_id']} in {run['model_dir']}."
+            if run.get("assignment"):
+                a = run["assignment"]
+                message += (f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
+                            f" ({a['outliers']} as outliers).")
+            if run.get("warnings"):
+                message += "\n\nWarning:\n" + "\n".join(run["warnings"])
+            QMessageBox.information(self, "BERTopic Complete", message)
+            self.present_bertopic_results(run)
+
+        def failed(message):
+            self._end_bertopic_job()
+            self.notify_user_of_error((False, message))
+
+        tickets = lambda: get_database()[os.environ.get("MONGO_COLLECTION", "tickets")]
+        self._start_run_job(
+            lambda: bertopic_runs.train_and_save(tickets(), nlp, stop_words, options,
+                                                 status=self.bertopic_status.message.emit),
+            "Training the BERTopic model", done, on_error=failed)
+
+    def _end_bertopic_job(self) -> None:
+        if self.pdialog is not None:
+            self.pdialog.close()
+        self.bertopic_status.message.disconnect()
+        self.bertopic_button.setEnabled(True)
+
+    def present_bertopic_results(self, run: dict) -> None:
+        """Shows a BERTopic run's topics, scores and chart buttons."""
+        # This runs as a Qt slot, where an unhandled exception aborts the app.
+        try:
+            # Kept on self: a dialog with no reference is garbage-collected and closes.
+            self.bertopic_results_dialog = BertopicResultsDialog(run, bertopic_runs.chart_paths(run), self)
+            self.bertopic_results_dialog.show()
+        except Exception as e:
+            logger.exception(f"Showing BERTopic run {run.get('run_id')} failed: {e}")
+            self.notify_user_of_error((False, f"Could not show BERTopic run {run.get('run_id')}: {e}"))
+
+    def show_previous_bertopic_run(self) -> None:
+        """Lets the user pick a BERTopic run saved on this computer and shows it."""
+        title = "Previous BERTopic Runs"
+        runs = bertopic_runs.list_runs()
+        if not runs:
+            QMessageBox.information(self, title, f"No BERTopic runs were found in {bertopic_model.model_dir()}.")
+            return
+        labels = [bertopic_runs.describe_run(run) for run in runs]
+        label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
+        if ok:
+            self.present_bertopic_results(runs[labels.index(label)])
 
     # --- shutdown --------------------------------------------------------------
 

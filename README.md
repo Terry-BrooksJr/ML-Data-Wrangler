@@ -114,6 +114,26 @@ computer's `topic_models/`) trained on the same tickets, with the same
 settings and preprocessing. If there is one, it offers **Use Saved Model**
 instead of retraining: the only difference would be the random seed.
 
+### Embedding topics (BERTopic)
+
+**Train BERTopic Model…** groups the tickets in MongoDB by meaning, using the
+Voyage embeddings already stored on each ticket (run
+`cd src && python -m embeddings backfill` first; tickets whose embedding is
+missing or older than their text are left out). It asks for a minimum topic
+size (default 1% of tickets, at least 10), a number of topics to merge down to
+(default: keep all found), whether to keep outliers as topic -1, an optional
+saved LDA run to compare with, and whether to write each ticket's topic to its
+`embedding_topic` field (off by default; the LDA `topic` field is never
+touched). Training runs in the background; the results window shows the
+topics, the `c_v` coherence and topic diversity beside the LDA run's (both
+scored on the same tickets), and opens the topic word chart and intertopic
+distance map in the browser.
+
+Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
+LDA runs in `topic_models/`; **Show Previous BERTopic Run…** reopens one. They
+aren't uploaded to S3 or recorded in MongoDB. The same can be run from the
+command line: `cd src && python -m bertopic_model --help`.
+
 ### Saving models to S3
 
 With **Bucket** and **Signing key** set under Settings > Model storage (S3 /
