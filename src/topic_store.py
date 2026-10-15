@@ -2,8 +2,9 @@
 
 Each training run gets a directory under TOPIC_MODEL_DIR holding the LDA
 model and its dictionary (always saved together), its charts, and run.json.
-Model files stay on local disk: Atlas free tier caps storage at 512 MB, so
-Mongo keeps only each run's details and a pointer to its directory, in the
+Model files stay on local disk (and, when MODEL_BUCKET is set, are copied to
+S3 by model_storage): Atlas free tier caps storage at 512 MB, so Mongo keeps
+only each run's details and a pointer to its directory, in the
 `topic_model_runs` collection. Each ticket's main topic is written to its
 `tickets` document under `topic`, tagged with the run that assigned it;
 re-ingestion never touches that field.
@@ -105,10 +106,15 @@ def save_run(
         "charts": {"lda_html": chart_path, "coherence_png": plot_path},
         "warnings": [],
     }
-    with open(run_dir / RUN_FILE, "w") as f:
-        json.dump(run, f, indent=2, default=str)
+    write_run_file(run)
     logger.success(f"Saved topic-model run {run_id} to {run_dir}")
     return run
+
+
+def write_run_file(run: dict) -> None:
+    """Writes the run's details to run.json in its directory."""
+    with open(pathlib.Path(run["model_dir"]) / RUN_FILE, "w") as f:
+        json.dump({k: v for k, v in run.items() if k != "_id"}, f, indent=2, default=str)
 
 
 def record_run(runs: Collection, run: dict) -> None:
@@ -149,10 +155,92 @@ def describe_run(run: dict) -> str:
     )
 
 
+def has_local_files(run: dict) -> bool:
+    """True if the run's model and dictionary are on this computer."""
+    run_dir = pathlib.Path(run.get("model_dir") or "")
+    return (run_dir / MODEL_FILE).is_file() and (run_dir / DICTIONARY_FILE).is_file()
+
+
+def _relocate(run: dict, new_dir: pathlib.Path) -> None:
+    """Points the run's model_dir and chart paths at new_dir."""
+    old_dir = pathlib.Path(run.get("model_dir") or "")
+    charts = dict(run.get("charts") or {})
+    for name, path in charts.items():
+        if path:
+            path = pathlib.Path(path)
+            try:
+                charts[name] = str(new_dir / path.relative_to(old_dir))
+            except ValueError:
+                charts[name] = str(new_dir / path.name)
+    run["charts"] = charts
+    run["model_dir"] = str(new_dir)
+
+
+def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
+    """Makes the run's files available locally, downloading them from S3 if needed.
+
+    Looks in the run's recorded folder, then in this computer's TOPIC_MODEL_DIR
+    (a run trained elsewhere), then downloads its upload. Updates the run's
+    paths to where the files are.
+
+    Raises:
+        FileNotFoundError: the files aren't here and can't be downloaded.
+    """
+    if has_local_files(run):
+        return run
+    local = (base_dir or model_dir()) / run["run_id"]
+    if not (local / MODEL_FILE).is_file() and run.get("storage"):
+        import model_storage
+
+        cfg = model_storage.config()
+        if cfg is None:
+            raise FileNotFoundError(
+                f"Run {run['run_id']} isn't on this computer. It was uploaded to {run['storage'].get('url')}; "
+                "set the model storage settings to download it."
+            )
+        if local.exists():
+            raise FileNotFoundError(f"{local} exists but holds no complete model; move it aside to download the run again.")
+        model_storage.download_run(run, cfg, local)
+    if not (local / MODEL_FILE).is_file():
+        raise FileNotFoundError(f"Run {run['run_id']}'s model files aren't on this computer and it was never uploaded.")
+    _relocate(run, local)
+    return run
+
+
 def load_run_model(run: dict) -> Tuple[LdaModel, Dictionary]:
-    """Loads a saved run's model and dictionary, without retraining."""
-    run_dir = pathlib.Path(run["model_dir"])
+    """Loads a saved run's model and dictionary, without retraining (downloading it if needed)."""
+    run_dir = pathlib.Path(ensure_local(run)["model_dir"])
     return LdaModel.load(str(run_dir / MODEL_FILE)), Dictionary.load(str(run_dir / DICTIONARY_FILE))
+
+
+def _without_seed(settings: Optional[dict]) -> dict:
+    return {k: v for k, v in (settings or {}).items() if k != "seed"}
+
+
+def find_matching_run(runs: Iterable[dict], dataset: dict, settings: dict, preprocessing: dict) -> Optional[dict]:
+    """The newest run trained on the same tickets with the same settings and preprocessing.
+
+    The seed is ignored: each training run picks its own, so retraining with
+    identical inputs would only differ by chance.
+    """
+    wanted = (dataset, _without_seed(settings), preprocessing)
+    matches = [run for run in runs
+               if (run.get("dataset"), _without_seed(run.get("settings")), run.get("preprocessing")) == wanted]
+    return max(matches, key=lambda run: str(run.get("ran_at")), default=None)
+
+
+def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+    """Runs from Mongo (shared between computers) and this computer's disk, by run_id, newest first."""
+    local = {run["run_id"]: run for run in list_runs(base_dir=base_dir)}
+    merged = dict(local)
+    if runs is not None:
+        # Mongo wins: it has uploads recorded from any computer. A local upload
+        # record survives if Mongo missed it (its update failed).
+        for run in list_runs(runs):
+            if not run.get("storage") and (local.get(run["run_id"]) or {}).get("storage"):
+                run["storage"] = local[run["run_id"]]["storage"]
+            merged[run["run_id"]] = run
+    return sorted(merged.values(), key=lambda r: str(r.get("ran_at")), reverse=True)
 
 
 def topic_assignment(model: LdaModel, bow, run_id: str, now: datetime) -> Optional[dict]:

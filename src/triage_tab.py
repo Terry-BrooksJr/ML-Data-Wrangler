@@ -37,12 +37,11 @@ from decision_engine import feedback, persistence
 from decision_engine.guards import CLASSIFICATIONS
 from utility import ThreadWorker
 
-# Reading reviews only touches Mongo; classifying also needs B2 and the primary
+# Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
 # engine skips that step.
 READ_ENV = ("MONGO_URI",)
 REVIEW_ENV = READ_ENV + (
-    "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_ENDPOINT_URL",
     "CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
 )

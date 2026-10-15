@@ -105,6 +105,28 @@ coherence. When it finishes, it:
 - opens a results window with that model's topics, ranked by share of tickets, and the coherence-by-topic-count plot;
 - opens `lda_model.html` in the browser. The results window can reopen it.
 
+**Before training**, Train Model looks for a saved run (in MongoDB and this
+computer's `topic_models/`) trained on the same tickets, with the same
+settings and preprocessing. If there is one, it offers **Use Saved Model**
+instead of retraining: the only difference would be the random seed.
+
+### Saving models to S3
+
+With **Bucket** set under Settings > Model storage (S3 / Backblaze B2), each
+trained run is also uploaded to `s3://<bucket>/topic-models/<run_id>/` (the
+model, its dictionary, gensim's extra files, the charts and `run.json`, which
+goes last). The location is added to the run in `run.json` and MongoDB.
+
+- Backblaze B2: set the key ID, secret key and endpoint (e.g.
+  `https://s3.us-west-004.backblazeb2.com`); the region is read from it.
+  AWS S3: leave the endpoint blank and set the region.
+- A failed upload doesn't lose the run: it stays saved locally and the app
+  shows a warning. Retry, or upload runs trained before this was set up, with
+  `cd src && python -m model_storage upload [RUN_ID ...]`.
+- A run whose files aren't on this computer (trained elsewhere, or the folder
+  was cleared) is downloaded from its upload when you open it with Show
+  Previous Run, Assign Topics from Saved Run, or Use Saved Model.
+
 ### Data handling
 
 - **Comments** come from `comments/<ticket id>.json`, a JSON list of Zendesk comments. Each file starts with the ticket description, so the description isn't added twice. A ticket without a comment file keeps its description as its only comment.

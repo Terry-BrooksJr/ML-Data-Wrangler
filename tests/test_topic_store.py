@@ -167,3 +167,153 @@ def test_run_file_is_valid_json(trained, tmp_path):
     run = topic_store.save_run(trained, FakeNlp(), [], base_dir=tmp_path)
     data = json.loads((pathlib.Path(run["model_dir"]) / topic_store.RUN_FILE).read_text())
     assert data["run_id"] == run["run_id"]
+
+
+# --- reuse before retraining, and retrieval from S3 -------------------------------
+
+
+def _match_args(allocator, iterations=20, passes=3, max_topics=3, seed=None):
+    if seed is not None:
+        allocator.seed = seed
+    return (
+        topic_store.dataset_fingerprint(allocator.prelemma_corpus, allocator.document_ids),
+        allocator.training_settings(max_topics, iterations, passes),
+        topic_store.preprocessing_info(FakeNlp(), ["a", "the"]),
+    )
+
+
+def test_matching_run_found_regardless_of_seed(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path)
+    runs = topic_store.list_runs(base_dir=tmp_path)
+    match = topic_store.find_matching_run(runs, *_match_args(trained, seed=12345))
+    assert match["run_id"] == run["run_id"]
+
+
+@pytest.mark.parametrize("change", ["iterations", "passes", "max_topics", "tickets", "stopwords"])
+def test_no_match_when_anything_but_the_seed_differs(trained, tmp_path, change):
+    topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path)
+    runs = topic_store.list_runs(base_dir=tmp_path)
+    dataset, settings, preprocessing = _match_args(trained)
+    if change in ("iterations", "passes", "max_topics"):
+        settings[change] += 1
+    elif change == "tickets":
+        dataset = topic_store.dataset_fingerprint(trained.prelemma_corpus[:-1], trained.document_ids[:-1])
+    else:
+        preprocessing = topic_store.preprocessing_info(FakeNlp(), ["a", "the", "an"])
+    assert topic_store.find_matching_run(runs, dataset, settings, preprocessing) is None
+
+
+def test_newest_matching_run_wins(trained, tmp_path):
+    from datetime import datetime, timezone
+
+    old = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path,
+                               now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    new = topic_store.save_run(trained, FakeNlp(), ["a", "the"], base_dir=tmp_path,
+                               now=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    match = topic_store.find_matching_run(topic_store.list_runs(base_dir=tmp_path), *_match_args(trained))
+    assert match["run_id"] == new["run_id"] != old["run_id"]
+
+
+def test_known_runs_merges_mongo_and_disk(trained, tmp_path, db):
+    local_only = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    local_only["storage"] = {"url": "s3://b/p/"}
+    topic_store.write_run_file(local_only)
+    shared = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    runs = db[topic_store.RUNS_COLLECTION]
+    topic_store.record_run(runs, shared)
+    elsewhere = {**shared, "run_id": "20250101T000000Z-remote", "model_dir": "/other/machine/x"}
+    topic_store.record_run(runs, elsewhere)
+    # Mongo's copy of local_only missed its upload record.
+    topic_store.record_run(runs, {**local_only, "storage": None})
+
+    by_id = {r["run_id"]: r for r in topic_store.known_runs(runs, base_dir=tmp_path)}
+    assert set(by_id) == {local_only["run_id"], shared["run_id"], "20250101T000000Z-remote"}
+    assert by_id[local_only["run_id"]]["storage"] == {"url": "s3://b/p/"}
+
+
+def test_ensure_local_keeps_local_runs(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    assert topic_store.ensure_local(dict(run), base_dir=tmp_path)["model_dir"] == run["model_dir"]
+
+
+def test_ensure_local_finds_a_run_in_this_computers_folder(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    moved = {**run, "model_dir": "/another/computer/" + run["run_id"]}
+    local = topic_store.ensure_local(moved, base_dir=tmp_path)
+    assert local["model_dir"] == run["model_dir"]
+    assert local["charts"]["lda_html"] == run["charts"]["lda_html"]
+
+
+def test_ensure_local_without_upload_explains(trained, tmp_path):
+    run = {"run_id": "gone", "model_dir": str(tmp_path / "nope"), "charts": {}}
+    with pytest.raises(FileNotFoundError, match="never uploaded"):
+        topic_store.ensure_local(run, base_dir=tmp_path)
+
+
+def test_uploaded_run_downloads_loads_and_relocates_charts(trained, tmp_path, monkeypatch):
+    import boto3
+    from moto import mock_aws
+
+    import model_storage
+
+    for name, value in {"MODEL_BUCKET": "models", "B2_KEY_ID": "k", "B2_APPLICATION_KEY": "s",
+                        "MODEL_STORAGE_REGION": "us-east-1"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("B2_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("MODEL_PREFIX", raising=False)
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1", aws_access_key_id="k", aws_secret_access_key="s")
+        s3.create_bucket(Bucket="models")
+        monkeypatch.setattr(model_storage, "make_client", lambda cfg: s3)
+        trained_here = tmp_path / "machine_a"
+        run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=trained_here)
+        model_storage.upload_and_record(run, model_storage.config())
+
+        # Another computer: only the run's details (e.g. from Mongo), no files.
+        elsewhere = tmp_path / "machine_b"
+        remote = json.loads(json.dumps(run, default=str))
+        remote["model_dir"] = "/Users/someone-else/topic_models/" + run["run_id"]
+        local = topic_store.ensure_local(remote, base_dir=elsewhere)
+        model, dictionary = topic_store.load_run_model(local)
+
+    assert local["model_dir"] == str(elsewhere / run["run_id"])
+    assert pathlib.Path(local["charts"]["lda_html"]).read_text() == "<html></html>"
+    assert model.num_topics == run["best_num_topics"] and len(dictionary) == len(trained.id2word)
+    assert not list(elsewhere.glob(".*"))  # no leftover staging folder
+
+
+def test_download_refuses_keys_outside_the_run_folder(tmp_path, monkeypatch):
+    import model_storage
+
+    class Evil:
+        def get_paginator(self, name):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "p/run.json"}, {"Key": "p/../../escape.txt"}]}]
+            return P()
+
+        def download_file(self, bucket, key, path):
+            pathlib.Path(path).write_text("x")
+
+    run = {"run_id": "r", "storage": {"bucket": "b", "prefix": "p/"}}
+    cfg = model_storage.Config("b", "p/", "k", "s", None, "us-east-1")
+    with pytest.raises(ValueError, match="outside the run's folder"):
+        model_storage.download_run(run, cfg, tmp_path / "runs" / "r", Evil())
+    assert not (tmp_path / "escape.txt").exists()
+    assert not (tmp_path / "runs" / "r").exists()
+
+
+def test_download_refuses_unfinished_upload(tmp_path):
+    import model_storage
+
+    class Partial:
+        def get_paginator(self, name):
+            class P:
+                def paginate(self, **kw):
+                    return [{"Contents": [{"Key": "p/lda.model"}]}]
+            return P()
+
+    run = {"run_id": "r", "storage": {"bucket": "b", "prefix": "p/"}}
+    cfg = model_storage.Config("b", "p/", "k", "s", None, "us-east-1")
+    with pytest.raises(FileNotFoundError, match="didn't finish"):
+        model_storage.download_run(run, cfg, tmp_path / "r", Partial())

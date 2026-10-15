@@ -233,6 +233,20 @@ class LatentDirichletAllocator(QObject):
             self.error.emit(f"Failed to process data: {e}")
             return False
 
+    def training_settings(self, num_of_topics: int, iterations: int, passes: int) -> dict:
+        """The settings recorded with a run; also what a saved run must match to be reused."""
+        return {
+            "max_topics": num_of_topics,
+            "iterations": iterations,
+            "passes": passes,
+            "seed": self.seed,
+            "filter_extremes": {
+                "no_below": FILTER_NO_BELOW,
+                "no_above": FILTER_NO_ABOVE,
+                "keep_n": FILTER_KEEP_N,
+            },
+        }
+
     def model_trained(
         self, iterations: int, passes: int, num_of_topics: int
     ) -> bool:
@@ -250,17 +264,7 @@ class LatentDirichletAllocator(QObject):
         try:
             self.topic_counts, self.coherence_values = [], []
             self.lda_model, self.best_num_topics = None, None
-            self.settings = {
-                "max_topics": num_of_topics,
-                "iterations": iterations,
-                "passes": passes,
-                "seed": self.seed,
-                "filter_extremes": {
-                    "no_below": FILTER_NO_BELOW,
-                    "no_above": FILTER_NO_ABOVE,
-                    "keep_n": FILTER_KEEP_N,
-                },
-            }
+            self.settings = self.training_settings(num_of_topics, iterations, passes)
             topic_range = range(2, num_of_topics + 1)
             for i, topic_count in enumerate(topic_range):
                 self.worker_status.emit(f"Training model with {topic_count} topics...")

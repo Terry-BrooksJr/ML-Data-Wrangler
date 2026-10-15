@@ -63,9 +63,17 @@ SETTINGS: List[Setting] = [
             help="Re-checks manual-triage and low-confidence results. Leave blank to skip."),
     Setting("DECISION_ENGINE_MODEL", "Default model", "Decision Engine", default="claude-opus-4.8",
             help="Used when no primary model is set.", restart=True),
-    Setting("B2_KEY_ID", "Key ID", "Backblaze B2", required=True),
-    Setting("B2_APPLICATION_KEY", "Application key", "Backblaze B2", secret=True, required=True),
-    Setting("B2_ENDPOINT_URL", "Endpoint URL", "Backblaze B2", required=True),
+    Setting("MODEL_BUCKET", "Bucket", "Model storage (S3 / Backblaze B2)",
+            help="Trained topic models are uploaded here after each run. Leave blank to keep them on this computer only."),
+    Setting("B2_KEY_ID", "Key ID", "Model storage (S3 / Backblaze B2)",
+            help="Backblaze application key ID, or an AWS access key ID."),
+    Setting("B2_APPLICATION_KEY", "Secret key", "Model storage (S3 / Backblaze B2)", secret=True,
+            help="Backblaze application key, or an AWS secret access key."),
+    Setting("B2_ENDPOINT_URL", "Endpoint URL", "Model storage (S3 / Backblaze B2)",
+            help="e.g. https://s3.us-west-004.backblazeb2.com. Leave blank for AWS S3. Must be https://."),
+    Setting("MODEL_STORAGE_REGION", "Region", "Model storage (S3 / Backblaze B2)",
+            help="Optional. Worked out from a Backblaze endpoint; for AWS, the bucket's region (e.g. us-east-1)."),
+    Setting("MODEL_PREFIX", "Folder in bucket", "Model storage (S3 / Backblaze B2)", default="topic-models/"),
     Setting("TOPIC_MODEL_DIR", "Topic model folder", "Storage", default="topic_models",
             help="Where saved topic-model runs go. Relative paths are under the working folder."),
     Setting("TOPIC_RUNS_COLLECTION", "Topic runs collection", "Storage", default="topic_model_runs", restart=True),
@@ -192,6 +200,28 @@ def current() -> Dict[str, str]:
 def missing_required() -> List[str]:
     """Names of required settings that are unset or empty."""
     return [s.name for s in SETTINGS if s.required and not os.environ.get(s.name)]
+
+
+# What stops working when a group's required settings are missing.
+_MISSING_EFFECTS = {
+    "MongoDB": "Write Tickets to MongoDB, recording topic runs in MongoDB, and the Decision Engine",
+    "Decision Engine": "the Decision Engine (classifying tickets)",
+}
+
+
+def describe_missing(missing: List[str]) -> str:
+    """Says what each group of missing required settings disables.
+
+    Only the features that need a group's settings are named, so a missing
+    model setting doesn't claim Write Tickets to MongoDB is unavailable.
+    """
+    by_name = {s.name: s for s in SETTINGS}
+    lines = []
+    for group in dict.fromkeys(by_name[name].group for name in missing):
+        names = [name for name in missing if by_name[name].group == group]
+        effect = _MISSING_EFFECTS.get(group, f"features that use the {group} settings")
+        lines.append(f"Not set: {', '.join(names)}.\nUnavailable until set: {effect}.")
+    return "\n\n".join(lines)
 
 
 # Owner and SYSTEM only, not inherited from the parent folder ("P"); OICI
