@@ -10,6 +10,7 @@ import settings
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(settings, "_active_at_start", None)
     for s in settings.SETTINGS:
         monkeypatch.delenv(s.name, raising=False)
     return tmp_path / "settings.json"
@@ -33,9 +34,22 @@ def test_blank_value_removes_setting(config):
     assert json.loads(config.read_text()) == {"MONGO_URI": "mongodb://h", "MONGO_DB": None}
 
 
-def test_restart_needed_only_for_changed_import_time_values(config):
+def test_restart_needed_only_for_import_time_values(config):
     assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "y"}) == ["LESSONS_COLLECTION"]
-    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "z"}) == []
+
+
+def test_restart_reminder_survives_later_saves_until_restart(config, monkeypatch):
+    monkeypatch.setattr(settings, "is_frozen", lambda: True)
+    settings.load()  # startup: LESSONS_COLLECTION unset
+    assert settings.save({"LESSONS_COLLECTION": "x"}) == ["LESSONS_COLLECTION"]
+    # Saving again without restarting: the running code still has the old value.
+    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "z"}) == ["LESSONS_COLLECTION"]
+    # Changing it back to what's running clears the reminder.
+    assert settings.save({"LESSONS_COLLECTION": ""}) == []
+
+    settings.save({"LESSONS_COLLECTION": "x"})
+    settings.load()  # restart
+    assert settings.save({"LESSONS_COLLECTION": "x"}) == []
 
 
 def test_missing_required(config, monkeypatch):
