@@ -211,9 +211,15 @@ def _relocate(run: dict, new_dir: pathlib.Path) -> None:
         if path:
             path = pathlib.Path(path)
             try:
-                charts[name] = str(new_dir / path.relative_to(old_dir))
+                relative = path.relative_to(old_dir)
             except ValueError:
-                charts[name] = str(new_dir / path.name)
+                # Recorded elsewhere: keep what follows the run's own folder
+                # (e.g. charts/lda_model.html), else just the file name.
+                parts = path.parts
+                after = max((i for i, part in enumerate(parts) if part == run["run_id"]), default=None)
+                relative = pathlib.Path(*parts[after + 1:]) if after is not None and after + 1 < len(parts) \
+                    else pathlib.Path(path.name)
+            charts[name] = str(new_dir / relative)
             # A recorded chart path can't point outside the run's folder either.
             if new_dir.resolve() not in pathlib.Path(charts[name]).resolve().parents:
                 charts[name] = None
@@ -249,7 +255,26 @@ def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
         if not _complete(local):
             raise FileNotFoundError(f"Run {run['run_id']}'s upload has no {MODEL_FILE} or {DICTIONARY_FILE}.")
     _relocate(run, local)
+    _persist_local_details(run, local)
     return run
+
+
+def _persist_local_details(run: dict, local: pathlib.Path) -> None:
+    """Rewrites the local run.json if it doesn't match the relocated run.
+
+    A downloaded run.json was written on the computer that trained the run:
+    its model_dir points there, and it predates the upload, so it has no
+    `storage`. Left as is, list_runs would show the wrong paths and a default
+    `model_storage upload` would pick the run as never uploaded.
+    """
+    current = _read_run_file(local / RUN_FILE) or {}
+    if current.get("model_dir") != run["model_dir"] or current.get("storage") != _jsonable(run.get("storage")):
+        write_run_file(run)
+
+
+def _jsonable(value):
+    """value as run.json stores it (dates become strings), for comparison."""
+    return json.loads(json.dumps(value, default=str))
 
 
 def load_run_model(run: dict, base_dir: Optional[pathlib.Path] = None) -> Tuple[LdaModel, Dictionary]:

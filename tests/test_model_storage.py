@@ -394,3 +394,50 @@ def test_cli_needs_a_bucket(env, monkeypatch, capsys):
     monkeypatch.setattr("settings.load", lambda: None)
     assert model_storage.main(["upload"]) == 2
     assert "MODEL_BUCKET is not set" in capsys.readouterr().err
+
+
+# --- a downloaded run's local details ------------------------------------------------
+
+
+def test_downloaded_run_json_is_rewritten_for_this_computer(s3, tmp_path, env, monkeypatch, capsys):
+    run = _run(tmp_path, folder="machine_a")
+    model_storage.upload_and_record(run, model_storage.config(), s3)
+    machine_b = tmp_path / "machine_b"
+    env.setenv("TOPIC_MODEL_DIR", str(machine_b))
+
+    topic_store.ensure_local(_as_seen_elsewhere(run))
+
+    local = (machine_b / run["run_id"]).resolve()
+    saved = json.loads((local / "run.json").read_text())
+    assert saved["model_dir"] == str(local)
+    assert saved["storage"]["prefix"] == run["storage"]["prefix"]
+    assert saved["charts"]["lda_html"] == str(local / "charts" / "lda_model.html")
+
+    # The sequence from the review: a default upload must not pick the downloaded run.
+    monkeypatch.setattr("settings.load", lambda: None)
+    assert model_storage.main(["upload"]) == 0
+    assert "Every local run is already uploaded." in capsys.readouterr().out
+    [listed] = topic_store.list_runs()
+    assert listed["model_dir"] == str(local) and listed["storage"]
+
+
+def test_rewritten_run_json_still_counts_as_a_complete_download(s3, tmp_path, env):
+    run = _run(tmp_path, folder="machine_a")
+    model_storage.upload_and_record(run, model_storage.config(), s3)
+    env.setenv("TOPIC_MODEL_DIR", str(tmp_path / "machine_b"))
+    topic_store.ensure_local(_as_seen_elsewhere(run))
+    local = tmp_path / "machine_b" / run["run_id"]
+
+    # A second window downloading the same run reuses this copy rather than moving it aside.
+    model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), local)
+    assert not list(local.parent.glob(f".{run['run_id']}.incomplete-*"))
+    assert json.loads((local / "run.json").read_text())["storage"]
+
+
+def test_unchanged_local_run_json_is_not_rewritten(s3, tmp_path, env):
+    run = _run(tmp_path)
+    model_storage.upload_and_record(run, model_storage.config(), s3)
+    path = pathlib_path(run) / "run.json"
+    before = path.stat().st_mtime_ns
+    topic_store.ensure_local(json.loads(path.read_text()))
+    assert path.stat().st_mtime_ns == before

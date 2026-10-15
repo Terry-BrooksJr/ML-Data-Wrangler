@@ -309,8 +309,14 @@ def _fetch(client, bucket: str, key: str, target: pathlib.Path, expected: dict) 
 
 
 def _is_complete(folder: pathlib.Path, manifest: dict) -> bool:
-    """True if folder holds every file the manifest lists, with matching sizes and hashes."""
+    """True if folder holds every file the manifest lists, with matching sizes and hashes.
+
+    run.json is skipped: it is verified when downloaded, then rewritten
+    locally with the run's local paths and upload (topic_store.ensure_local).
+    """
     for relative, entry in manifest["files"].items():
+        if relative == RUN_FILE:
+            continue
         path = folder / relative
         if path.is_symlink() or not path.is_file() or path.stat().st_size != entry["bytes"]:
             return False

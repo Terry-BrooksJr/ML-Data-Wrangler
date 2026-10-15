@@ -352,3 +352,20 @@ def test_run_file_write_is_atomic(trained, tmp_path, monkeypatch):
     assert (pathlib.Path(run["model_dir"]) / topic_store.RUN_FILE).read_text() == before
     assert [r["run_id"] for r in topic_store.list_runs(base_dir=tmp_path)] == [run["run_id"]]
     assert not list(pathlib.Path(run["model_dir"]).glob(".run.json.*"))
+
+
+def test_chart_subfolders_survive_relocation_from_another_layout(tmp_path):
+    run = {"run_id": "r1", "model_dir": "/elsewhere/r1-renamed",
+           "charts": {"lda_html": "/Users/a/topic_models/r1/charts/lda_model.html",
+                      "coherence_png": "/tmp/loose/coherence.png"}}
+    topic_store._relocate(run, tmp_path / "r1")
+    assert run["charts"]["lda_html"] == str(tmp_path / "r1" / "charts" / "lda_model.html")
+    assert run["charts"]["coherence_png"] == str(tmp_path / "r1" / "coherence.png")
+
+
+def test_cached_model_without_dictionary_is_not_usable(trained, tmp_path):
+    run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
+    (pathlib.Path(run["model_dir"]) / topic_store.DICTIONARY_FILE).unlink()
+    assert not topic_store.has_local_files(run, base_dir=tmp_path)
+    with pytest.raises(FileNotFoundError, match="never uploaded"):
+        topic_store.ensure_local(dict(run), base_dir=tmp_path)
