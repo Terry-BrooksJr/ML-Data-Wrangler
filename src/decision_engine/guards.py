@@ -31,16 +31,17 @@ def describe_value(value) -> str:
 
     Validation messages are logged and stored with the ticket's error; a
     model can put anything in a field (including text quoted from the
-    ticket), so strings are described rather than shown. Numbers are safe
-    and useful, so they are shown. The full reply is kept in the error's
-    audit (`raw_response`) for debugging.
+    ticket), so values are described rather than shown. That includes
+    numbers: a model can echo a date of birth or an account number as one.
+    The full reply is kept in the error's audit (`raw_response`) for
+    debugging.
     """
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "a boolean"
     if isinstance(value, (int, float)):
-        return repr(value)
+        return "a number"
     if isinstance(value, str):
         return f"a {len(value)}-character string"
     if isinstance(value, list):
@@ -69,7 +70,7 @@ def validate_reply(reply) -> dict:
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         problems.append(f"confidence must be a number, got {describe_value(confidence)}")
     elif not 0 <= confidence <= 100:
-        problems.append(f"confidence {confidence} is outside 0-100")
+        problems.append("confidence is outside 0-100")
 
     if not isinstance(reply.get("reasoning"), str):
         problems.append("reasoning must be a string")
