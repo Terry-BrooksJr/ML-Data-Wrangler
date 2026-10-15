@@ -987,3 +987,63 @@ def test_insecure_api_url_stops_the_batch(monkeypatch, tickets):
     assert summary["stopped"] and "InsecureApiUrl" in summary["stopped"]
     assert summary["classified"] == 0 and summary["errored"] == 0
     assert tickets.count_documents({"awaiting_review": True}) == 2
+
+
+# --- the model's reply stays out of logs and error messages ----------------------
+
+SECRET = "Student Jane Doe (DOB 2012-04-01) cannot see her results"
+
+
+@pytest.fixture
+def captured_logs():
+    from loguru import logger
+
+    lines = []
+    handler = logger.add(lambda message: lines.append(str(message)), level="DEBUG")
+    yield lines
+    logger.remove(handler)
+
+
+@pytest.mark.parametrize("reply", [
+    f"I can't classify this. The customer wrote: {SECRET}",                    # no JSON
+    model_reply(SECRET),                                                        # text as classification
+    model_reply("flag_solve", confidence=SECRET),                               # text as confidence
+    json.dumps([SECRET]),                                                        # not an object
+], ids=["non_json", "classification", "confidence", "array"])
+def test_reply_text_is_kept_in_the_audit_not_the_message(fake_model, captured_logs, reply):
+    fake_model(reply)
+    with pytest.raises(classify.EngineError) as raised:
+        classify.classify_ticket("payload")
+    assert "Jane" not in str(raised.value)
+    assert all("Jane" not in line for line in captured_logs)
+    assert SECRET in raised.value.audit["raw_response"]
+
+
+def test_stored_engine_errors_and_fallback_omit_the_reply(fake_model, tickets, captured_logs):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    tickets.insert_one(ticket)
+    fake_model(f"Not sure. Customer said: {SECRET}")
+
+    for _ in range(persistence.MAX_ENGINE_ATTEMPTS):
+        try:
+            result = persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+        except classify.EngineError:
+            continue
+
+    stored = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})
+    error = stored["last_engine_error"]
+    assert "Jane" not in error["message"]
+    assert SECRET in error["audit"]["raw_response"]  # still available for debugging
+    review = stored["agent_reviews"][-1]
+    assert review["classification"] == "manual_triage"
+    assert "Jane" not in review["reasoning"] and "Jane" not in result["engine_error"]
+    assert "Jane" not in (review.get("engine_error") or "")
+    assert all("Jane" not in line for line in captured_logs)
+
+
+def test_describe_value_never_includes_text():
+    from decision_engine.guards import describe_value
+
+    assert describe_value(SECRET) == f"a {len(SECRET)}-character string"
+    assert describe_value(140) == "140" and describe_value(None) == "null" and describe_value(True) == "a boolean"
+    assert describe_value([SECRET]) == "a list of 1 item(s)" and describe_value({"a": SECRET}) == "an object"

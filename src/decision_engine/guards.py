@@ -26,6 +26,30 @@ class InvalidReply(ValueError):
     """The model's JSON parsed but doesn't match the output format."""
 
 
+def describe_value(value) -> str:
+    """A value's type and size, never its text.
+
+    Validation messages are logged and stored with the ticket's error; a
+    model can put anything in a field (including text quoted from the
+    ticket), so strings are described rather than shown. Numbers are safe
+    and useful, so they are shown. The full reply is kept in the error's
+    audit (`raw_response`) for debugging.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return f"a {len(value)}-character string"
+    if isinstance(value, list):
+        return f"a list of {len(value)} item(s)"
+    if isinstance(value, dict):
+        return "an object"
+    return f"a {type(value).__name__}"
+
+
 def validate_reply(reply) -> dict:
     """Checks the reply's shape and returns a normalised copy.
 
@@ -37,12 +61,13 @@ def validate_reply(reply) -> dict:
 
     problems: List[str] = []
     if reply.get("classification") not in CLASSIFICATIONS:
-        problems.append(f"classification {reply.get('classification')!r} is not one of {', '.join(CLASSIFICATIONS)}")
+        problems.append(f"classification ({describe_value(reply.get('classification'))}) is not one of "
+                        f"{', '.join(CLASSIFICATIONS)}")
 
     confidence = reply.get("confidence")
     # bool is an int subclass; a string "80" is rejected rather than guessed at.
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        problems.append(f"confidence must be a number, got {confidence!r}")
+        problems.append(f"confidence must be a number, got {describe_value(confidence)}")
     elif not 0 <= confidence <= 100:
         problems.append(f"confidence {confidence} is outside 0-100")
 
