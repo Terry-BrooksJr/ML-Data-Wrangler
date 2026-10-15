@@ -617,3 +617,24 @@ def test_embed_tickets_cancel_sends_nothing(qapp, configured, monkeypatch, dialo
     wait_until_idle(qapp, tab)
     assert called == []
     assert stored.count_documents({"embedding": {"$exists": True}}) == 0
+
+
+def test_index_changed_during_the_run_is_an_error_not_a_warning(qapp, configured, monkeypatch, dialogs, stored):
+    import numpy as np
+
+    from decision_engine import search
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(triage_tab.embeddings, "embed",
+                        lambda texts, cfg, input_type="document": (np.zeros((len(texts), cfg.dimensions)), 0))
+    monkeypatch.setattr(search, "check_vector_index", lambda *a: "missing")
+
+    def changed(*args):
+        raise search.VectorIndexMismatch("tickets_vector now indexes 256-dimension vectors")
+
+    monkeypatch.setattr(search, "ensure_vector_index", changed)
+    tab = make_tab(stored)
+    tab.start_embed_tickets()
+    wait_until_idle(qapp, tab)
+    assert [kind for kind, _ in dialogs] == ["question", "critical"]
+    assert "256-dimension" in dialogs[1][1]

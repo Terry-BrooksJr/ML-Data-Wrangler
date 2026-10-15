@@ -511,6 +511,9 @@ def main(argv: List[str]) -> int:
     from decision_engine.persistence import get_tickets_collection
 
     tickets = get_tickets_collection()
+    # Before any paid call or write: a mismatched index would leave vectors
+    # it can't serve. Only a deployment without Atlas Search continues
+    # (status "unavailable": embeddings stored, no index).
     try:
         status = index_status(tickets, cfg)
     except search.VectorIndexMismatch as e:
@@ -530,10 +533,18 @@ def main(argv: List[str]) -> int:
     except BackfillRunning as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    finish_index(tickets, cfg, summary, status)
+    try:
+        finish_index(tickets, cfg, summary, status)
+    except search.SearchUnavailable as e:
+        summary["index"] = f"skipped: {e}"
+    except search.VectorIndexMismatch as e:
+        # The index changed in Atlas during the run.
+        print(format_summary(summary))
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(format_summary(summary) if plan.embed or plan.clear else
           "Every ticket's embedding is up to date.\n" + format_summary(summary))
-    return 0
+    return 0 if summary.get("complete") else 1
 
 
 if __name__ == "__main__":

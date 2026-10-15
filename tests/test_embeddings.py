@@ -456,3 +456,71 @@ def test_token_limit_is_recognised_without_keeping_the_body(monkeypatch):
     assert raised.value.token_limit is True
     assert "ticket text" not in str(raised.value)
     assert "too many tokens" in str(raised.value)
+
+
+# --- CLI backfill: index preflight --------------------------------------------------
+
+
+@pytest.fixture
+def cli(env, tickets, monkeypatch):
+    """embeddings.main wired to the mongomock tickets, with embed calls recorded."""
+    import decision_engine.persistence
+
+    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr(decision_engine.persistence, "get_tickets_collection", lambda: tickets)
+    calls = []
+
+    def fake_embed(texts, cfg, input_type="document"):
+        calls.append(list(texts))
+        return np.zeros((len(texts), cfg.dimensions), dtype=np.float32), 1
+
+    monkeypatch.setattr(embeddings, "embed", fake_embed)
+    return calls
+
+
+def _existing_index(monkeypatch, dimensions):
+    index = {"name": search.VECTOR_INDEX, "type": "vectorSearch",
+             "latestDefinition": search.vector_index_definition(dimensions)}
+    monkeypatch.setattr(search, "_search_indexes", lambda tickets: {search.VECTOR_INDEX: index})
+
+
+def test_cli_dimension_change_aborts_before_paid_calls_or_writes(cli, tickets, monkeypatch, capsys):
+    # Embedded at 1024 with a matching index, then settings change to 512.
+    embeddings.run_backfill(tickets, embeddings.config(), embeddings.plan_backfill(tickets, embeddings.config()),
+                            embed_fn=lambda texts, cfg: (np.ones((len(texts), 1024), dtype=np.float32), 0))
+    _existing_index(monkeypatch, 1024)
+    monkeypatch.setenv("EMBEDDING_DIMENSIONS", "512")
+    cli.clear()
+
+    assert embeddings.main(["backfill", "--yes"]) == 2
+    assert "numDimensions is 1024, expected 512" in capsys.readouterr().err
+    assert cli == []  # no paid calls
+    assert {len(d["embedding"]) for d in tickets.find({"embedding": {"$exists": True}})} == {1024}
+
+
+def test_cli_without_atlas_search_embeds_and_skips_the_index(cli, tickets, monkeypatch, capsys):
+    def unavailable(tickets):
+        raise search.SearchUnavailable("no Atlas Search")
+
+    monkeypatch.setattr(search, "_search_indexes", unavailable)
+    assert embeddings.main(["backfill", "--yes"]) == 0
+    assert "skipped" in capsys.readouterr().out
+    assert sum(len(c) for c in cli) == 2
+
+
+def test_cli_index_changed_during_the_run_is_an_error(cli, tickets, monkeypatch, capsys):
+    states = iter([{}, {search.VECTOR_INDEX: {"name": search.VECTOR_INDEX, "type": "vectorSearch",
+                                              "latestDefinition": search.vector_index_definition(256)}}])
+    monkeypatch.setattr(search, "_search_indexes", lambda tickets: next(states))
+    assert embeddings.main(["backfill", "--yes"]) == 2
+    captured = capsys.readouterr()
+    assert "Embedded: 2" in captured.out and "numDimensions is 256" in captured.err
+
+
+def test_cli_creates_the_index_after_a_complete_backfill(cli, tickets, monkeypatch, capsys):
+    created = []
+    monkeypatch.setattr(search, "_search_indexes", lambda tickets: {})
+    monkeypatch.setattr(search, "ensure_vector_index", lambda t, d: created.append(d) or True)
+    assert embeddings.main(["backfill", "--yes"]) == 0
+    assert created == [1024]
+    assert "tickets_vector created" in capsys.readouterr().out

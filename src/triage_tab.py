@@ -626,10 +626,12 @@ class TriageTab(QWidget):
         def embed_and_index():
             tickets = self.collection_factory()
             summary = embeddings.run_backfill(tickets, cfg, plan, should_stop=self._cancel.is_set)
+            # A VectorIndexMismatch here (the index changed in Atlas during the
+            # run) propagates and is shown as an error, not a warning.
             try:
                 embeddings.finish_index(tickets, cfg, summary, status)
-            except (search.SearchUnavailable, search.VectorIndexMismatch) as e:
-                summary["index"] = f"not created: {e}"
+            except search.SearchUnavailable as e:
+                summary["index"] = f"skipped: {e}"
             return summary
 
         self._run(embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done)
