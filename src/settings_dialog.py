@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 
 import settings
 from decision_engine.classify import api_url_problem, is_loopback_url
+import theme
 from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 
 
@@ -134,6 +135,15 @@ class SettingsDialog(QDialog):
             return False
         return True
 
+    def _theme_ok(self) -> bool:
+        """Refuses a theme name the app doesn't have."""
+        value = self.fields["LASSO_THEME"].text()
+        if theme.theme_name(value) is None:
+            QMessageBox.critical(self, "Unknown Theme",
+                                 f"Theme must be one of {', '.join(theme.THEMES)}, or blank for {theme.DEFAULT_THEME}.")
+            return False
+        return True
+
     def _storage_endpoint_ok(self) -> bool:
         """Refuses an unencrypted storage endpoint: the secret key signs requests to it."""
         url = self.fields["B2_ENDPOINT_URL"].text().strip()
@@ -146,7 +156,8 @@ class SettingsDialog(QDialog):
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
 
-        if not self._api_urls_ok() or not self._dimensions_ok() or not self._storage_endpoint_ok():
+        if not (self._api_urls_ok() and self._dimensions_ok() and self._storage_endpoint_ok()
+                and self._theme_ok()):
             return
         try:
             restart_needed = settings.save(self.values())

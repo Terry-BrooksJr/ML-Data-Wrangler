@@ -36,7 +36,7 @@ from PyQt5.QtWidgets import (
 import embeddings
 from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
-from utility import ThreadWorker
+from utility import ThreadWorker, worker_thread
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
@@ -152,12 +152,10 @@ def format_review(row: dict) -> str:
         lines += ["", "Overridden by code checks:", *[f"  - {o}" for o in review["guard_overrides"]]]
     if review.get("engine_error"):
         lines += ["", f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}"]
-    outcome = latest_outcome(row)
-    if outcome:
+    if outcome := latest_outcome(row):
         lines += ["", f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
                   + (f": {outcome['detail']}" if outcome.get("detail") else "")]
-    audit = review.get("audit") or {}
-    if audit:
+    if audit := review.get("audit") or {}:
         usage = audit.get("usage") or {}
         lines += [
             "",
@@ -452,7 +450,7 @@ class TriageTab(QWidget):
 
         self._set_busy(True, f"{description}…")
         self._on_done = on_done
-        self._thread = QThread(self)
+        self._thread = worker_thread(self)
         self._worker = ThreadWorker(with_connection_hint, description)
         self._worker.moveToThread(self._thread)
         self._worker.finished.connect(self._job_finished)

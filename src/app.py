@@ -38,7 +38,9 @@ settings.use_workspace()
 import bertopic_model
 import bertopic_runs
 import chart_viewer
+import macos
 import model_storage
+import theme
 import topic_store
 from bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
 from decision_engine.persistence import get_database, reset_clients
@@ -46,8 +48,8 @@ from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
 from triage_tab import TriageTab
-from utility import LogHighlighter, QTextEditStream, ThreadWorker
-from wrangler import DataWrangler
+from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
+from wrangler import DataWrangler, process_progress
 import en_core_web_lg
 
 
@@ -111,6 +113,8 @@ class MainWindow(QMainWindow, QDialog):
         self.run_thread: QThread = None
         self._run_job_callbacks = None
         self.mongo_thread: QThread = None
+        self.process_thread: QThread = None
+        self._process_total = 0
         # Set when the user closes the window while a job is running; the
         # window closes itself once every job has finished.
         self._close_pending = False
@@ -220,6 +224,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # Log output display
         self.log_output = QTextEdit()
+        self.log_output.setObjectName(theme.LOG_PANE)  # styled as a dark console in every theme
         self.log_output.setReadOnly(True)
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
@@ -274,6 +279,7 @@ class MainWindow(QMainWindow, QDialog):
         """Shows the settings dialog; saved values apply to the next action."""
         if SettingsDialog(self).exec_() != QDialog.Accepted:
             return
+        theme.apply(QApplication.instance())
         # The Mongo and model clients are cached; rebuild them from the new values.
         reset_clients()
         if self.triage_tab._loaded and not self.triage_tab.is_busy():
@@ -490,7 +496,7 @@ class MainWindow(QMainWindow, QDialog):
         slots then stop the thread, which is no longer running the task.
         """
         self._run_job_callbacks = (on_done, on_error or (lambda m: self.notify_user_of_error((False, m))))
-        self.run_thread = QThread()
+        self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(task, description)
         self.run_worker.moveToThread(self.run_thread)
         self.run_worker.finished.connect(self._run_job_finished)
@@ -532,7 +538,7 @@ class MainWindow(QMainWindow, QDialog):
         # process_corpus and model_trained report their own failures through
         # allocator.error and return False, so the worker finishes with None;
         # the worker's error signal covers anything else.
-        self.thread = QThread()
+        self.thread = worker_thread()
         self.training_worker = ThreadWorker(
             lambda: self._train_and_save(iterations, passes, number_of_topics),
             "Training the LDA model",
@@ -695,7 +701,7 @@ class MainWindow(QMainWindow, QDialog):
         self.mongo_button.setEnabled(False)
         self.show_progress_bar("Writing Tickets to MongoDB...")
 
-        self.mongo_thread = QThread()
+        self.mongo_thread = worker_thread()
         self.mongo_worker = ThreadWorker(
             lambda: self.wrangler.write_tickets_to_mongo(tickets),
             "Writing tickets to MongoDB",
@@ -898,7 +904,7 @@ class MainWindow(QMainWindow, QDialog):
         if run is None:
             return
         self.assign_topics_button.setEnabled(False)
-        self.run_thread = QThread()
+        self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(
             lambda: topic_store.assign_from_saved_run(
                 get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], run, nlp, stop_words
@@ -969,6 +975,8 @@ class MainWindow(QMainWindow, QDialog):
         def done(run):
             self._end_bertopic_job()
             message = f"BERTopic training has finished.\n\nSaved as run {run['run_id']} in {run['model_dir']}."
+            if run.get("storage"):
+                message += f"\nUploaded to {run['storage']['url']}."
             if run.get("assignment"):
                 a = run["assignment"]
                 message += (f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
@@ -982,10 +990,12 @@ class MainWindow(QMainWindow, QDialog):
             self._end_bertopic_job()
             self.notify_user_of_error((False, message))
 
-        tickets = lambda: get_database()[os.environ.get("MONGO_COLLECTION", "tickets")]
+        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in topic_model_runs.
         self._start_run_job(
-            lambda: bertopic_runs.train_and_save(tickets(), nlp, stop_words, options,
-                                                 status=self.bertopic_status.message.emit),
+            lambda: bertopic_runs.train_and_save(
+                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], nlp, stop_words, options,
+                status=self.bertopic_status.message.emit, runs=self._runs_collection(),
+                storage=model_storage.config),
             "Training the BERTopic model", done, on_error=failed)
 
     def _end_bertopic_job(self) -> None:
@@ -1005,17 +1015,43 @@ class MainWindow(QMainWindow, QDialog):
             logger.exception(f"Showing BERTopic run {run.get('run_id')} failed: {e}")
             self.notify_user_of_error((False, f"Could not show BERTopic run {run.get('run_id')}: {e}"))
 
+    def _known_bertopic_runs(self) -> List[dict]:
+        """BERTopic runs from Mongo and disk; disk only if Mongo can't be reached."""
+        try:
+            return bertopic_runs.known_runs(self._runs_collection())
+        except Exception as e:
+            logger.warning(f"Could not list BERTopic runs from MongoDB ({e}); showing this computer's runs only.")
+            return bertopic_runs.known_runs()
+
     def show_previous_bertopic_run(self) -> None:
-        """Lets the user pick a BERTopic run saved on this computer and shows it."""
+        """Lets the user pick a BERTopic run (from MongoDB or this computer) and shows it,
+        downloading its files from S3 first if they aren't here."""
         title = "Previous BERTopic Runs"
-        runs = bertopic_runs.list_runs()
-        if not runs:
-            QMessageBox.information(self, title, f"No BERTopic runs were found in {bertopic_model.model_dir()}.")
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
             return
-        labels = [bertopic_runs.describe_run(run) for run in runs]
+        runs = self._known_bertopic_runs()
+        if not runs:
+            QMessageBox.information(self, title, f"No BERTopic runs were found in MongoDB or "
+                                                 f"{bertopic_model.model_dir()}.")
+            return
+        labels = [f"{bertopic_runs.describe_run(run)} · {bertopic_runs.where(run)}" for run in runs]
         label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
-        if ok:
-            self.present_bertopic_results(runs[labels.index(label)])
+        if not ok:
+            return
+        run = runs[labels.index(label)]
+        if bertopic_runs.has_local_files(run) or not run.get("storage"):
+            # Its topics and scores are in the record; the charts need its files.
+            self.present_bertopic_results(run)
+            return
+
+        def failed(message):
+            self.notify_user_of_error((False, f"Could not download BERTopic run {run['run_id']}: {message}\n\n"
+                                              "Showing its topics and scores without the charts."))
+            self.present_bertopic_results(run)
+
+        self._start_run_job(lambda: bertopic_runs.ensure_local(run), f"Downloading BERTopic run {run['run_id']}",
+                            self.present_bertopic_results, on_error=failed)
 
     # --- shutdown --------------------------------------------------------------
 
@@ -1024,6 +1060,7 @@ class MainWindow(QMainWindow, QDialog):
         # self.thread shadows QObject.thread() until training first runs.
         candidates = [("model training", getattr(self, "thread", None)),
                       ("MongoDB write", self.mongo_thread),
+                      ("data processing", self.process_thread),
                       ("saved-run job", self.run_thread)]
         return [(label, t) for label, t in candidates if isinstance(t, QThread)]
 
@@ -1095,76 +1132,117 @@ class MainWindow(QMainWindow, QDialog):
         return QMessageBox.critical(self, "Critical Error", error[1])
 
     def init_start_process(self) -> None:
+        """Processes the selected ticket file and comments on a worker thread, with a progress bar.
+
+        Reshapes the tickets, binds each one's comments, builds the corpus and
+        writes the processed JSON files (see _process_data). Then sets up the
+        allocator and enables the training inputs.
         """
-        Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
-        This function enables the necessary UI elements and logs the success or failure of the process.
+        if self.process_thread is not None:
+            return
+        self.process_button.setEnabled(False)
+        self.show_progress_bar("Processing Data...")
+        self.pdialog.setCancelButton(None)  # the steps can't be interrupted
+        self._process_total = 0
 
-        The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
-        and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
-        enables the training model button, and activates relevant input fields. If any step fails, it logs the error
-        and raises a RuntimeError.
+        # The wrangler emits from the worker thread; these queued connections
+        # deliver to this window on the GUI thread.
+        self.wrangler.tickets_loaded.connect(self._process_tickets_loaded)
+        self.wrangler.ticket_progress.connect(self._process_reshape_progress)
+        self.wrangler.binding_progress.connect(self._process_bind_progress)
+        self.wrangler.corpus_creation_progress.connect(self._process_corpus_progress)
+        self.wrangler.worker_status.connect(self.update_training_status)
 
-        Args:
-            self.wrangler: An object responsible for data wrangling operations.
-            self.allocator: An object responsible for data allocation and preprocessing.
+        self.process_thread = worker_thread()
+        self.process_worker = ThreadWorker(self._process_data, "Processing data")
+        self.process_worker.moveToThread(self.process_thread)
+        self.process_worker.finished.connect(self.on_process_finished)
+        self.process_worker.error.connect(self.on_process_error)
+        self.process_thread.started.connect(self.process_worker.run)
+        self.process_thread.start()
+
+    def _process_data(self) -> Tuple[List[str], List[str]]:
+        """Runs the wrangling steps on the worker thread.
+
+        Returns:
+            (one document per ticket, their Zendesk IDs).
 
         Raises:
-            RuntimeError: If the data processing fails at any step.
+            RuntimeError: a step failed (its details are in the log).
         """
+        if not self.wrangler.tickets_reshaped():
+            raise RuntimeError("Failed to reshape tickets. Check the ticket file.")
+        if not self.wrangler.comments_bound():
+            raise RuntimeError("Failed to bind comments. Check the comments directory.")
+        if not self.wrangler.create_corpus():
+            raise RuntimeError("Failed to create corpus. The corpus is empty.")
+        self.wrangler.worker_status.emit("Writing the processed tickets and corpus files...")
+        self.wrangler.generate_json()
+        return self.wrangler.ticket_documents(), self.wrangler.ticket_ids()
 
-        try:
-            # Collect error messages
-            error_messages = [
-                (
-                    not self.wrangler.tickets_reshaped(),
-                    "Error: Failed to reshape tickets.",
-                ),
-                (not self.wrangler.comments_bound(), "Error: Failed to bind comments."),
-            ]
+    def _process_tickets_loaded(self, count: int) -> None:
+        self._process_total = count
 
-            # Check for errors and notify user
-            for condition, message in error_messages:
-                if condition:
-                    self.notify_user_of_error((False, message))
-                    return
+    def _process_reshape_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("reshape", done, self._process_total))
 
-            # If all checks pass, proceed with JSON generation and UI adjustments
-            corpus_task = self.wrangler.create_corpus()
-            if not corpus_task:
-                self.notify_user_of_error(
-                    (False, "Error: Failed to create corpus. The corpus is empty.")
-                )
-                return
-            self.wrangler.generate_json()
+    def _process_bind_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("bind", done, self._process_total))
 
-            self.allocator = LatentDirichletAllocator(num_of_topics=30)
-            # One document per ticket; lemmatization runs in the training thread.
-            self.allocator.prelemma_corpus = self.wrangler.ticket_documents()
-            self.allocator.document_ids = self.wrangler.ticket_ids()
-            self.process_button.setEnabled(False)
-            self.train_model_button.setEnabled(True)
+    def _process_corpus_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("corpus", done, self._process_total))
 
-            # Enable input fields for training parameters using a loop
-            for input_field in [
-                self.num_topics_input,
-                self.iterations_input,
-                self.passes_input,
-            ]:
-                input_field.setEnabled(True)
+    def _stop_process_thread(self) -> None:
+        for signal, slot in ((self.wrangler.tickets_loaded, self._process_tickets_loaded),
+                             (self.wrangler.ticket_progress, self._process_reshape_progress),
+                             (self.wrangler.binding_progress, self._process_bind_progress),
+                             (self.wrangler.corpus_creation_progress, self._process_corpus_progress),
+                             (self.wrangler.worker_status, self.update_training_status)):
+            signal.disconnect(slot)
+        if self.pdialog is not None:
+            self.pdialog.close()
+        self.process_thread.quit()
+        self.process_thread.wait()
+        self.process_thread = None
+        self.process_worker = None
 
-            success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
-            logger.success("Data successfully wrangled and saved.")
-            logger.log("USER INPUT REQUIRED", success_message)
-            QMessageBox.warning(
-                self,
-                "Data Has Successfully Processed",
-                "The Data Located in the Provided Paths Has been Wrangled and Massaged... \n\nPlease select Number of Topics, Iterations and Passes. \n Then Click Train Model to continue.",
-            )
-        except Exception as e:
-            # Notify user and log unexpected errors
-            self.notify_user_of_error((False, f"Unexpected error: {str(e)}"))
-            logger.exception(f"Processing failed: {e}")
-            raise RuntimeError("Data processing failed") from e
+    def on_process_finished(self, result: Tuple[List[str], List[str]]) -> None:
+        """Sets up the allocator from the processed tickets and enables training."""
+        self._stop_process_thread()
+        if self._close_pending:
+            logger.info("Data processing finished while closing.")
+            self._finish_pending_close()
+            return
+        documents, ids = result
+        self.allocator = LatentDirichletAllocator(num_of_topics=30)
+        # One document per ticket; lemmatization runs in the training thread.
+        self.allocator.prelemma_corpus = documents
+        self.allocator.document_ids = ids
+        self.train_model_button.setEnabled(True)
+        for input_field in [self.num_topics_input, self.iterations_input, self.passes_input]:
+            input_field.setEnabled(True)
+
+        success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
+        logger.success("Data successfully wrangled and saved.")
+        logger.log("USER INPUT REQUIRED", success_message)
+        QMessageBox.information(
+            self,
+            "Data Has Successfully Processed",
+            f"Processed {len(ids)} tickets.\n\nPlease select Number of Topics, Iterations and Passes. \n"
+            "Then Click Train Model to continue.",
+        )
+
+    def on_process_error(self, message: str) -> None:
+        """Reports a failed step; Process Data can be run again."""
+        self._stop_process_thread()
+        if self._close_pending:
+            logger.error(f"Data processing failed while closing: {message}")
+            self._finish_pending_close()
+            return
+        # A partial run leaves tickets behind; start the next run clean.
+        self.wrangler.wrangled_tickets = []
+        self.process_button.setEnabled(True)
+        self.notify_user_of_error((False, message))
 
 
 # The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
@@ -1172,9 +1250,12 @@ ICON_PATH = (
     pathlib.Path(sys._MEIPASS) / "assets" if settings.is_frozen() else pathlib.Path(__file__).resolve().parents[1] / "packaging"
 ) / "icon.png"
 
+# Before the QApplication: the macOS menu bar reads the name when it starts.
+macos.set_app_name("Lasso")
 app = QApplication(sys.argv)
 app.setApplicationName("Lasso")
 app.setWindowIcon(QIcon(str(ICON_PATH)))
+theme.apply(app)
 window = MainWindow("Lasso — Support Ticket Triage")
 app.aboutToQuit.connect(window.join_threads_on_quit)
 app.aboutToQuit.connect(chart_viewer.shutdown)

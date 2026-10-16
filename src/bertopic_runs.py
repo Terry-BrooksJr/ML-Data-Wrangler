@@ -8,11 +8,22 @@ never try to load one as an LDA model.
 
 Writing each ticket's topic to Mongo is opt-in (TrainOptions.assign) and
 only ever touches `embedding_topic`, never the LDA `topic` field.
+
+Runs are kept the way LDA runs are (see topic_store and model_storage): the
+folder on this computer is the source of truth; when MODEL_BUCKET is set it
+is uploaded, with a signed manifest, to <MODEL_PREFIX>bertopic/<run_id>/; and
+the run's details (not its files) are recorded in the topic_model_runs
+collection, so other computers can list it. A run whose files aren't here is
+downloaded and verified before it is opened, into <BERTOPIC_MODEL_DIR>/<run_id>
+only: its model is a pickle, which runs code when loaded.
 """
+import dataclasses
 import pathlib
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from loguru import logger
 
 from pymongo.collection import Collection
 
@@ -21,6 +32,8 @@ import topic_store
 from LDA_logic import tokenize
 
 METHOD = "bertopic"
+# Under MODEL_PREFIX in the bucket, apart from the LDA runs.
+STORAGE_SUBFOLDER = "bertopic/"
 CHARTS = ("barchart_html", "intertopic_html")
 
 
@@ -42,12 +55,16 @@ class TrainOptions:
 
 def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options: TrainOptions,
                    status: Callable[[str], None] = lambda message: None,
-                   base_dir: Optional[pathlib.Path] = None, lda_dir: Optional[pathlib.Path] = None) -> dict:
+                   base_dir: Optional[pathlib.Path] = None, lda_dir: Optional[pathlib.Path] = None,
+                   runs: Optional[Collection] = None, storage: Callable[[], Optional[object]] = lambda: None) -> dict:
     """Trains BERTopic on the tickets' stored embeddings and saves the run.
 
-    A comparison LDA run that can't be read becomes a warning, so the
-    trained model isn't lost. The returned run has `warnings` and, when
-    options.assign is set, `assignment`; neither is in its run.json.
+    The run is saved here first, then uploaded (storage() gives the
+    model_storage.Config, or None when uploads are off) and recorded in
+    runs (topic_model_runs). Each of those that fails becomes a warning on
+    the run, as does a comparison LDA run that can't be read, so a trained
+    model is never lost. The returned run has `warnings` and, when
+    options.assign is set, `assignment`.
 
     Raises:
         ValueError: no tickets have a current embedding, or too few to find topics.
@@ -76,23 +93,100 @@ def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options:
     run = bertopic_model.save_run(result, corpus, topic_store.preprocessing_info(nlp, stop_words), scores,
                                   comparison, base_dir=base_dir)
     run["warnings"] = warnings
+    upload(run, storage, status)
+    if runs is not None:
+        status("Recording the run in MongoDB...")
+        try:
+            record_run(runs, run)
+        except Exception as e:
+            logger.exception(f"Could not record BERTopic run {run['run_id']} in MongoDB: {e}")
+            run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")
     if options.assign:
         status(f"Writing `{bertopic_model.ASSIGNMENT_FIELD}` to {len(corpus.ids)} tickets...")
         run["assignment"] = bertopic_model.assign_topics(tickets, run, corpus.ids, result.topics)
     return run
 
 
+# --- persistence ------------------------------------------------------------------
+
+
+def storage_config(cfg):
+    """The LDA storage settings with BERTopic's own folder in the bucket."""
+    return dataclasses.replace(cfg, prefix=f"{cfg.prefix}{STORAGE_SUBFOLDER}")
+
+
+def upload(run: dict, storage: Callable[[], Optional[object]], status: Callable[[str], None] = lambda m: None,
+           client=None) -> None:
+    """Uploads the run when storage is configured; a failure becomes a warning on the run.
+
+    Like the app's LDA upload: the model is already saved here, and
+    `python -m model_storage upload --bertopic RUN_ID` retries it.
+    """
+    import model_storage
+
+    run.setdefault("warnings", [])
+    try:
+        cfg = storage()
+    except model_storage.StorageNotConfigured as e:
+        run["warnings"].append(f"Not uploaded to S3: {e}")
+        return
+    if cfg is None:
+        return
+    cfg = storage_config(cfg)
+    status(f"Uploading the model to s3://{cfg.bucket}/{cfg.prefix}...")
+    try:
+        model_storage.upload_and_record(run, cfg, client)
+    except Exception as e:
+        logger.exception(f"Could not upload BERTopic run {run['run_id']} to S3: {e}")
+        run["warnings"].append(f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
+                               f"Retry with: python -m model_storage upload --bertopic {run['run_id']}")
+
+
+def _document(run: dict) -> dict:
+    """What Mongo keeps of a run: its details, not this computer's transient notes."""
+    return {k: v for k, v in run.items() if k not in ("_id", "warnings", "assignment")}
+
+
+def record_run(runs: Collection, run: dict) -> None:
+    """Stores the run's details (not its files) in topic_model_runs, marked as BERTopic."""
+    runs.replace_one({"run_id": run["run_id"]}, {**_document(run), "method": METHOD}, upsert=True)
+
+
 # --- saved runs -------------------------------------------------------------------
 
 
-def list_runs(base_dir: Optional[pathlib.Path] = None) -> List[dict]:
-    """BERTopic runs saved on this computer, newest first."""
+def list_runs(base_dir: Optional[pathlib.Path] = None, runs: Optional[Collection] = None) -> List[dict]:
+    """BERTopic runs, newest first: from Mongo when given, else those saved on this computer."""
+    if runs is not None:
+        return list(runs.find({"method": METHOD}, {"_id": 0}).sort("ran_at", -1))
     base_dir = base_dir or bertopic_model.model_dir()
     if not base_dir.exists():
         return []
     found = (topic_store._read_run_file(p) for p in base_dir.glob(f"*/{topic_store.RUN_FILE}"))
-    runs = [r for r in found if r and r.get("method") == METHOD]
-    return sorted(runs, key=lambda r: str(r.get("ran_at")), reverse=True)
+    runs_found = [r for r in found if r and r.get("method") == METHOD]
+    return sorted(runs_found, key=lambda r: str(r.get("ran_at")), reverse=True)
+
+
+def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+    """Runs from Mongo (shared between computers) and this computer's disk, by run_id, newest first.
+
+    As topic_store.known_runs: Mongo's record wins, but a local upload record
+    survives if Mongo missed it.
+    """
+    local = {run["run_id"]: run for run in list_runs(base_dir)}
+    merged = dict(local)
+    if runs is not None:
+        for run in list_runs(runs=runs):
+            if not run.get("storage") and (local.get(run["run_id"]) or {}).get("storage"):
+                run["storage"] = local[run["run_id"]]["storage"]
+            merged[run["run_id"]] = run
+    return sorted(merged.values(), key=lambda r: str(r.get("ran_at")), reverse=True)
+
+
+def where(run: dict, base_dir: Optional[pathlib.Path] = None) -> str:
+    if has_local_files(run, base_dir):
+        return "on this computer"
+    return f"in {run['storage']['url']}" if run.get("storage") else "in MongoDB only (its files aren't available)"
 
 
 def lda_runs(base_dir: Optional[pathlib.Path] = None) -> List[dict]:
@@ -160,6 +254,50 @@ def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Pat
     if folder.parent != base:
         raise ValueError(f"Refusing run {run['run_id']!r}: it would be outside {base}.")
     return folder
+
+
+def _complete(folder: pathlib.Path) -> bool:
+    return (folder / bertopic_model.MODEL_FILE).is_file() and (folder / topic_store.RUN_FILE).is_file()
+
+
+def has_local_files(run: dict, base_dir: Optional[pathlib.Path] = None) -> bool:
+    """True if the run's model and run.json are in this computer's BERTopic folder."""
+    try:
+        return _complete(local_dir(run, base_dir))
+    except ValueError:
+        return False
+
+
+def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None, storage: Callable[[], Optional[object]] = None,
+                 client=None) -> dict:
+    """Makes the run's files available in <BERTOPIC_MODEL_DIR>/<run_id>, downloading them if needed.
+
+    As topic_store.ensure_local: the upload is verified against
+    MODEL_SIGNING_KEY before anything is installed. Updates the run's paths
+    to that folder.
+
+    Raises:
+        FileNotFoundError: the files aren't here and can't be downloaded.
+        ValueError: the run ID isn't a plain folder name.
+        model_storage.UntrustedRun: the upload failed verification.
+    """
+    import model_storage
+
+    local = local_dir(run, base_dir)
+    if not _complete(local):
+        if not run.get("storage"):
+            raise FileNotFoundError(f"BERTopic run {run['run_id']}'s files aren't on this computer and it was "
+                                    "never uploaded.")
+        cfg = (storage or model_storage.config)()
+        if cfg is None:
+            raise FileNotFoundError(
+                f"BERTopic run {run['run_id']} isn't on this computer. It was uploaded to {run['storage'].get('url')}; "
+                "set the model storage settings to download it.")
+        model_storage.download_run(run, storage_config(cfg), local, client)
+        if not _complete(local):
+            raise FileNotFoundError(f"BERTopic run {run['run_id']}'s upload has no {bertopic_model.MODEL_FILE}.")
+    topic_store._relocate(run, local)
+    return run
 
 
 def chart_paths(run: dict, base_dir: Optional[pathlib.Path] = None) -> Dict[str, Optional[str]]:

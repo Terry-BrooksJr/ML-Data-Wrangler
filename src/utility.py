@@ -1,10 +1,10 @@
 import re
 import sys
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import validators
 from loguru import logger
-from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject, QRegExp
+from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject, QRegExp, QThread
 from PyQt5.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
 
@@ -49,6 +49,19 @@ class QTextEditLogger:
 
 
 MAX_ERROR_CHARS = 500  # longer error text is cut from the dialog, not the log
+# Stack for worker QThreads. Qt leaves the size to the OS, and macOS gives
+# secondary threads 512 KiB. OpenBLAS (numpy.linalg, under matplotlib, gensim,
+# pyLDAvis and UMAP) puts large buffers on the stack and overflows that,
+# killing the whole app with SIGBUS. 16 MiB is what CPython gives its own
+# threads on macOS.
+WORKER_STACK_BYTES = 16 * 1024 * 1024
+
+
+def worker_thread(parent: Optional[QObject] = None) -> QThread:
+    """A QThread for background jobs, with a stack big enough for numerical code."""
+    thread = QThread(parent)
+    thread.setStackSize(WORKER_STACK_BYTES)
+    return thread
 
 
 class ThreadWorker(QObject):
@@ -196,7 +209,7 @@ class LogHighlighter(QSyntaxHighlighter):
         self.success_format.setFontPointSize(15)
 
         self.user_input_required_format = QTextCharFormat()
-        self.user_input_required_format.setForeground(QColor("blue"))
+        self.user_input_required_format.setForeground(QColor("deepskyblue"))  # readable on the dark log pane
         self.user_input_required_format.setFontCapitalization(
             QFont.Capitalization.AllUppercase
         )
