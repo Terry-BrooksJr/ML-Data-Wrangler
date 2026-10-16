@@ -975,6 +975,8 @@ class MainWindow(QMainWindow, QDialog):
         def done(run):
             self._end_bertopic_job()
             message = f"BERTopic training has finished.\n\nSaved as run {run['run_id']} in {run['model_dir']}."
+            if run.get("storage"):
+                message += f"\nUploaded to {run['storage']['url']}."
             if run.get("assignment"):
                 a = run["assignment"]
                 message += (f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
@@ -988,10 +990,12 @@ class MainWindow(QMainWindow, QDialog):
             self._end_bertopic_job()
             self.notify_user_of_error((False, message))
 
-        tickets = lambda: get_database()[os.environ.get("MONGO_COLLECTION", "tickets")]
+        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in topic_model_runs.
         self._start_run_job(
-            lambda: bertopic_runs.train_and_save(tickets(), nlp, stop_words, options,
-                                                 status=self.bertopic_status.message.emit),
+            lambda: bertopic_runs.train_and_save(
+                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], nlp, stop_words, options,
+                status=self.bertopic_status.message.emit, runs=self._runs_collection(),
+                storage=model_storage.config),
             "Training the BERTopic model", done, on_error=failed)
 
     def _end_bertopic_job(self) -> None:
@@ -1011,17 +1015,43 @@ class MainWindow(QMainWindow, QDialog):
             logger.exception(f"Showing BERTopic run {run.get('run_id')} failed: {e}")
             self.notify_user_of_error((False, f"Could not show BERTopic run {run.get('run_id')}: {e}"))
 
+    def _known_bertopic_runs(self) -> List[dict]:
+        """BERTopic runs from Mongo and disk; disk only if Mongo can't be reached."""
+        try:
+            return bertopic_runs.known_runs(self._runs_collection())
+        except Exception as e:
+            logger.warning(f"Could not list BERTopic runs from MongoDB ({e}); showing this computer's runs only.")
+            return bertopic_runs.known_runs()
+
     def show_previous_bertopic_run(self) -> None:
-        """Lets the user pick a BERTopic run saved on this computer and shows it."""
+        """Lets the user pick a BERTopic run (from MongoDB or this computer) and shows it,
+        downloading its files from S3 first if they aren't here."""
         title = "Previous BERTopic Runs"
-        runs = bertopic_runs.list_runs()
-        if not runs:
-            QMessageBox.information(self, title, f"No BERTopic runs were found in {bertopic_model.model_dir()}.")
+        if self.run_thread is not None:
+            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
             return
-        labels = [bertopic_runs.describe_run(run) for run in runs]
+        runs = self._known_bertopic_runs()
+        if not runs:
+            QMessageBox.information(self, title, f"No BERTopic runs were found in MongoDB or "
+                                                 f"{bertopic_model.model_dir()}.")
+            return
+        labels = [f"{bertopic_runs.describe_run(run)} · {bertopic_runs.where(run)}" for run in runs]
         label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
-        if ok:
-            self.present_bertopic_results(runs[labels.index(label)])
+        if not ok:
+            return
+        run = runs[labels.index(label)]
+        if bertopic_runs.has_local_files(run) or not run.get("storage"):
+            # Its topics and scores are in the record; the charts need its files.
+            self.present_bertopic_results(run)
+            return
+
+        def failed(message):
+            self.notify_user_of_error((False, f"Could not download BERTopic run {run['run_id']}: {message}\n\n"
+                                              "Showing its topics and scores without the charts."))
+            self.present_bertopic_results(run)
+
+        self._start_run_job(lambda: bertopic_runs.ensure_local(run), f"Downloading BERTopic run {run['run_id']}",
+                            self.present_bertopic_results, on_error=failed)
 
     # --- shutdown --------------------------------------------------------------
 

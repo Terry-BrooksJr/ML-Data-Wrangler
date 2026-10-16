@@ -138,9 +138,14 @@ scored on the same tickets), and opens the topic word chart and intertopic
 distance map in the browser.
 
 Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
-LDA runs in `topic_models/`; **Show Previous BERTopic Run…** reopens one. They
-aren't uploaded to S3 or recorded in MongoDB. The same can be run from the
-command line: `cd src && python -m bertopic_model --help`.
+LDA runs in `topic_models/`, and kept the same way LDA runs are: recorded in
+MongoDB's `topic_model_runs` (marked `"method": "bertopic"`, so the LDA lists
+skip them) and, with model storage set up, uploaded with a signed manifest to
+`s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
+Run…** lists runs from MongoDB and this computer, and downloads and verifies
+one whose files aren't here before showing its charts. Retry a failed upload
+with `cd src && python -m model_storage upload --bertopic [RUN_ID ...]`. The
+same can be run from the command line: `cd src && python -m bertopic_model --help`.
 
 ### Saving models to S3
 

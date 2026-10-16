@@ -20,6 +20,7 @@ B2_APPLICATION_KEY, MODEL_SIGNING_KEY, and B2_ENDPOINT_URL (blank for AWS S3);
 optional MODEL_PREFIX and MODEL_STORAGE_REGION.
 
     cd src && python -m model_storage upload [RUN_ID ...]   # default: local runs not yet uploaded
+    cd src && python -m model_storage upload --bertopic [RUN_ID ...]   # BERTopic runs (bertopic_runs)
     cd src && python -m model_storage new-key               # prints a new MODEL_SIGNING_KEY
 """
 import argparse
@@ -418,6 +419,8 @@ def main(argv: List[str]) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     upload = commands.add_parser("upload", help="upload saved runs (default: local runs not uploaded yet)")
     upload.add_argument("run_ids", nargs="*")
+    upload.add_argument("--bertopic", action="store_true",
+                        help="upload BERTopic runs (BERTOPIC_MODEL_DIR) instead of LDA runs")
     commands.add_parser("new-key", help="print a new random MODEL_SIGNING_KEY")
     args = parser.parse_args(argv)
     if args.command == "new-key":
@@ -437,12 +440,18 @@ def main(argv: List[str]) -> int:
     if cfg is None:
         print("error: MODEL_BUCKET is not set. Set the bucket in Settings.", file=sys.stderr)
         return 2
-    runs = topic_store.list_runs()
+    if args.bertopic:
+        import bertopic_model
+        import bertopic_runs
+
+        runs, run_dir, cfg = bertopic_runs.list_runs(), bertopic_model.model_dir(), bertopic_runs.storage_config(cfg)
+    else:
+        runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
     if args.run_ids:
         by_id = {run["run_id"]: run for run in runs}
         missing = [r for r in args.run_ids if r not in by_id]
         if missing:
-            print(f"error: no local run {', '.join(missing)} under {topic_store.model_dir()}", file=sys.stderr)
+            print(f"error: no local run {', '.join(missing)} under {run_dir}", file=sys.stderr)
             return 2
         chosen = [by_id[r] for r in args.run_ids]
     else:
