@@ -114,6 +114,14 @@ computer's `topic_models/`) trained on the same tickets, with the same
 settings and preprocessing. If there is one, it offers **Use Saved Model**
 instead of retraining: the only difference would be the random seed.
 
+### Appearance
+
+The app uses [QDarkStyleSheet](https://github.com/ColinDuquesnoy/QDarkStyleSheet)'s
+dark theme by default. Settings > Appearance > Theme switches to `light`, or
+`native` for the operating system's own look; the change applies when you
+save. The log pane stays a dark console in every theme, so its coloured log
+levels stay readable.
+
 ### Embedding topics (BERTopic)
 
 **Train BERTopic Model…** groups the tickets in MongoDB by meaning, using the

@@ -93,6 +93,8 @@ SETTINGS: List[Setting] = [
     Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
             help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
                  "tickets_vector index dropped and recreated."),
+    Setting("LASSO_THEME", "Theme", "Appearance", default="dark",
+            help="dark, light or native (the operating system's own look)."),
     Setting("TOPIC_MODEL_DIR", "Topic model folder", "Storage", default="topic_models",
             help="Where saved topic-model runs go. Relative paths are under the working folder."),
     Setting("TOPIC_RUNS_COLLECTION", "Topic runs collection", "Storage", default="topic_model_runs", restart=True),

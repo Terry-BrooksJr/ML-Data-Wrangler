@@ -39,6 +39,7 @@ import bertopic_model
 import bertopic_runs
 import chart_viewer
 import model_storage
+import theme
 import topic_store
 from bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
 from decision_engine.persistence import get_database, reset_clients
@@ -220,6 +221,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # Log output display
         self.log_output = QTextEdit()
+        self.log_output.setObjectName(theme.LOG_PANE)  # styled as a dark console in every theme
         self.log_output.setReadOnly(True)
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
@@ -274,6 +276,7 @@ class MainWindow(QMainWindow, QDialog):
         """Shows the settings dialog; saved values apply to the next action."""
         if SettingsDialog(self).exec_() != QDialog.Accepted:
             return
+        theme.apply(QApplication.instance())
         # The Mongo and model clients are cached; rebuild them from the new values.
         reset_clients()
         if self.triage_tab._loaded and not self.triage_tab.is_busy():
@@ -1175,6 +1178,7 @@ ICON_PATH = (
 app = QApplication(sys.argv)
 app.setApplicationName("Lasso")
 app.setWindowIcon(QIcon(str(ICON_PATH)))
+theme.apply(app)
 window = MainWindow("Lasso — Support Ticket Triage")
 app.aboutToQuit.connect(window.join_threads_on_quit)
 app.aboutToQuit.connect(chart_viewer.shutdown)

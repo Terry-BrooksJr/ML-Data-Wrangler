@@ -196,7 +196,7 @@ class LogHighlighter(QSyntaxHighlighter):
         self.success_format.setFontPointSize(15)
 
         self.user_input_required_format = QTextCharFormat()
-        self.user_input_required_format.setForeground(QColor("blue"))
+        self.user_input_required_format.setForeground(QColor("deepskyblue"))  # readable on the dark log pane
         self.user_input_required_format.setFontCapitalization(
             QFont.Capitalization.AllUppercase
         )
