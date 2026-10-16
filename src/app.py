@@ -38,6 +38,7 @@ settings.use_workspace()
 import bertopic_model
 import bertopic_runs
 import chart_viewer
+import macos
 import model_storage
 import theme
 import topic_store
@@ -1175,6 +1176,8 @@ ICON_PATH = (
     pathlib.Path(sys._MEIPASS) / "assets" if settings.is_frozen() else pathlib.Path(__file__).resolve().parents[1] / "packaging"
 ) / "icon.png"
 
+# Before the QApplication: the macOS menu bar reads the name when it starts.
+macos.set_app_name("Lasso")
 app = QApplication(sys.argv)
 app.setApplicationName("Lasso")
 app.setWindowIcon(QIcon(str(ICON_PATH)))
