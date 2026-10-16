@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -135,15 +136,15 @@ def test_voyage_candidate_uses_app_settings(monkeypatch):
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "512")
     sent = []
 
-    def fake_post(url, api_key, body):
-        sent.append((url, api_key, body))
-        return {"data": [{"index": i, "embedding": [0.0] * 512} for i in range(len(body["input"]))]}
+    def fake_voyage(texts, cfg, input_type):
+        sent.append(cfg)
+        return SimpleNamespace(embeddings=[[0.0] * 512 for _ in texts], total_tokens=len(texts))
 
-    monkeypatch.setattr(ee.embeddings, "post_json", fake_post)
+    monkeypatch.setattr(ee.embeddings, "voyage_embed", fake_voyage)
     vectors, _ = ee.voyage_embedder("voyage-3.5-lite")(["a"])
-    url, key, body = sent[0]
-    assert url == ee.embeddings.DEFAULT_URL and key == "k"
-    assert body["model"] == "voyage-3.5-lite" and body["output_dimension"] == 512
+    cfg = sent[0]
+    assert cfg.url == ee.embeddings.default_url() and cfg.api_key == "k"
+    assert cfg.model == "voyage-3.5-lite" and cfg.dimensions == 512
     assert vectors.shape == (1, 512)
     # The cache key includes dimensions, so changing them doesn't reuse old vectors.
     assert ee.candidates("voyage-3.5", "x")["voyage"].model == "voyage-3.5@512"

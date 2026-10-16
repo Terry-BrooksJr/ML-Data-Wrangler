@@ -82,9 +82,14 @@ SETTINGS: List[Setting] = [
             help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below."),
   
     Setting("EMBEDDING_API_URL", "Endpoint", "Embeddings (Voyage AI)",
-            default="https://api.voyageai.com/v1/embeddings",
-            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
+            default="https://ai.mongodb.com/v1/embeddings",
+            help="Ends in /embeddings. Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
     Setting("EMBEDDING_MODEL", "Model", "Embeddings (Voyage AI)", default="voyage-3.5"),
+    Setting("EMBEDDING_TPM", "Tokens per minute", "Embeddings (Voyage AI)", default="10000",
+            help="Your key's Voyage rate limit; requests are paced to stay under it. "
+                 "10,000 without billing on Atlas; raise it once your limit is higher."),
+    Setting("EMBEDDING_RPM", "Requests per minute", "Embeddings (Voyage AI)", default="3",
+            help="Your key's Voyage request limit (3 without billing on Atlas)."),
     Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
             help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
                  "tickets_vector index dropped and recreated."),

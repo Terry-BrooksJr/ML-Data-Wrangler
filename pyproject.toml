@@ -27,6 +27,7 @@ dependencies = [
     "spacy>=3.7.5,<3.8",
     "umap-learn>=0.5.12",
     "validators>=0.34.0,<0.35",
+    "voyageai>=0.3.2",
 ]
 
 [dependency-groups]

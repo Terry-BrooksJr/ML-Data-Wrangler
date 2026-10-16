@@ -265,7 +265,13 @@ process_one_ticket("30882")      # a single ticket
 embedding on each ticket, then creates the Atlas vector index
 `tickets_vector` (cosine, filterable by `status`). Set the key under Settings >
 Embeddings (Voyage AI); the endpoint, model (`voyage-3.5`) and dimensions
-(1024) have defaults.
+(1024) have defaults. The default endpoint is Voyage on MongoDB Atlas,
+`https://ai.mongodb.com/v1/embeddings`, for an Atlas model API key;
+`EMBEDDING_API_ENDPOINT=api.voyageai.com` (or a full `EMBEDDING_API_URL`
+ending in `/embeddings`) uses Voyage's own API instead. Requests go through
+the `voyageai` Python client, with its retries off (only rate limits,
+502/503/504 and refused connections are retried, since a timed-out request
+may already have been billed) and redirects refused.
 
 - It embeds each ticket's subject and first requester comment (internal
   notes never; the subject alone if no comment is marked as the requester's).

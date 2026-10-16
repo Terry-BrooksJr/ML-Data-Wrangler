@@ -111,7 +111,7 @@ def candidates(voyage_model: str, openai_model: str) -> Dict[str, Candidate]:
                             f"{voyage_model}@{os.environ.get('EMBEDDING_DIMENSIONS') or embeddings.DEFAULT_DIMENSIONS}",
                             "EMBEDDING_API_KEY",
                             lambda: voyage_embedder(voyage_model), True,
-                            (os.environ.get("EMBEDDING_API_URL") or embeddings.DEFAULT_URL).strip()),
+                            (os.environ.get("EMBEDDING_API_URL") or embeddings.default_url()).strip()),
         "openai": Candidate(f"OpenAI {openai_model}", "openai", openai_model, "OPENAI_API_KEY",
                             lambda: openai_embedder(openai_model), True, OPENAI_URL),
     }
