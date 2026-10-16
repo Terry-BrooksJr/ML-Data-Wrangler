@@ -47,7 +47,7 @@ from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
 from triage_tab import TriageTab
-from utility import LogHighlighter, QTextEditStream, ThreadWorker
+from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
 from wrangler import DataWrangler
 import en_core_web_lg
 
@@ -493,7 +493,7 @@ class MainWindow(QMainWindow, QDialog):
         slots then stop the thread, which is no longer running the task.
         """
         self._run_job_callbacks = (on_done, on_error or (lambda m: self.notify_user_of_error((False, m))))
-        self.run_thread = QThread()
+        self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(task, description)
         self.run_worker.moveToThread(self.run_thread)
         self.run_worker.finished.connect(self._run_job_finished)
@@ -535,7 +535,7 @@ class MainWindow(QMainWindow, QDialog):
         # process_corpus and model_trained report their own failures through
         # allocator.error and return False, so the worker finishes with None;
         # the worker's error signal covers anything else.
-        self.thread = QThread()
+        self.thread = worker_thread()
         self.training_worker = ThreadWorker(
             lambda: self._train_and_save(iterations, passes, number_of_topics),
             "Training the LDA model",
@@ -698,7 +698,7 @@ class MainWindow(QMainWindow, QDialog):
         self.mongo_button.setEnabled(False)
         self.show_progress_bar("Writing Tickets to MongoDB...")
 
-        self.mongo_thread = QThread()
+        self.mongo_thread = worker_thread()
         self.mongo_worker = ThreadWorker(
             lambda: self.wrangler.write_tickets_to_mongo(tickets),
             "Writing tickets to MongoDB",
@@ -901,7 +901,7 @@ class MainWindow(QMainWindow, QDialog):
         if run is None:
             return
         self.assign_topics_button.setEnabled(False)
-        self.run_thread = QThread()
+        self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(
             lambda: topic_store.assign_from_saved_run(
                 get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], run, nlp, stop_words
