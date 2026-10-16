@@ -152,12 +152,10 @@ def format_review(row: dict) -> str:
         lines += ["", "Overridden by code checks:", *[f"  - {o}" for o in review["guard_overrides"]]]
     if review.get("engine_error"):
         lines += ["", f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}"]
-    outcome = latest_outcome(row)
-    if outcome:
+    if outcome := latest_outcome(row):
         lines += ["", f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
                   + (f": {outcome['detail']}" if outcome.get("detail") else "")]
-    audit = review.get("audit") or {}
-    if audit:
+    if audit := review.get("audit") or {}:
         usage = audit.get("usage") or {}
         lines += [
             "",
