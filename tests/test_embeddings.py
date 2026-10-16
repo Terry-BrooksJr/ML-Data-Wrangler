@@ -1,6 +1,10 @@
 import io
+import json
+import logging
 import socket
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
 
 import mongomock
@@ -13,10 +17,35 @@ from decision_engine import search
 
 @pytest.fixture
 def env(monkeypatch):
-    for name in ("EMBEDDING_API_URL", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS"):
+    for name in ("EMBEDDING_API_URL", "EMBEDDING_API_ENDPOINT", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS",
+                 "EMBEDDING_TPM", "EMBEDDING_RPM"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+    monkeypatch.setattr(embeddings, "_limiters", {})
+    monkeypatch.setattr(embeddings.random, "uniform", lambda a, b: 0.0)
     return monkeypatch
+
+
+class FakeClock:
+    """embeddings' clock and sleep: sleeping moves the clock on, instantly."""
+
+    def __init__(self):
+        self.t, self.sleeps = 1000.0, []
+
+    def now(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+@pytest.fixture
+def clock(env):
+    fake = FakeClock()
+    env.setattr(embeddings, "_now", fake.now)
+    env.setattr(embeddings.time, "sleep", fake.sleep)
+    return fake
 
 
 def _ticket(zendesk_id, subject, comments, **extra):
@@ -30,9 +59,24 @@ def _comment(body, role=None, internal=False):
 # --- config -----------------------------------------------------------------------
 
 
-def test_config_defaults_to_voyage(env):
+def test_config_defaults_to_voyage_on_mongodb(env):
     cfg = embeddings.config()
-    assert cfg == embeddings.Config("https://api.voyageai.com/v1/embeddings", "voyage-3.5", 1024, "test-key")
+    assert cfg == embeddings.Config("https://ai.mongodb.com/v1/embeddings", "voyage-3.5", 1024, "test-key")
+    assert cfg.base_url == "https://ai.mongodb.com/v1"
+
+
+def test_default_endpoint_is_read_when_config_is_built(env):
+    # Not at import: the CLI imports embeddings before loading .env.
+    env.setenv("EMBEDDING_API_ENDPOINT", "api.voyageai.com")
+    assert embeddings.config().url == "https://api.voyageai.com/v1/embeddings"
+
+
+def test_config_requires_an_embeddings_url(env):
+    env.setenv("EMBEDDING_API_URL", "https://ai.mongodb.com/v1")
+    with pytest.raises(embeddings.EmbeddingNotConfigured, match="must end in /embeddings"):
+        embeddings.config()
+    env.setenv("EMBEDDING_API_URL", "https://api.voyageai.com/v1/embeddings/")
+    assert embeddings.config().base_url == "https://api.voyageai.com/v1"
 
 
 @pytest.mark.parametrize("name, value, message", [
@@ -90,59 +134,259 @@ def test_batches_respect_count_and_size(monkeypatch):
     assert embeddings._batches([]) == []
 
 
-def _reply(texts, dims=1024):
-    data = [{"index": i, "embedding": [float(i)] * dims} for i in range(len(texts))]
-    return {"data": list(reversed(data)), "usage": {"total_tokens": len(texts)}}
+# --- Voyage client, against a local server ----------------------------------------
 
 
-def test_embed_sends_voyage_request(env):
-    sent = []
+class FakeVoyage:
+    """A local Voyage API. Each request is answered by respond(body) -> (status, payload[, headers]),
+    or a default reply of one vector per input."""
 
-    def fake_post(url, api_key, body):
-        sent.append((url, api_key, body))
-        return _reply(body["input"])
+    def __init__(self):
+        self.requests = []
+        self.respond = lambda body: (200, self.reply(body["input"]))
+        server = self
 
-    env.setattr(embeddings, "post_json", fake_post)
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                server.requests.append((self.path, dict(self.headers), body))
+                status, payload, *headers = server.respond(body)
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                for name, value in (headers[0] if headers else {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}/v1/embeddings"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    @staticmethod
+    def reply(texts, dims=1024):
+        data = [{"object": "embedding", "index": i, "embedding": [float(i)] * dims} for i in range(len(texts))]
+        return {"object": "list", "data": data, "model": "voyage-3.5", "usage": {"total_tokens": len(texts)}}
+
+    def paths(self):
+        return [path for path, _, _ in self.requests]
+
+
+@pytest.fixture
+def voyage(env, clock):
+    server = FakeVoyage()
+    server.clock = clock
+    env.setenv("EMBEDDING_API_URL", server.url)
+    yield server
+    server.httpd.shutdown()
+    server.httpd.server_close()
+
+
+def test_embed_sends_voyage_request_through_the_client(voyage):
     vectors, tokens = embeddings.embed(["a", "b"], embeddings.config(), input_type="query")
-    url, key, body = sent[0]
-    assert url == embeddings.DEFAULT_URL and key == "test-key"
-    assert body == {"model": "voyage-3.5", "input": ["a", "b"], "input_type": "query",
-                    "output_dimension": 1024, "truncation": True}
+
+    path, headers, body = voyage.requests[0]
+    assert path == "/v1/embeddings" and headers["Authorization"] == "Bearer test-key"
+    assert {k: body[k] for k in ("model", "input", "input_type", "output_dimension", "truncation")} == {
+        "model": "voyage-3.5", "input": ["a", "b"], "input_type": "query", "output_dimension": 1024,
+        "truncation": True}
     assert vectors.shape == (2, 1024) and vectors[1, 0] == 1.0 and tokens == 2
 
 
-def test_embed_splits_a_batch_over_the_token_limit(env):
+def test_embed_splits_a_batch_over_the_token_limit(voyage):
     sizes = []
 
-    def fake_post(url, api_key, body):
+    def respond(body):
         sizes.append(len(body["input"]))
         if len(body["input"]) > 2:
-            raise embeddings.ApiError("HTTP 400", 400, token_limit=True)
-        return _reply(body["input"])
+            return 400, {"detail": "Request exceeds the max allowed tokens per batch"}
+        return 200, voyage.reply(body["input"])
 
-    env.setattr(embeddings, "post_json", fake_post)
+    voyage.respond = respond
     vectors, tokens = embeddings.embed(["a", "b", "c", "d", "e"], embeddings.config())
     assert sizes == [5, 2, 3, 1, 2]
     assert vectors.shape == (5, 1024) and tokens == 5
 
 
-def test_other_client_errors_are_not_split(env):
-    calls = []
-
-    def fake_post(url, api_key, body):
-        calls.append(1)
-        raise embeddings.ApiError("HTTP 400", 400)
-
-    env.setattr(embeddings, "post_json", fake_post)
-    with pytest.raises(embeddings.ApiError):
+def test_other_client_errors_are_not_split(voyage):
+    voyage.respond = lambda body: (400, {"detail": "Unknown model"})
+    with pytest.raises(embeddings.ApiError, match="HTTP 400") as raised:
         embeddings.embed(["a", "b"], embeddings.config())
-    assert len(calls) == 1
+    assert not raised.value.token_limit
+    assert len(voyage.requests) == 1
 
 
-def test_embed_rejects_wrong_dimensions(env):
-    env.setattr(embeddings, "post_json", lambda *a: {"data": [{"index": 0, "embedding": [0.0] * 3}]})
+def test_embed_rejects_wrong_dimensions(voyage):
+    voyage.respond = lambda body: (200, voyage.reply(body["input"], dims=3))
     with pytest.raises(embeddings.ApiError, match="3-dimension"):
         embeddings.embed(["a"], embeddings.config())
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_client_retries_only_when_nothing_was_processed(voyage, status):
+    outcomes = [(status, {"detail": "busy"}), (200, None)]
+    voyage.respond = lambda body: (lambda o: (o[0], o[1] or voyage.reply(body["input"])))(
+        outcomes[len(voyage.requests) - 1])
+    vectors, _ = embeddings.embed(["a"], embeddings.config())
+    assert vectors.shape == (1, 1024) and len(voyage.requests) == 2
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_client_does_not_retry_failures_that_may_have_been_billed(voyage, status):
+    voyage.respond = lambda body: (status, {"detail": "no"})
+    with pytest.raises(embeddings.ApiError, match=f"HTTP {status}"):
+        embeddings.embed(["a"], embeddings.config())
+    assert len(voyage.requests) == 1
+
+
+def test_client_does_not_retry_a_timeout(voyage, monkeypatch):
+    monkeypatch.setattr(embeddings, "REQUEST_TIMEOUT_SECONDS", 0.2)
+
+    def slow(body):
+        threading.Event().wait(0.6)  # time.sleep is patched out by the fixture
+        return 200, voyage.reply(body["input"])
+
+    voyage.respond = slow
+    with pytest.raises(embeddings.ApiError, match="timed out"):
+        embeddings.embed(["a"], embeddings.config())
+    assert len(voyage.requests) == 1
+
+
+def test_client_retries_a_refused_connection(env):
+    env.setattr(embeddings, "_now", lambda: 0.0)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # closed once this block ends: connections are refused
+    env.setenv("EMBEDDING_API_URL", f"http://127.0.0.1:{port}/v1/embeddings")
+    sleeps = []
+    env.setattr(embeddings.time, "sleep", sleeps.append)
+    with pytest.raises(embeddings.ApiError, match="could not connect"):
+        embeddings.embed(["a"], embeddings.config())
+    assert len(sleeps) == embeddings.MAX_ATTEMPTS - 1
+
+
+def test_client_refuses_redirects(voyage):
+    collect = voyage.url.replace("/v1/embeddings", "/collect")
+    voyage.respond = lambda body: (307, {}, {"Location": collect})
+    with pytest.raises(embeddings.ApiError, match="not following") as raised:
+        embeddings.embed(["secret ticket text"], embeddings.config())
+    assert raised.value.status == 307 and collect in str(raised.value)
+    assert voyage.paths() == ["/v1/embeddings"]
+
+
+# --- rate limits ------------------------------------------------------------------
+
+
+def test_config_reads_rate_limits(env):
+    cfg = embeddings.config()
+    assert (cfg.tpm, cfg.rpm, cfg.token_budget) == (10_000, 3, 9_000)
+    env.setenv("EMBEDDING_TPM", "2,000,000")
+    env.setenv("EMBEDDING_RPM", "2000")
+    assert (embeddings.config().tpm, embeddings.config().rpm) == (2_000_000, 2000)
+
+
+@pytest.mark.parametrize("name, value", [("EMBEDDING_TPM", "0"), ("EMBEDDING_RPM", "lots")])
+def test_config_rejects_bad_rate_limits(env, name, value):
+    env.setenv(name, value)
+    with pytest.raises(embeddings.EmbeddingNotConfigured, match=name):
+        embeddings.config()
+
+
+def test_batches_fit_the_token_budget(env):
+    cfg = embeddings.config()
+    assert embeddings.batch_chars(cfg) == int(9_000 * embeddings.CHARS_PER_TOKEN_GUESS)
+    assert embeddings.batch_chars() == embeddings.MAX_BATCH_CHARS
+    assert embeddings._batches(["x" * 15_000] * 3, embeddings.batch_chars(cfg)) == [(0, 1), (1, 2), (2, 3)]
+
+
+def test_limiter_keeps_to_requests_per_minute(clock):
+    limiter = embeddings.RateLimiter(tpm_budget=1_000_000, rpm=3)
+    for _ in range(3):
+        limiter.wait_for(1)
+    assert clock.sleeps == []
+    limiter.wait_for(1)
+    assert clock.sleeps == [pytest.approx(60.5)]
+
+
+def test_limiter_keeps_to_tokens_per_minute(clock):
+    limiter = embeddings.RateLimiter(tpm_budget=100, rpm=100)
+    limiter.wait_for(60)
+    clock.sleep(10)
+    limiter.wait_for(40)
+    assert clock.sleeps == [10]
+    limiter.wait_for(30)  # 130 > 100: wait for the first to age out
+    assert clock.sleeps[1:] == [pytest.approx(50.5)]
+    # Too big for any minute: sent once the window is empty.
+    limiter.wait_for(500)
+    assert sum(clock.sleeps) == pytest.approx(10 + 50.5 + 60.5)
+
+
+def test_limiter_learns_characters_per_token(clock):
+    limiter = embeddings.RateLimiter(tpm_budget=100, rpm=10)
+    assert limiter.estimate(["x" * 250]) == int(250 / embeddings.CHARS_PER_TOKEN_GUESS * 1.1) + 1
+    entry = limiter.wait_for(limiter.estimate(["x" * 400]))
+    limiter.billed(entry, ["x" * 400], 100)
+    assert entry[1] == 100 and limiter.chars_per_token() == 4
+    limiter.unsent(entry)
+    assert not limiter.recent
+
+
+def test_requests_are_paced_to_the_rate_limit(voyage):
+    vectors, _ = embeddings.embed(["x" * 20_000] * 4, embeddings.config())  # one per batch
+    assert vectors.shape == (4, 1024) and len(voyage.requests) == 4
+    assert voyage.clock.sleeps == [pytest.approx(60.5)]  # the 4th waits for the RPM window
+
+
+def test_429_waits_for_retry_after(voyage):
+    replies = iter([(429, {"detail": "slow down"}, {"Retry-After": "7"}), None])
+    voyage.respond = lambda body: next(replies) or (200, voyage.reply(body["input"]))
+    vectors, _ = embeddings.embed(["a"], embeddings.config())
+    assert vectors.shape == (1, 1024) and len(voyage.requests) == 2
+    assert voyage.clock.sleeps == [7.0]
+
+
+def test_429_without_retry_after_waits_a_minute(voyage):
+    replies = iter([(429, {"detail": "slow down"}), None])
+    voyage.respond = lambda body: next(replies) or (200, voyage.reply(body["input"]))
+    embeddings.embed(["a"], embeddings.config())
+    assert voyage.clock.sleeps[0] == embeddings.RATE_WINDOW_SECONDS
+
+
+def test_429_gives_up_after_its_attempts(voyage):
+    voyage.respond = lambda body: (429, {"detail": "slow down"})
+    with pytest.raises(embeddings.ApiError, match="HTTP 429"):
+        embeddings.embed(["a"], embeddings.config())
+    assert len(voyage.requests) == embeddings.MAX_RATE_LIMIT_ATTEMPTS
+
+
+def test_describe_plan_estimates_time(env):
+    plan = embeddings.Plan(embed=[embeddings.StaleTicket(1, "1", "x" * 520_000, "d", {})])
+    assert "about 14 minute(s)" in embeddings.describe_plan(plan, embeddings.config())
+
+
+@pytest.mark.parametrize("status", [400, 422, 429, 500])
+def test_client_error_details_echoing_ticket_text_are_never_exposed(voyage, caplog, status):
+    """The API may echo the rejected input in `detail`; it must not reach messages or logs."""
+    secret = "Student Jane Doe, DOB 2012-04-01, can't see her test"
+    voyage.respond = lambda body: (status, {"detail": f"Invalid input: {secret}"})
+    logged = []
+    handler = embeddings.logger.add(lambda m: logged.append(str(m)), level="DEBUG")
+    caplog.set_level(logging.DEBUG, logger="root")
+    try:
+        with pytest.raises(embeddings.ApiError) as raised:
+            embeddings.embed([secret], embeddings.config())
+    finally:
+        embeddings.logger.remove(handler)
+    error = raised.value
+    assert f"HTTP {status}" in str(error)
+    assert "Jane" not in str(error) and all("Jane" not in str(v) for v in vars(error).values())
+    assert error.__cause__ is None and error.__suppress_context__
+    assert all("Jane" not in line for line in logged)
+    assert "Jane" not in caplog.text
 
 
 class _Reply(io.BytesIO):
@@ -241,7 +485,7 @@ def test_backfill_stores_vectors_and_skips_current(env, tickets):
     doc = tickets.find_one({"zendesk_id": "1"})
     assert len(doc["embedding"]) == 1024
     assert {k: doc["embedding_meta"][k] for k in ("endpoint", "model", "dimensions")} == {
-        "endpoint": embeddings.DEFAULT_URL, "model": "voyage-3.5", "dimensions": 1024}
+        "endpoint": embeddings.default_url(), "model": "voyage-3.5", "dimensions": 1024}
     assert doc["embedding_meta"]["text_sha256"] == embeddings.text_hash("Login fails\n\nI can't log in")
     assert "embedding" not in tickets.find_one({"zendesk_id": "3"})
 

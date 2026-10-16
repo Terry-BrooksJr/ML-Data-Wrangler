@@ -51,17 +51,17 @@ SETTINGS: List[Setting] = [
             help="Atlas (or mongodb-atlas-local) connection string; full-text search needs Atlas."),
     Setting("MONGO_DB", "Database", "MongoDB", default="support_db"),
     Setting("MONGO_COLLECTION", "Tickets collection", "MongoDB", default="tickets"),
-    Setting("CHEAPER_INFERENCE_API_KEY", "API key", "Decision Engine", secret=True, required=True),
-    Setting("CHEAPER_INFERENCE_API_URL", "API URL", "Decision Engine", required=True,
+    Setting("CHEAPER_INFERENCE_API_KEY", "API key", "Decision Engine (Cheaper Inference)", secret=True, required=True),
+    Setting("CHEAPER_INFERENCE_API_URL", "API URL", "Decision Engine (Cheaper Inference)", required=True,
             default="https://api.cheaperinference.com",
             help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
-    Setting("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "Primary model", "Decision Engine", required=True,
+    Setting("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "Primary model", "Decision Engine (Cheaper Inference)", required=True,
             help="Classifies each ticket."),
-    Setting("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "Secondary model", "Decision Engine",
+    Setting("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "Secondary model", "Decision Engine (Cheaper Inference)",
             help="Fallback if the primary call errors. Leave blank to skip."),
-    Setting("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "Confirmation model", "Decision Engine",
+    Setting("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "Confirmation model", "Decision Engine (Cheaper Inference)",
             help="Re-checks manual-triage and low-confidence results. Leave blank to skip."),
-    Setting("DECISION_ENGINE_MODEL", "Default model", "Decision Engine", default="claude-opus-4.8",
+    Setting("DECISION_ENGINE_MODEL", "Default model", "Decision Engine (Cheaper Inference)", default="claude-opus-4.8",
             help="Used when no primary model is set.", restart=True),
     Setting("MODEL_BUCKET", "Bucket", "Model storage (S3 / Backblaze B2)",
             help="Trained topic models are uploaded here after each run. Leave blank to keep them on this computer only."),
@@ -82,12 +82,19 @@ SETTINGS: List[Setting] = [
             help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below."),
   
     Setting("EMBEDDING_API_URL", "Endpoint", "Embeddings (Voyage AI)",
-            default="https://api.voyageai.com/v1/embeddings",
-            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
+            default="https://ai.mongodb.com/v1/embeddings",
+            help="Ends in /embeddings. Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
     Setting("EMBEDDING_MODEL", "Model", "Embeddings (Voyage AI)", default="voyage-3.5"),
+    Setting("EMBEDDING_TPM", "Tokens per minute", "Embeddings (Voyage AI)", default="10000",
+            help="Your key's Voyage rate limit; requests are paced to stay under it. "
+                 "10,000 without billing on Atlas; raise it once your limit is higher."),
+    Setting("EMBEDDING_RPM", "Requests per minute", "Embeddings (Voyage AI)", default="3",
+            help="Your key's Voyage request limit (3 without billing on Atlas)."),
     Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
             help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
                  "tickets_vector index dropped and recreated."),
+    Setting("LASSO_THEME", "Theme", "Appearance", default="dark",
+            help="dark, light or native (the operating system's own look)."),
     Setting("TOPIC_MODEL_DIR", "Topic model folder", "Storage", default="topic_models",
             help="Where saved topic-model runs go. Relative paths are under the working folder."),
     Setting("TOPIC_RUNS_COLLECTION", "Topic runs collection", "Storage", default="topic_model_runs", restart=True),
@@ -235,7 +242,7 @@ def missing_required() -> List[str]:
 # What stops working when a group's required settings are missing.
 _MISSING_EFFECTS = {
     "MongoDB": "Write Tickets to MongoDB, recording topic runs in MongoDB, and the Decision Engine",
-    "Decision Engine": "the Decision Engine (classifying tickets)",
+    "Decision Engine (Cheaper Inference)": "the Decision Engine (classifying tickets)",
 }
 
 

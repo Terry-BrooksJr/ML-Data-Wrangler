@@ -114,6 +114,14 @@ computer's `topic_models/`) trained on the same tickets, with the same
 settings and preprocessing. If there is one, it offers **Use Saved Model**
 instead of retraining: the only difference would be the random seed.
 
+### Appearance
+
+The app uses [QDarkStyleSheet](https://github.com/ColinDuquesnoy/QDarkStyleSheet)'s
+dark theme by default. Settings > Appearance > Theme switches to `light`, or
+`native` for the operating system's own look; the change applies when you
+save. The log pane stays a dark console in every theme, so its coloured log
+levels stay readable.
+
 ### Embedding topics (BERTopic)
 
 **Train BERTopic Model…** groups the tickets in MongoDB by meaning, using the
@@ -130,9 +138,14 @@ scored on the same tickets), and opens the topic word chart and intertopic
 distance map in the browser.
 
 Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
-LDA runs in `topic_models/`; **Show Previous BERTopic Run…** reopens one. They
-aren't uploaded to S3 or recorded in MongoDB. The same can be run from the
-command line: `cd src && python -m bertopic_model --help`.
+LDA runs in `topic_models/`, and kept the same way LDA runs are: recorded in
+MongoDB's `topic_model_runs` (marked `"method": "bertopic"`, so the LDA lists
+skip them) and, with model storage set up, uploaded with a signed manifest to
+`s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
+Run…** lists runs from MongoDB and this computer, and downloads and verifies
+one whose files aren't here before showing its charts. Retry a failed upload
+with `cd src && python -m model_storage upload --bertopic [RUN_ID ...]`. The
+same can be run from the command line: `cd src && python -m bertopic_model --help`.
 
 ### Saving models to S3
 
@@ -265,7 +278,13 @@ process_one_ticket("30882")      # a single ticket
 embedding on each ticket, then creates the Atlas vector index
 `tickets_vector` (cosine, filterable by `status`). Set the key under Settings >
 Embeddings (Voyage AI); the endpoint, model (`voyage-3.5`) and dimensions
-(1024) have defaults.
+(1024) have defaults. The default endpoint is Voyage on MongoDB Atlas,
+`https://ai.mongodb.com/v1/embeddings`, for an Atlas model API key;
+`EMBEDDING_API_ENDPOINT=api.voyageai.com` (or a full `EMBEDDING_API_URL`
+ending in `/embeddings`) uses Voyage's own API instead. Requests go through
+the `voyageai` Python client, with its retries off (only rate limits,
+502/503/504 and refused connections are retried, since a timed-out request
+may already have been billed) and redirects refused.
 
 - It embeds each ticket's subject and first requester comment (internal
   notes never; the subject alone if no comment is marked as the requester's).
