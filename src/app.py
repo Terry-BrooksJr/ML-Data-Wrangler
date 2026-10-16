@@ -49,7 +49,7 @@ from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
-from wrangler import DataWrangler
+from wrangler import DataWrangler, process_progress
 import en_core_web_lg
 
 
@@ -113,6 +113,8 @@ class MainWindow(QMainWindow, QDialog):
         self.run_thread: QThread = None
         self._run_job_callbacks = None
         self.mongo_thread: QThread = None
+        self.process_thread: QThread = None
+        self._process_total = 0
         # Set when the user closes the window while a job is running; the
         # window closes itself once every job has finished.
         self._close_pending = False
@@ -1028,6 +1030,7 @@ class MainWindow(QMainWindow, QDialog):
         # self.thread shadows QObject.thread() until training first runs.
         candidates = [("model training", getattr(self, "thread", None)),
                       ("MongoDB write", self.mongo_thread),
+                      ("data processing", self.process_thread),
                       ("saved-run job", self.run_thread)]
         return [(label, t) for label, t in candidates if isinstance(t, QThread)]
 
@@ -1099,76 +1102,117 @@ class MainWindow(QMainWindow, QDialog):
         return QMessageBox.critical(self, "Critical Error", error[1])
 
     def init_start_process(self) -> None:
+        """Processes the selected ticket file and comments on a worker thread, with a progress bar.
+
+        Reshapes the tickets, binds each one's comments, builds the corpus and
+        writes the processed JSON files (see _process_data). Then sets up the
+        allocator and enables the training inputs.
         """
-        Initializes the data processing workflow by validating and executing the wrangling and allocation steps.
-        This function enables the necessary UI elements and logs the success or failure of the process.
+        if self.process_thread is not None:
+            return
+        self.process_button.setEnabled(False)
+        self.show_progress_bar("Processing Data...")
+        self.pdialog.setCancelButton(None)  # the steps can't be interrupted
+        self._process_total = 0
 
-        The `init_start_process` method checks if the wrangler has completed the necessary preprocessing steps
-        and if the allocator has preprocessed the data. Upon successful validation, it generates a JSON output,
-        enables the training model button, and activates relevant input fields. If any step fails, it logs the error
-        and raises a RuntimeError.
+        # The wrangler emits from the worker thread; these queued connections
+        # deliver to this window on the GUI thread.
+        self.wrangler.tickets_loaded.connect(self._process_tickets_loaded)
+        self.wrangler.ticket_progress.connect(self._process_reshape_progress)
+        self.wrangler.binding_progress.connect(self._process_bind_progress)
+        self.wrangler.corpus_creation_progress.connect(self._process_corpus_progress)
+        self.wrangler.worker_status.connect(self.update_training_status)
 
-        Args:
-            self.wrangler: An object responsible for data wrangling operations.
-            self.allocator: An object responsible for data allocation and preprocessing.
+        self.process_thread = worker_thread()
+        self.process_worker = ThreadWorker(self._process_data, "Processing data")
+        self.process_worker.moveToThread(self.process_thread)
+        self.process_worker.finished.connect(self.on_process_finished)
+        self.process_worker.error.connect(self.on_process_error)
+        self.process_thread.started.connect(self.process_worker.run)
+        self.process_thread.start()
+
+    def _process_data(self) -> Tuple[List[str], List[str]]:
+        """Runs the wrangling steps on the worker thread.
+
+        Returns:
+            (one document per ticket, their Zendesk IDs).
 
         Raises:
-            RuntimeError: If the data processing fails at any step.
+            RuntimeError: a step failed (its details are in the log).
         """
+        if not self.wrangler.tickets_reshaped():
+            raise RuntimeError("Failed to reshape tickets. Check the ticket file.")
+        if not self.wrangler.comments_bound():
+            raise RuntimeError("Failed to bind comments. Check the comments directory.")
+        if not self.wrangler.create_corpus():
+            raise RuntimeError("Failed to create corpus. The corpus is empty.")
+        self.wrangler.worker_status.emit("Writing the processed tickets and corpus files...")
+        self.wrangler.generate_json()
+        return self.wrangler.ticket_documents(), self.wrangler.ticket_ids()
 
-        try:
-            # Collect error messages
-            error_messages = [
-                (
-                    not self.wrangler.tickets_reshaped(),
-                    "Error: Failed to reshape tickets.",
-                ),
-                (not self.wrangler.comments_bound(), "Error: Failed to bind comments."),
-            ]
+    def _process_tickets_loaded(self, count: int) -> None:
+        self._process_total = count
 
-            # Check for errors and notify user
-            for condition, message in error_messages:
-                if condition:
-                    self.notify_user_of_error((False, message))
-                    return
+    def _process_reshape_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("reshape", done, self._process_total))
 
-            # If all checks pass, proceed with JSON generation and UI adjustments
-            corpus_task = self.wrangler.create_corpus()
-            if not corpus_task:
-                self.notify_user_of_error(
-                    (False, "Error: Failed to create corpus. The corpus is empty.")
-                )
-                return
-            self.wrangler.generate_json()
+    def _process_bind_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("bind", done, self._process_total))
 
-            self.allocator = LatentDirichletAllocator(num_of_topics=30)
-            # One document per ticket; lemmatization runs in the training thread.
-            self.allocator.prelemma_corpus = self.wrangler.ticket_documents()
-            self.allocator.document_ids = self.wrangler.ticket_ids()
-            self.process_button.setEnabled(False)
-            self.train_model_button.setEnabled(True)
+    def _process_corpus_progress(self, done: int) -> None:
+        self.update_training_progress_bar(process_progress("corpus", done, self._process_total))
 
-            # Enable input fields for training parameters using a loop
-            for input_field in [
-                self.num_topics_input,
-                self.iterations_input,
-                self.passes_input,
-            ]:
-                input_field.setEnabled(True)
+    def _stop_process_thread(self) -> None:
+        for signal, slot in ((self.wrangler.tickets_loaded, self._process_tickets_loaded),
+                             (self.wrangler.ticket_progress, self._process_reshape_progress),
+                             (self.wrangler.binding_progress, self._process_bind_progress),
+                             (self.wrangler.corpus_creation_progress, self._process_corpus_progress),
+                             (self.wrangler.worker_status, self.update_training_status)):
+            signal.disconnect(slot)
+        if self.pdialog is not None:
+            self.pdialog.close()
+        self.process_thread.quit()
+        self.process_thread.wait()
+        self.process_thread = None
+        self.process_worker = None
 
-            success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
-            logger.success("Data successfully wrangled and saved.")
-            logger.log("USER INPUT REQUIRED", success_message)
-            QMessageBox.warning(
-                self,
-                "Data Has Successfully Processed",
-                "The Data Located in the Provided Paths Has been Wrangled and Massaged... \n\nPlease select Number of Topics, Iterations and Passes. \n Then Click Train Model to continue.",
-            )
-        except Exception as e:
-            # Notify user and log unexpected errors
-            self.notify_user_of_error((False, f"Unexpected error: {str(e)}"))
-            logger.exception(f"Processing failed: {e}")
-            raise RuntimeError("Data processing failed") from e
+    def on_process_finished(self, result: Tuple[List[str], List[str]]) -> None:
+        """Sets up the allocator from the processed tickets and enables training."""
+        self._stop_process_thread()
+        if self._close_pending:
+            logger.info("Data processing finished while closing.")
+            self._finish_pending_close()
+            return
+        documents, ids = result
+        self.allocator = LatentDirichletAllocator(num_of_topics=30)
+        # One document per ticket; lemmatization runs in the training thread.
+        self.allocator.prelemma_corpus = documents
+        self.allocator.document_ids = ids
+        self.train_model_button.setEnabled(True)
+        for input_field in [self.num_topics_input, self.iterations_input, self.passes_input]:
+            input_field.setEnabled(True)
+
+        success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
+        logger.success("Data successfully wrangled and saved.")
+        logger.log("USER INPUT REQUIRED", success_message)
+        QMessageBox.information(
+            self,
+            "Data Has Successfully Processed",
+            f"Processed {len(ids)} tickets.\n\nPlease select Number of Topics, Iterations and Passes. \n"
+            "Then Click Train Model to continue.",
+        )
+
+    def on_process_error(self, message: str) -> None:
+        """Reports a failed step; Process Data can be run again."""
+        self._stop_process_thread()
+        if self._close_pending:
+            logger.error(f"Data processing failed while closing: {message}")
+            self._finish_pending_close()
+            return
+        # A partial run leaves tickets behind; start the next run clean.
+        self.wrangler.wrangled_tickets = []
+        self.process_button.setEnabled(True)
+        self.notify_user_of_error((False, message))
 
 
 # The packaged build bundles the icon under assets/ (see packaging/lasso.spec).

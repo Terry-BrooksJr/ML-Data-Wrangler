@@ -249,6 +249,19 @@ class Ticket:
         return ticket_dict
 
 
+# Process Data's steps and the share of its progress bar each fills, as
+# (start, end) percentages. Writing the JSON files fills the rest.
+PROCESS_STAGES = {"reshape": (0, 25), "bind": (25, 70), "corpus": (70, 95)}
+
+
+def process_progress(stage: str, done: int, total: int) -> int:
+    """Overall Process Data progress, 0-100, after `done` of `total` tickets in a stage."""
+    start, end = PROCESS_STAGES[stage]
+    if total <= 0:
+        return end
+    return start + (end - start) * min(done, total) // total
+
+
 class DataWrangler(QObject):
     """A class for processing and managing ticket data and associated comments.
 
@@ -258,6 +271,7 @@ class DataWrangler(QObject):
     It facilitates the organization and analysis of ticket-related information.
 
     Signals:
+        tickets_loaded: Emitted with the number of tickets read from the ticket file.
         ticket_finished: Emitted when a ticket processing operation is completed.
         ticket_progress: Emitted with the progress of ticket processing.
         binding_finished: Emitted when the binding of comments to tickets is completed.
@@ -268,6 +282,7 @@ class DataWrangler(QObject):
         worker_status: Emitted with the current status of the worker.
     """
 
+    tickets_loaded = pyqtSignal(int)
     ticket_finished = pyqtSignal()
     ticket_progress = pyqtSignal(int)
     binding_finished = pyqtSignal()
@@ -475,7 +490,9 @@ class DataWrangler(QObject):
         try:
             with open(self.ticket_file, "r") as tickets_file:
                 tickets_data = json.load(tickets_file)
-                for ticket in tickets_data:
+                self.tickets_loaded.emit(len(tickets_data))
+                self.worker_status.emit(f"Reshaping {len(tickets_data)} tickets...")
+                for i, ticket in enumerate(tickets_data):
                     reshaped_ticket = Ticket(
                         id=ticket["id"],
                         created_at=datetime.strptime(
@@ -506,6 +523,7 @@ class DataWrangler(QObject):
                     logger.debug(
                         f"Length of Wrangled Tickets: {len(self.wrangled_tickets)}"
                     )
+                    self.ticket_progress.emit(i + 1)
             self.ticket_finished.emit()
             return True
         except Exception as e:
@@ -961,6 +979,7 @@ class DataWrangler(QObject):
     def create_corpus(self) -> str:
         """Creates a text corpus from the wrangled tickets and their comments."""
         grouped_comments = []
+        self.worker_status.emit("Building the corpus...")
 
         for i, ticket in enumerate(self.wrangled_tickets):
             logger.info(f"Selecting {ticket.id} for Corpus Merge")
