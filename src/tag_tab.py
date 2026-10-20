@@ -18,8 +18,6 @@ from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QThread
 from PyQt5.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -27,8 +25,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMessageBox,
     QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -36,6 +32,7 @@ from PyQt5.QtWidgets import (
 )
 from tag_normalizer import Group, SPACY, Tag, VOYAGE
 from utility import ThreadWorker, worker_thread
+from widgets import Button, Card, CheckBox, ComboBox, hint, ProgressBar, use_si_scrollbars
 
 BACKEND_LABELS = {
     VOYAGE: "Voyage AI (best; sends the tags to Voyage)",
@@ -91,25 +88,24 @@ class TagTab(QWidget):
     # --- layout ---------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        intro = QLabel(
+        intro = hint(
             "Finds tags that mean the same thing and maps each to one tag. Paste tags separated by "
             "commas or new lines (or a JSON list), or load a file (a CSV's first column is the tag). Rename a group by editing its tag; "
             "untick a tag to keep it out of its group."
         )
-        intro.setWordWrap(True)
 
-        self.input = QPlainTextEdit()
+        self.input = use_si_scrollbars(QPlainTextEdit())
         self.input.setPlaceholderText(
             "car_maintenance, oil change, Tire Rotation\npassword_reset\nforgot password"
         )
 
-        self.load_button = QPushButton("Load File…")
+        self.load_button = Button("Load File…")
         self.load_button.clicked.connect(self.load_file)
-        self.backend_combo = QComboBox()
+        self.backend_combo = ComboBox("Embeddings")
         for backend, label in BACKEND_LABELS.items():
             self.backend_combo.addItem(label, backend)
         self.backend_combo.currentIndexChanged.connect(self._backend_changed)
-        self.find_button = QPushButton("Find Similar Tags")
+        self.find_button = Button("Find Similar Tags", primary=True)
         self.find_button.clicked.connect(self.start_find)
         input_row = QHBoxLayout()
         input_row.addWidget(self.load_button)
@@ -126,16 +122,16 @@ class TagTab(QWidget):
             "Higher merges only closer synonyms."
         )
         self.threshold.valueChanged.connect(self.regroup)
-        self.keep_structured_apart = QCheckBox("Keep facet__value tags apart")
+        self.keep_structured_apart = CheckBox("Keep facet__value tags apart")
         self.keep_structured_apart.setChecked(True)
         self.keep_structured_apart.setToolTip(
             "Never group two structured tags (sentiment__positive, sentiment__negative): they come from a "
             "fixed taxonomy and embed as near-identical. Free-form tags can still join them."
         )
         self.keep_structured_apart.toggled.connect(self.regroup)
-        self.show_unmatched = QCheckBox("Show tags with no match")
+        self.show_unmatched = CheckBox("Show tags with no match")
         self.show_unmatched.toggled.connect(self._populate)
-        self.summary_label = QLabel()
+        self.summary_label = hint("")
         options_row = QHBoxLayout()
         options_row.addWidget(QLabel("Merge at similarity ≥"))
         options_row.addWidget(self.threshold)
@@ -143,20 +139,20 @@ class TagTab(QWidget):
         options_row.addWidget(self.show_unmatched)
         options_row.addWidget(self.summary_label, stretch=1)
 
-        self.busy_bar = QProgressBar()
+        self.busy_bar = ProgressBar()
         self.busy_bar.setRange(0, 0)
         self.busy_bar.setVisible(False)
 
-        self.tree = QTreeWidget()
+        self.tree = use_si_scrollbars(QTreeWidget())
         self.tree.setColumnCount(len(COLUMNS))
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tree.itemChanged.connect(self._item_changed)
 
-        self.export_button = QPushButton("Export Mapping…")
+        self.export_button = Button("Export Mapping…")
         self.export_button.clicked.connect(self.export_mapping)
         self.export_button.setEnabled(False)
-        self.scripts_button = QPushButton("Export Zendesk Scripts…")
+        self.scripts_button = Button("Export Zendesk Scripts…")
         self.scripts_button.setToolTip(
             "Writes scripts that a person runs to find tickets with each old tag, "
             "remove it, then add the new tag. Nothing is sent to Zendesk from here."
@@ -164,17 +160,27 @@ class TagTab(QWidget):
         self.scripts_button.clicked.connect(self.export_scripts)
         self.scripts_button.setEnabled(False)
         export_row = QHBoxLayout()
+        export_row.addStretch()
         export_row.addWidget(self.export_button)
         export_row.addWidget(self.scripts_button)
 
+        tags_card = Card("Tags")
+        tags_card.body.addWidget(intro)
+        self.input.setMaximumHeight(120)
+        tags_card.body.addWidget(self.input)
+        tags_card.body.addLayout(input_row)
+        tags_card.body.addLayout(options_row)
+        tags_card.body.addWidget(self.busy_bar)
+
+        groups_card = Card("Groups")
+        groups_card.body.addWidget(self.tree, stretch=1)
+        groups_card.body.addLayout(export_row)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
-        layout.addWidget(self.input, stretch=1)
-        layout.addLayout(input_row)
-        layout.addLayout(options_row)
-        layout.addWidget(self.busy_bar)
-        layout.addWidget(self.tree, stretch=3)
-        layout.addLayout(export_row)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(tags_card)
+        layout.addWidget(groups_card, stretch=1)
 
     def backend(self) -> str:
         return self.backend_combo.currentData()

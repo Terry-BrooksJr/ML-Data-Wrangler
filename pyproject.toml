@@ -19,10 +19,10 @@ dependencies = [
     "pandas>=2.2",
     "pyldavis>=3.4.1,<4",
     "pymongo>=4.18.0,<5",
+    "pyqt-siliconui",
     "PyQt5",
     "python-dotenv>=1.2.4",
     "pyyaml>=6",
-    "qdarkstyle>=3.2.3",
     "scipy==1.12",
     "seaborn>=0.13.2,<0.14",
     "spacy>=3.7.5,<3.8",
@@ -56,6 +56,9 @@ override-dependencies = ["sentence-transformers; sys_platform == 'never'"]
 # spaCy models aren't on PyPI. 3.7.1 is the release for spaCy 3.7.x, hence the
 # spacy <3.8 bound above.
 en-core-web-lg = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl" }
+# PyQt-SiliconUI (the UI widgets) is only on PyPI as a 0.0.1 from before its widget
+# refactor; pin the commit the app was styled against.
+pyqt-siliconui = { git = "https://github.com/ChinaIceF/PyQt-SiliconUI", rev = "7005080698e3e813dd923898317788edc8f6b8da" }
 
 [tool.isort]
 profile = "black"

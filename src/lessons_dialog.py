@@ -20,19 +20,17 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDateEdit,
     QDialog,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
-    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+from widgets import Button, Card, hint, LineEdit, use_si_scrollbars
 
 LOG_COLUMNS = [
     "Ticket",
@@ -97,13 +95,14 @@ class WeeklyReviewDialog(QDialog):
         self.week_input = QDateEdit()
         self.week_input.setCalendarPopup(True)
         self.week_input.setDisplayFormat("yyyy-MM-dd")
-        self.prev_button = QPushButton("◀ Previous Week")
+        self.prev_button = Button("◀ Previous Week")
         self.prev_button.clicked.connect(lambda: self._shift_week(-7))
-        self.next_button = QPushButton("Next Week ▶")
+        self.next_button = Button("Next Week ▶")
         self.next_button.clicked.connect(lambda: self._shift_week(7))
-        self.reviewer_input = QLineEdit(_default_reviewer())
+        self.reviewer_input = LineEdit("Reviewer", _default_reviewer())
         self.reviewer_input.setPlaceholderText("Your name")
-        self.refresh_button = QPushButton("Refresh")
+        self.reviewer_input.setMinimumWidth(240)
+        self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.load)
         week_row = QHBoxLayout()
         week_row.addWidget(QLabel("Week of"))
@@ -111,24 +110,22 @@ class WeeklyReviewDialog(QDialog):
         week_row.addWidget(self.prev_button)
         week_row.addWidget(self.next_button)
         week_row.addStretch()
-        week_row.addWidget(QLabel("Reviewer"))
         week_row.addWidget(self.reviewer_input)
         week_row.addWidget(self.refresh_button)
 
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
+        self.status_label = hint("")
 
         self.log_table = self._table(
             LOG_COLUMNS, 4, QAbstractItemView.ExtendedSelection
         )
         self.log_table.itemSelectionChanged.connect(self._update_buttons)
-        self.mark_reviewed_button = QPushButton("Mark Selected Reviewed")
+        self.mark_reviewed_button = Button("Mark Selected Reviewed")
         self.mark_reviewed_button.clicked.connect(self.mark_selected_reviewed)
         log_buttons = QHBoxLayout()
         log_buttons.addStretch()
         log_buttons.addWidget(self.mark_reviewed_button)
-        log_box = QGroupBox("Misclassifications")
-        log_layout = QVBoxLayout(log_box)
+        log_box = Card("Misclassifications")
+        log_layout = log_box.body
         log_layout.addWidget(self.log_table)
         log_layout.addLayout(log_buttons)
 
@@ -136,19 +133,19 @@ class WeeklyReviewDialog(QDialog):
             LESSON_COLUMNS, 3, QAbstractItemView.SingleSelection
         )
         self.lesson_table.itemSelectionChanged.connect(self._show_selected_lesson)
-        self.lesson_view = QTextEdit()
+        self.lesson_view = use_si_scrollbars(QTextEdit())
         self.lesson_view.setReadOnly(True)
         self.lesson_view.setPlaceholderText("Select a summary to read it.")
-        self.approve_button = QPushButton("Approve Selected")
+        self.approve_button = Button("Approve Selected")
         self.approve_button.clicked.connect(self.approve_selected)
-        self.draft_input = QTextEdit()
+        self.draft_input = use_si_scrollbars(QTextEdit())
         self.draft_input.setPlaceholderText(
             "What should the engine learn from this week's reviewed misclassifications?"
         )
         self.draft_input.textChanged.connect(self._update_buttons)
-        self.suggest_button = QPushButton("Suggest from Reviewed")
+        self.suggest_button = Button("Suggest from Reviewed")
         self.suggest_button.clicked.connect(self.suggest_summary)
-        self.save_draft_button = QPushButton("Save Draft")
+        self.save_draft_button = Button("Save Draft")
         self.save_draft_button.clicked.connect(self.save_draft)
         approve_row = QHBoxLayout()
         approve_row.addStretch()
@@ -157,18 +154,20 @@ class WeeklyReviewDialog(QDialog):
         lesson_buttons.addStretch()
         lesson_buttons.addWidget(self.suggest_button)
         lesson_buttons.addWidget(self.save_draft_button)
-        lesson_box = QGroupBox("Lessons learned")
-        lesson_layout = QVBoxLayout(lesson_box)
+        lesson_box = Card("Lessons Learned")
+        lesson_layout = lesson_box.body
         lesson_layout.addWidget(self.lesson_table)
         lesson_layout.addWidget(self.lesson_view)
         lesson_layout.addLayout(approve_row)
         lesson_layout.addWidget(
-            QLabel("New summary (built on the week's reviewed entries):")
+            hint("New summary (built on the week's reviewed entries):")
         )
         lesson_layout.addWidget(self.draft_input)
         lesson_layout.addLayout(lesson_buttons)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
         layout.addLayout(week_row)
         layout.addWidget(self.status_label)
         layout.addWidget(log_box, stretch=1)
@@ -177,7 +176,7 @@ class WeeklyReviewDialog(QDialog):
 
     @staticmethod
     def _table(columns: List[str], stretch: int, selection) -> QTableWidget:
-        table = QTableWidget(0, len(columns))
+        table = use_si_scrollbars(QTableWidget(0, len(columns)))
         table.setHorizontalHeaderLabels(columns)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)

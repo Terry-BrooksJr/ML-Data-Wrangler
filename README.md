@@ -116,11 +116,17 @@ instead of retraining: the only difference would be the random seed.
 
 ### Appearance
 
-The app uses [QDarkStyleSheet](https://github.com/ColinDuquesnoy/QDarkStyleSheet)'s
-dark theme by default. Settings > Appearance > Theme switches to `light`, or
-`native` for the operating system's own look; the change applies when you
-save. The log pane stays a dark console in every theme, so its coloured log
-levels stay readable.
+The app is styled with [PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI)
+(GPL-3.0, like PyQt5 itself). Its buttons, combo boxes, checkboxes, progress
+bars, scroll bars and cards are SiliconUI widgets (`src/widgets.py`); the
+plain Qt widgets around them (tabs, tables, text boxes, dialogs) get a
+stylesheet built from SiliconUI's colour tokens (`src/theme.py`). SiliconUI's
+widgets come only in dark, so there is no longer a light or native theme and
+the Theme setting is gone; a saved `LASSO_THEME` is ignored.
+
+SiliconUI isn't on PyPI in a current version, so `pyproject.toml` installs it
+from GitHub at a pinned commit. To try a newer one, change `rev` under
+`[tool.uv.sources]` and run `uv lock`.
 
 ### Embedding topics (BERTopic)
 

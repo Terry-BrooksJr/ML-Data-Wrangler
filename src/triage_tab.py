@@ -24,11 +24,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
-    QLabel,
-    QLineEdit,
     QMessageBox,
-    QProgressBar,
-    QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -37,6 +33,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from utility import ThreadWorker, worker_thread
+from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
@@ -270,33 +267,32 @@ class TriageTab(QWidget):
     def _build_ui(self) -> None:
         """Creates the widgets and layout, starting in the idle state."""
 
-        intro = QLabel(
+        intro = hint(
             "Classifies tickets awaiting review and records each result on the ticket "
             "in MongoDB. Nothing is written to Zendesk. Each ticket reviewed is a paid model call."
         )
-        intro.setWordWrap(True)
 
-        self.status_label = QLabel()
-        self.refresh_button = QPushButton("Refresh")
+        self.status_label = hint("")
+        self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status_label, stretch=1)
         status_row.addWidget(self.refresh_button)
 
-        self.review_all_button = QPushButton("Review All Awaiting Tickets")
+        self.review_all_button = Button("Review All Awaiting Tickets", primary=True)
         self.review_all_button.clicked.connect(self.start_review_all)
 
-        self.ticket_id_input = QLineEdit()
+        self.ticket_id_input = LineEdit("Ticket")
         self.ticket_id_input.setPlaceholderText("Zendesk ticket ID")
         self.ticket_id_input.setClearButtonEnabled(True)
         self.ticket_id_input.returnPressed.connect(self.start_review_one)
-        self.review_one_button = QPushButton("Classify One Ticket")
+        self.review_one_button = Button("Classify One Ticket")
         self.review_one_button.clicked.connect(self.start_review_one)
         one_row = QHBoxLayout()
         one_row.addWidget(self.ticket_id_input, stretch=1)
         one_row.addWidget(self.review_one_button)
 
-        self.embed_button = QPushButton("Embed Tickets (Voyage AI)…")
+        self.embed_button = Button("Embed Tickets (Voyage AI)…")
         self.embed_button.setToolTip(
             "Stores a Voyage embedding on each new or changed ticket and creates the vector index."
         )
@@ -304,11 +300,11 @@ class TriageTab(QWidget):
 
         # Range 0..0 makes the bar an indeterminate "busy" indicator:
         # run_review_batch reports no progress.
-        self.busy_bar = QProgressBar()
+        self.busy_bar = ProgressBar()
         self.busy_bar.setRange(0, 0)
         self.busy_bar.setVisible(False)
 
-        self.table = QTableWidget(0, len(COLUMNS))
+        self.table = use_si_scrollbars(QTableWidget(0, len(COLUMNS)))
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -318,19 +314,19 @@ class TriageTab(QWidget):
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self.show_selected_review)
 
-        self.detail = QTextEdit()
+        self.detail = use_si_scrollbars(QTextEdit())
         self.detail.setReadOnly(True)
         self.detail.setPlaceholderText(
             "Select a review to see its reasoning, note and draft message."
         )
 
-        self.mark_good_button = QPushButton("Mark Correct")
+        self.mark_good_button = Button("Mark Correct")
         self.mark_good_button.clicked.connect(self.mark_selected_correct)
-        self.mark_bad_button = QPushButton("Mark Misclassified…")
+        self.mark_bad_button = Button("Mark Misclassified…")
         self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
-        self.accuracy_button = QPushButton("Accuracy Report")
+        self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
-        self.weekly_review_button = QPushButton("Weekly Review…")
+        self.weekly_review_button = Button("Weekly Review…")
         self.weekly_review_button.setToolTip(
             "Review the week's misclassifications and write the lessons learned from them."
         )
@@ -353,15 +349,21 @@ class TriageTab(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
+        review_card = Card("Review Tickets")
+        review_card.body.addWidget(intro)
+        review_card.body.addLayout(status_row)
+        review_card.body.addLayout(one_row)
+        review_card.body.addLayout(button_row(self.review_all_button, self.embed_button))
+        review_card.body.addWidget(self.busy_bar)
+
+        reviews_card = Card(f"Recent Reviews (newest {RECENT_REVIEW_LIMIT})")
+        reviews_card.body.addWidget(splitter)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
-        layout.addLayout(status_row)
-        layout.addWidget(self.review_all_button)
-        layout.addLayout(one_row)
-        layout.addWidget(self.embed_button)
-        layout.addWidget(self.busy_bar)
-        layout.addWidget(QLabel(f"Recent reviews (newest {RECENT_REVIEW_LIMIT})"))
-        layout.addWidget(splitter, stretch=1)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(review_card)
+        layout.addWidget(reviews_card, stretch=1)
 
         self._set_busy(False)
 

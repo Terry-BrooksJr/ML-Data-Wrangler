@@ -184,13 +184,6 @@ SETTINGS: List[Setting] = [
         "tickets_vector index dropped and recreated.",
     ),
     Setting(
-        "LASSO_THEME",
-        "Theme",
-        "Appearance",
-        default="dark",
-        help="dark, light or native (the operating system's own look).",
-    ),
-    Setting(
         "TOPIC_MODEL_DIR",
         "Topic model folder",
         "Storage",
