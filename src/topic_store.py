@@ -27,7 +27,10 @@ from LDA_logic import LatentDirichletAllocator, REMOVED_POS, tokenize
 from loguru import logger
 from pymongo.collection import Collection
 
-RUNS_COLLECTION = os.environ.get("TOPIC_RUNS_COLLECTION", "topic_modeling_run_log")
+def runs_collection() -> str:
+    """The LDA runs collection's name, read when used so a saved setting applies at once."""
+    return os.environ.get("TOPIC_RUNS_COLLECTION", "topic_modeling_run_log")
+
 MODEL_FILE = "lda.model"
 DICTIONARY_FILE = "dictionary.dict"
 RUN_FILE = "run.json"

@@ -105,7 +105,7 @@ def test_saved_model_reloads_and_assigns_without_retraining(trained, tmp_path, d
 
 
 def test_run_history_in_mongo_and_on_disk(trained, tmp_path, db):
-    runs = db[topic_store.RUNS_COLLECTION]
+    runs = db[topic_store.runs_collection()]
     first = topic_store.save_run(trained, FakeNlp(), [], base_dir=tmp_path)
     second = topic_store.save_run(trained, FakeNlp(), [], base_dir=tmp_path)
     topic_store.record_run(runs, first)
@@ -276,7 +276,7 @@ def test_known_runs_merges_mongo_and_disk(trained, tmp_path, db):
     local_only["storage"] = {"url": "s3://b/p/"}
     topic_store.write_run_file(local_only)
     shared = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
-    runs = db[topic_store.RUNS_COLLECTION]
+    runs = db[topic_store.runs_collection()]
     topic_store.record_run(runs, shared)
     elsewhere = {
         **shared,

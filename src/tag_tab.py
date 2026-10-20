@@ -302,10 +302,10 @@ class TagTab(QWidget):
             database = self.database_factory()
             if database is None:
                 return None
-            return tag_runs.previous_decisions(database[tag_runs.NORMALIZED_COLLECTION])
+            return tag_runs.previous_decisions(database[tag_runs.normalized_collection()])
         except Exception as e:
             logger.warning(
-                f"Tag Normalizer: could not read {tag_runs.NORMALIZED_COLLECTION} ({e}); "
+                f"Tag Normalizer: could not read {tag_runs.normalized_collection()} ({e}); "
                 "grouping without earlier decisions."
             )
             return None
@@ -501,7 +501,7 @@ class TagTab(QWidget):
         if run.get("storage"):
             text += f"\nUploaded to {run['storage']['url']}."
         if run.get("normalized") is not None:
-            text += f"\n{tag_runs.NORMALIZED_COLLECTION} updated; later runs will use these decisions."
+            text += f"\n{tag_runs.normalized_collection()} updated; later runs will use these decisions."
         if run.get("warnings"):
             text += "\n\nWarning:\n" + "\n".join(run["warnings"])
         logger.success(f"Tag Normalizer: saved run {run['run_id']}")
@@ -519,7 +519,7 @@ class TagTab(QWidget):
             except Exception as e:
                 logger.warning(f"Tag Normalizer: MongoDB unreachable ({e}); listing this computer's runs.")
                 database = None
-            runs = database[tag_runs.RUNS_COLLECTION] if database is not None else None
+            runs = database[tag_runs.runs_collection()] if database is not None else None
             return tag_runs.known_runs(runs, self.run_dir)
 
         self._run(task, "Listing saved runs", self._choose_run)
