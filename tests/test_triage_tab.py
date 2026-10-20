@@ -638,3 +638,114 @@ def test_index_changed_during_the_run_is_an_error_not_a_warning(qapp, configured
     wait_until_idle(qapp, tab)
     assert [kind for kind, _ in dialogs] == ["question", "critical"]
     assert "256-dimension" in dialogs[1][1]
+
+
+# --- weekly review (misclassification_log and lessons_learned) ----------------------
+
+
+@pytest.fixture
+def logged(tickets):
+    """One reviewed ticket logged twice as misclassified this week."""
+    from bson import ObjectId
+
+    from decision_engine import feedback
+
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    ticket["awaiting_review"] = False
+    ticket["agent_reviews"] = [review("flag_solve", 5, review_id=ObjectId())]
+    tickets.insert_one(ticket)
+    log, _ = feedback.get_feedback_collections(tickets.database)
+    review_id = ticket["agent_reviews"][0]["review_id"]
+    feedback.log_misclassification(tickets, log, ticket["zendesk_id"], review_id, "flag_reengage", "no reply yet")
+    feedback.log_misclassification(tickets, log, ticket["zendesk_id"], review_id, "flag_reengage")
+    return tickets
+
+
+def open_review(qapp, tab):
+    tab.open_weekly_review()
+    dialog = tab.weekly_review_dialog
+    wait_until_idle(qapp, tab)
+    return dialog
+
+
+def test_weekly_review_lists_the_weeks_entries(qapp, configured, dialogs, logged):
+    tab = make_tab(logged)
+    dialog = open_review(qapp, tab)
+    assert dialog.log_table.rowCount() == 2
+    assert dialog.log_table.item(0, 5).text() == "not reviewed"
+    # Nothing reviewed yet: no summary can be drafted.
+    assert not dialog.suggest_button.isEnabled() and not dialog.save_draft_button.isEnabled()
+
+    dialog._shift_week(-7)
+    wait_until_idle(qapp, tab)
+    assert dialog.log_table.rowCount() == 0
+
+
+def test_weekly_review_marks_drafts_and_approves(qapp, configured, dialogs, logged):
+    log = logged.database.misclassification_log
+    lessons = logged.database.lessons_learned
+    tab = make_tab(logged)
+    dialog = open_review(qapp, tab)
+    dialog.reviewer_input.setText("lead")
+
+    dialog.log_table.selectAll()
+    dialog.mark_selected_reviewed()
+    wait_until_idle(qapp, tab)
+    assert log.count_documents({"reviewed": True, "reviewed_by": "lead"}) == 2
+    assert dialog.log_table.item(0, 5).text() == "lead"
+
+    dialog.suggest_summary()
+    assert "should have been flag_reengage" in dialog.draft_input.toPlainText()
+    dialog.save_draft()
+    wait_until_idle(qapp, tab)
+    draft = lessons.find_one()
+    assert draft["approved"] is False and len(draft["based_on_log_ids"]) == 2
+    assert dialog.lesson_table.rowCount() == 1 and dialog.lesson_table.item(0, 1).text() == "Draft"
+    assert dialog.draft_input.toPlainText() == ""
+
+    dialog.reviewer_input.setText("vp")
+    dialog.lesson_table.selectRow(0)
+    assert dialog.approve_button.isEnabled()
+    dialog.approve_selected()
+    wait_until_idle(qapp, tab)
+    assert lessons.find_one()["approved_by"] == "vp"
+    assert dialog.lesson_table.item(0, 1).text() == "Approved by vp"
+
+
+def test_weekly_review_needs_a_reviewer_name(qapp, configured, dialogs, logged):
+    tab = make_tab(logged)
+    dialog = open_review(qapp, tab)
+    dialog.reviewer_input.setText("")
+    dialog.log_table.selectAll()
+    dialog.mark_selected_reviewed()
+    wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "warning"
+    assert logged.database.misclassification_log.count_documents({"reviewed": True}) == 0
+
+
+def test_weekly_review_recovers_from_an_error(qapp, configured, dialogs, logged, monkeypatch):
+    from decision_engine import feedback
+
+    tab = make_tab(logged)
+    dialog = open_review(qapp, tab)
+
+    def broken(*a, **k):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(feedback, "misclassifications_for_week", broken)
+    dialog.load()
+    wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "critical"
+    assert dialog.refresh_button.isEnabled() and "failed" in dialog.status_label.text()
+
+
+def test_weekly_review_waits_for_another_job(qapp, configured, dialogs, logged):
+    tab = make_tab(logged)
+    dialog = open_review(qapp, tab)
+    tab._thread = object()  # another job running
+    try:
+        dialog.load()
+        assert "Another Decision Engine job" in dialog.status_label.text()
+        assert dialog.refresh_button.isEnabled()
+    finally:
+        tab._thread = None

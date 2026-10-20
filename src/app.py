@@ -866,11 +866,11 @@ class MainWindow(QMainWindow, QDialog):
         self.results_dialog.show()
         self.results_dialog.open_chart()
 
-    def _runs_collection(self):
-        """The topic_model_runs collection, or None to read runs from disk."""
+    def _runs_collection(self, name: str = topic_store.RUNS_COLLECTION):
+        """A runs collection (LDA by default), or None to read runs from disk."""
         if not os.getenv("MONGO_URI"):
             return None
-        return get_database()[topic_store.RUNS_COLLECTION]
+        return get_database()[name]
 
     def _choose_run(self, title: str):
         """Asks the user to pick a previous run; returns it, or None."""
@@ -990,11 +990,11 @@ class MainWindow(QMainWindow, QDialog):
             self._end_bertopic_job()
             self.notify_user_of_error((False, message))
 
-        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in topic_model_runs.
+        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in bertopic_run_log.
         self._start_run_job(
             lambda: bertopic_runs.train_and_save(
                 get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], nlp, stop_words, options,
-                status=self.bertopic_status.message.emit, runs=self._runs_collection(),
+                status=self.bertopic_status.message.emit, runs=self._runs_collection(bertopic_runs.RUNS_COLLECTION),
                 storage=model_storage.config),
             "Training the BERTopic model", done, on_error=failed)
 
@@ -1018,7 +1018,7 @@ class MainWindow(QMainWindow, QDialog):
     def _known_bertopic_runs(self) -> List[dict]:
         """BERTopic runs from Mongo and disk; disk only if Mongo can't be reached."""
         try:
-            return bertopic_runs.known_runs(self._runs_collection())
+            return bertopic_runs.known_runs(self._runs_collection(bertopic_runs.RUNS_COLLECTION))
         except Exception as e:
             logger.warning(f"Could not list BERTopic runs from MongoDB ({e}); showing this computer's runs only.")
             return bertopic_runs.known_runs()

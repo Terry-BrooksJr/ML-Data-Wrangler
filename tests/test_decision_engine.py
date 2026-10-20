@@ -830,6 +830,49 @@ def test_lessons_learned_only_from_reviewed_entries(reviewed):
     assert stored["approved"] is True and stored["approved_by"] == "vp"
 
 
+def test_weekly_review_marks_lists_and_suggests(reviewed):
+    log, lessons = feedback.get_feedback_collections(reviewed.database)
+    zendesk_id = CATEGORY_FIXTURES["escalation_internal"]["zendesk_id"]
+    review_id = review_id_of(reviewed, "escalation_internal")
+    first = feedback.log_misclassification(reviewed, log, zendesk_id, review_id, "flag_reengage", "48h rule")
+    second = feedback.log_misclassification(reviewed, log, zendesk_id, review_id, "flag_reengage", "")
+    now = datetime.now(timezone.utc)
+
+    assert [e["_id"] for e in feedback.misclassifications_for_week(log, now)] == [first, second]
+    assert feedback.misclassifications_for_week(log, now - timedelta(days=7)) == []
+    assert feedback.suggest_lessons_summary(feedback.misclassifications_for_week(log, now)) == ""
+    with pytest.raises(ValueError):
+        feedback.mark_misclassifications_reviewed(log, [first], "  ")
+
+    assert feedback.mark_misclassifications_reviewed(log, [first, second], "lead") == 2
+    # Already reviewed: the first reviewer is kept.
+    assert feedback.mark_misclassifications_reviewed(log, [first], "someone else") == 0
+    assert log.find_one({"_id": first})["reviewed_by"] == "lead"
+
+    summary = feedback.suggest_lessons_summary(feedback.misclassifications_for_week(log, now))
+    assert summary == ("- 2 ticket(s) classified escalation_internal should have been flag_reengage. "
+                       "Misread: 48h rule.")
+
+
+def test_lessons_need_text_and_are_approved_once(reviewed):
+    log, lessons = feedback.get_feedback_collections(reviewed.database)
+    zendesk_id = CATEGORY_FIXTURES["escalation_internal"]["zendesk_id"]
+    log_id = feedback.log_misclassification(
+        reviewed, log, zendesk_id, review_id_of(reviewed, "escalation_internal"), "flag_reengage"
+    )
+    feedback.mark_misclassification_reviewed(log, log_id, "lead")
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError):
+        feedback.draft_lessons_learned(log, lessons, now, "   ")
+    lessons_id = feedback.draft_lessons_learned(log, lessons, now, "  Watch the 48h rule.\n")
+
+    assert [entry["_id"] for entry in feedback.lessons_for_week(lessons, now)] == [lessons_id]
+    assert feedback.lessons_for_week(lessons, now)[0]["summary_text"] == "Watch the 48h rule."
+    assert feedback.approve_lessons_learned(lessons, lessons_id, "vp") is True
+    assert feedback.approve_lessons_learned(lessons, lessons_id, "other") is False
+    assert lessons.find_one({"_id": lessons_id})["approved_by"] == "vp"
+
+
 def test_accuracy_report_uses_latest_outcome(reviewed):
     solve_id = CATEGORY_FIXTURES["flag_solve"]["zendesk_id"]
     feedback.record_outcome(reviewed, solve_id, review_id_of(reviewed, "flag_solve"), "pending")

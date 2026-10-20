@@ -139,8 +139,8 @@ distance map in the browser.
 
 Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
 LDA runs in `topic_models/`, and kept the same way LDA runs are: recorded in
-MongoDB's `topic_model_runs` (marked `"method": "bertopic"`, so the LDA lists
-skip them) and, with model storage set up, uploaded with a signed manifest to
+MongoDB's `bertopic_run_log` (`BERTOPIC_RUNS_COLLECTION`; LDA runs go to
+`topic_modeling_run_log`, `TOPIC_RUNS_COLLECTION`) and, with model storage set up, uploaded with a signed manifest to
 `s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
 Run…** lists runs from MongoDB and this computer, and downloads and verifies
 one whose files aren't here before showing its charts. Retry a failed upload
@@ -271,6 +271,21 @@ from decision_engine.persistence import run_review_batch, process_one_ticket
 run_review_batch()               # every ticket with awaiting_review: true
 process_one_ticket("30882")      # a single ticket
 ```
+
+### Feedback and the weekly review
+
+On the Decision Engine tab, select a review and use **Mark Correct** or
+**Mark Misclassified…**. A misclassification is written to
+`misclassification_log` (`MISCLASSIFICATION_COLLECTION`) and marks the
+review's outcome "bad".
+
+**Weekly Review…** opens one week's log (Monday to Sunday, UTC). Enter your
+name as Reviewer, select entries and **Mark Selected Reviewed**. Only
+reviewed entries feed a summary: **Suggest from Reviewed** drafts one from
+them for you to edit, and **Save Draft** stores it, unapproved, in
+`lessons_learned` (`LESSONS_COLLECTION`) with the IDs of the entries it's
+built on. Select a draft and **Approve Selected** to record who approved it.
+Approved lessons aren't fed back into the prompt yet.
 
 ### Ticket embeddings (Voyage AI)
 

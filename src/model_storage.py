@@ -445,8 +445,10 @@ def main(argv: List[str]) -> int:
         import bertopic_runs
 
         runs, run_dir, cfg = bertopic_runs.list_runs(), bertopic_model.model_dir(), bertopic_runs.storage_config(cfg)
+        collection_name = bertopic_runs.RUNS_COLLECTION
     else:
         runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
+        collection_name = topic_store.RUNS_COLLECTION
     if args.run_ids:
         by_id = {run["run_id"]: run for run in runs}
         missing = [r for r in args.run_ids if r not in by_id]
@@ -464,7 +466,7 @@ def main(argv: List[str]) -> int:
     if os.environ.get("MONGO_URI"):
         from decision_engine.persistence import get_database
 
-        runs_collection = get_database()[topic_store.RUNS_COLLECTION]
+        runs_collection = get_database()[collection_name]
     for run in chosen:
         storage = upload_and_record(run, cfg, client)
         if runs_collection is not None:

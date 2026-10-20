@@ -74,7 +74,7 @@ def test_upload_problems_become_warnings(bert_dir, monkeypatch):
 
 
 def test_recorded_runs_are_listed_as_bertopic_never_as_lda(bert_dir):
-    runs = mongomock.MongoClient().db[topic_store.RUNS_COLLECTION]
+    runs = mongomock.MongoClient().db[bertopic_runs.RUNS_COLLECTION]
     run = _bertopic_run(bert_dir, warnings=["local note"], assignment={"assigned": 1})
     runs.insert_one({"run_id": "lda-run", "ran_at": "2026-10-01T00:00:00+00:00", "topics": []})
 
@@ -88,7 +88,7 @@ def test_recorded_runs_are_listed_as_bertopic_never_as_lda(bert_dir):
 
 
 def test_known_runs_merges_mongo_and_this_computer(bert_dir):
-    runs = mongomock.MongoClient().db[topic_store.RUNS_COLLECTION]
+    runs = mongomock.MongoClient().db[bertopic_runs.RUNS_COLLECTION]
     local = _bertopic_run(bert_dir, storage={"url": "s3://b/p/", "bucket": "b", "prefix": f"p/{RUN_ID}/"})
     elsewhere = {**local, "run_id": "20261016T000000Z-other1", "ran_at": "2026-10-16T00:00:00+00:00"}
     elsewhere.pop("storage")
@@ -159,7 +159,7 @@ def test_train_and_save_uploads_and_records(bert_dir, monkeypatch):
     monkeypatch.setattr(bertopic_runs.bertopic_model, "save_run", lambda *a, **k: _bertopic_run(bert_dir))
     calls = []
     monkeypatch.setattr(bertopic_runs, "upload", lambda run, storage, status: calls.append("upload"))
-    runs = mongomock.MongoClient().db[topic_store.RUNS_COLLECTION]
+    runs = mongomock.MongoClient().db[bertopic_runs.RUNS_COLLECTION]
 
     run = bertopic_runs.train_and_save(None, None, [], bertopic_runs.TrainOptions(), runs=runs)
     assert calls == ["upload"] and runs.find_one({"run_id": RUN_ID})["method"] == "bertopic"
@@ -183,3 +183,21 @@ def test_cli_uploads_bertopic_runs(s3, bert_dir, monkeypatch, capsys):
     assert f"topic-models/bertopic/{RUN_ID}/manifest.json" in _keys(s3)
     assert model_storage.main(["upload", "--bertopic"]) == 0
     assert "already uploaded" in capsys.readouterr().out
+
+
+def test_cli_records_bertopic_uploads_in_the_bertopic_collection(s3, bert_dir, env, monkeypatch, capsys):
+    monkeypatch.setattr("settings.load", lambda: None)
+    env.setenv("MONGO_URI", "mongodb://test")
+    db = mongomock.MongoClient().db
+    import decision_engine.persistence
+
+    monkeypatch.setattr(decision_engine.persistence, "get_database", lambda: db)
+    _bertopic_run(bert_dir)
+
+    assert model_storage.main(["upload", "--bertopic"]) == 0
+    assert db[bertopic_runs.RUNS_COLLECTION].find_one({"run_id": RUN_ID})["storage"]
+    assert db[topic_store.RUNS_COLLECTION].count_documents({}) == 0
+
+
+def test_bertopic_and_lda_runs_use_separate_collections():
+    assert bertopic_runs.RUNS_COLLECTION != topic_store.RUNS_COLLECTION

@@ -114,10 +114,59 @@ def log_misclassification(
 
 def mark_misclassification_reviewed(log: Collection, log_id, reviewed_by: str) -> None:
     """Marks a log entry as reviewed; only reviewed entries feed lessons_learned."""
-    log.update_one(
-        {"_id": _as_object_id(log_id)},
+    mark_misclassifications_reviewed(log, [log_id], reviewed_by)
+
+
+def mark_misclassifications_reviewed(log: Collection, log_ids: Iterable, reviewed_by: str) -> int:
+    """Marks log entries as reviewed by `reviewed_by`. Entries already reviewed keep their reviewer.
+
+    Returns:
+        How many entries were newly marked.
+    """
+    reviewed_by = reviewed_by.strip()
+    if not reviewed_by:
+        raise ValueError("reviewed_by is required")
+    ids = [_as_object_id(i) for i in log_ids]
+    if not ids:
+        return 0
+    return log.update_many(
+        {"_id": {"$in": ids}, "reviewed": {"$ne": True}},
         {"$set": {"reviewed": True, "reviewed_by": reviewed_by, "reviewed_at": datetime.now(timezone.utc)}},
-    )
+    ).modified_count
+
+
+def misclassifications_for_week(log: Collection, week: datetime) -> List[dict]:
+    """The week's misclassification_log entries, oldest first."""
+    return list(log.find({"week_of": week_of(week)}).sort("logged_at", 1))
+
+
+def lessons_for_week(lessons: Collection, week: datetime) -> List[dict]:
+    """The week's lessons_learned entries (drafts and approved), newest first."""
+    return list(lessons.find({"week_of": week_of(week)}).sort("generated_at", -1))
+
+
+def suggest_lessons_summary(entries: Iterable[dict]) -> str:
+    """A starting summary for the week's reviewed entries, for the reviewer to edit.
+
+    Groups the mistakes by what the agent said and what was right, with the
+    signals it misread. Unreviewed entries are left out, as in draft_lessons_learned.
+    """
+    groups: Dict[tuple, List[str]] = defaultdict(list)
+    for entry in entries:
+        if entry.get("reviewed"):
+            groups[(entry.get("agent_classification"), entry.get("correct_classification"))].append(
+                (entry.get("misread_signal") or "").strip()
+            )
+    if not groups:
+        return ""
+    lines = []
+    for (said, correct), signals in sorted(groups.items(), key=lambda g: (-len(g[1]), str(g[0]))):
+        line = f"- {len(signals)} ticket(s) classified {said} should have been {correct}."
+        misread = sorted({s for s in signals if s})
+        if misread:
+            line += " Misread: " + "; ".join(misread) + "."
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def draft_lessons_learned(log: Collection, lessons: Collection, week: datetime, summary_text: str) -> ObjectId:
@@ -127,13 +176,15 @@ def draft_lessons_learned(log: Collection, lessons: Collection, week: datetime, 
         ValueError: if the week has no reviewed entries.
     """
     week = week_of(week)
+    if not summary_text.strip():
+        raise ValueError("summary_text is required")
     log_ids = [entry["_id"] for entry in log.find({"week_of": week, "reviewed": True}, {"_id": 1})]
     if not log_ids:
         raise ValueError(f"No reviewed misclassifications for the week of {week:%Y-%m-%d}")
     return lessons.insert_one(
         {
             "week_of": week,
-            "summary_text": summary_text,
+            "summary_text": summary_text.strip(),
             "generated_at": datetime.now(timezone.utc),
             "based_on_log_ids": log_ids,
             "approved": False,
@@ -143,11 +194,19 @@ def draft_lessons_learned(log: Collection, lessons: Collection, week: datetime, 
     ).inserted_id
 
 
-def approve_lessons_learned(lessons: Collection, lessons_id, approved_by: str) -> None:
-    lessons.update_one(
-        {"_id": _as_object_id(lessons_id)},
+def approve_lessons_learned(lessons: Collection, lessons_id, approved_by: str) -> bool:
+    """Approves a draft. An entry already approved keeps its approver.
+
+    Returns:
+        True if the draft was approved now, False if it already was (or doesn't exist).
+    """
+    approved_by = approved_by.strip()
+    if not approved_by:
+        raise ValueError("approved_by is required")
+    return lessons.update_one(
+        {"_id": _as_object_id(lessons_id), "approved": {"$ne": True}},
         {"$set": {"approved": True, "approved_by": approved_by, "approved_at": datetime.now(timezone.utc)}},
-    )
+    ).modified_count == 1
 
 
 def _latest_outcomes(doc: dict) -> Dict[ObjectId, str]:

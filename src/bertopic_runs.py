@@ -12,12 +12,14 @@ only ever touches `embedding_topic`, never the LDA `topic` field.
 Runs are kept the way LDA runs are (see topic_store and model_storage): the
 folder on this computer is the source of truth; when MODEL_BUCKET is set it
 is uploaded, with a signed manifest, to <MODEL_PREFIX>bertopic/<run_id>/; and
-the run's details (not its files) are recorded in the topic_model_runs
-collection, so other computers can list it. A run whose files aren't here is
+the run's details (not its files) are recorded in the bertopic_run_log
+collection (BERTOPIC_RUNS_COLLECTION), apart from the LDA runs, so other
+computers can list it. A run whose files aren't here is
 downloaded and verified before it is opened, into <BERTOPIC_MODEL_DIR>/<run_id>
 only: its model is a pickle, which runs code when loaded.
 """
 import dataclasses
+import os
 import pathlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +34,7 @@ import topic_store
 from LDA_logic import tokenize
 
 METHOD = "bertopic"
+RUNS_COLLECTION = os.environ.get("BERTOPIC_RUNS_COLLECTION", "bertopic_run_log")
 # Under MODEL_PREFIX in the bucket, apart from the LDA runs.
 STORAGE_SUBFOLDER = "bertopic/"
 CHARTS = ("barchart_html", "intertopic_html")
@@ -61,7 +64,7 @@ def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options:
 
     The run is saved here first, then uploaded (storage() gives the
     model_storage.Config, or None when uploads are off) and recorded in
-    runs (topic_model_runs). Each of those that fails becomes a warning on
+    runs (bertopic_run_log). Each of those that fails becomes a warning on
     the run, as does a comparison LDA run that can't be read, so a trained
     model is never lost. The returned run has `warnings` and, when
     options.assign is set, `assignment`.
@@ -148,7 +151,7 @@ def _document(run: dict) -> dict:
 
 
 def record_run(runs: Collection, run: dict) -> None:
-    """Stores the run's details (not its files) in topic_model_runs, marked as BERTopic."""
+    """Stores the run's details (not its files) in bertopic_run_log, marked as BERTopic."""
     runs.replace_one({"run_id": run["run_id"]}, {**_document(run), "method": METHOD}, upsert=True)
 
 

@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
 import embeddings
 from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
+from lessons_dialog import WeeklyReviewDialog
 from utility import ThreadWorker, worker_thread
 
 # Reading reviews only touches Mongo; classifying also needs the primary
@@ -225,6 +226,8 @@ class TriageTab(QWidget):
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
         self._on_done: Optional[Callable[[Any], None]] = None
+        self._on_error: Optional[Callable[[str], None]] = None
+        self.weekly_review_dialog = None
         self._rows: List[dict] = []
         self._loaded = False
         self._build_ui()
@@ -292,10 +295,16 @@ class TriageTab(QWidget):
         self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
         self.accuracy_button = QPushButton("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        self.weekly_review_button = QPushButton("Weekly Review…")
+        self.weekly_review_button.setToolTip(
+            "Review the week's misclassifications and write the lessons learned from them."
+        )
+        self.weekly_review_button.clicked.connect(self.open_weekly_review)
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.weekly_review_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
@@ -413,7 +422,7 @@ class TriageTab(QWidget):
         self._thread.wait()
         self._thread = None
         self._worker = None
-        self._on_done = None
+        self._on_done = self._on_error = None
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
         """Switches the tab between busy and idle states.
@@ -427,7 +436,7 @@ class TriageTab(QWidget):
         """
 
         for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button,
-                       self.embed_button):
+                       self.embed_button, self.weekly_review_button):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
@@ -438,9 +447,15 @@ class TriageTab(QWidget):
         if busy and label:
             self.status_label.setText(label)
 
-    def _run(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]) -> None:
-        if self._closing:
-            return
+    def _run(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None],
+             on_error: Optional[Callable[[str], None]] = None) -> bool:
+        """Runs `task` on a worker thread, then `on_done(result)` (or `on_error(message)`) here.
+
+        Returns:
+            False, without running anything, while another job runs or the tab is closing.
+        """
+        if self._closing or self._thread is not None:
+            return False
 
         def with_connection_hint():
             try:
@@ -450,6 +465,7 @@ class TriageTab(QWidget):
 
         self._set_busy(True, f"{description}…")
         self._on_done = on_done
+        self._on_error = on_error
         self._thread = worker_thread(self)
         self._worker = ThreadWorker(with_connection_hint, description)
         self._worker.moveToThread(self._thread)
@@ -457,6 +473,7 @@ class TriageTab(QWidget):
         self._worker.error.connect(self._job_failed)
         self._thread.started.connect(self._worker.run)
         self._thread.start()
+        return True
 
     def _stop_thread(self) -> None:
         """Shuts down the current worker thread and returns to the idle state.
@@ -483,7 +500,7 @@ class TriageTab(QWidget):
             result: The value returned by the task.
         """
         self._stop_thread()
-        on_done, self._on_done = self._on_done, None
+        on_done, self._on_done, self._on_error = self._on_done, None, None
         if self._closing:
             # Don't start follow-up jobs or show dialogs while closing.
             self.idle.emit()
@@ -500,13 +517,15 @@ class TriageTab(QWidget):
             message: The error text from the worker, shown to the user.
         """
         self._stop_thread()
-        self._on_done = None
+        on_error, self._on_done, self._on_error = self._on_error, None, None
         if self._closing:
             logger.error(f"Decision Engine job failed while closing: {message}")
             self.idle.emit()
             return
         self.status_label.setText("Last action failed; see the log.")
         QMessageBox.critical(self, "Decision Engine Error", message)
+        if on_error is not None:
+            on_error(message)
 
     # --- actions ---------------------------------------------------------------
 
@@ -821,3 +840,13 @@ class TriageTab(QWidget):
                 feedback.format_accuracy_report(report) if report else "No reviews yet.",
             ),
         )
+
+    def open_weekly_review(self) -> None:
+        """Opens the weekly review of misclassification_log and lessons_learned."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.weekly_review_dialog = WeeklyReviewDialog(
+            self._run, lambda: feedback.get_feedback_collections(self.collection_factory().database), self
+        )
+        self.weekly_review_dialog.show()

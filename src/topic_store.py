@@ -5,7 +5,7 @@ model and its dictionary (always saved together), its charts, and run.json.
 Model files stay on local disk (and, when MODEL_BUCKET is set, are copied to
 S3 by model_storage): Atlas free tier caps storage at 512 MB, so Mongo keeps
 only each run's details and a pointer to its directory, in the
-`topic_model_runs` collection. Each ticket's main topic is written to its
+`topic_modeling_run_log` collection (TOPIC_RUNS_COLLECTION). Each ticket's main topic is written to its
 `tickets` document under `topic`, tagged with the run that assigned it;
 re-ingestion never touches that field.
 """
@@ -27,7 +27,7 @@ from pymongo.collection import Collection
 
 from LDA_logic import REMOVED_POS, LatentDirichletAllocator, tokenize
 
-RUNS_COLLECTION = os.environ.get("TOPIC_RUNS_COLLECTION", "topic_model_runs")
+RUNS_COLLECTION = os.environ.get("TOPIC_RUNS_COLLECTION", "topic_modeling_run_log")
 MODEL_FILE = "lda.model"
 DICTIONARY_FILE = "dictionary.dict"
 RUN_FILE = "run.json"
@@ -135,7 +135,7 @@ def write_run_file(run: dict) -> None:
 
 
 def record_run(runs: Collection, run: dict) -> None:
-    """Stores the run's details (not its model files) in topic_model_runs."""
+    """Stores the run's details (not its model files) in the LDA runs collection."""
     runs.replace_one({"run_id": run["run_id"]}, {k: v for k, v in run.items() if k != "_id"}, upsert=True)
 
 
