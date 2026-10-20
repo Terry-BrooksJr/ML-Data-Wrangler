@@ -1,100 +1,147 @@
-# Shorthand for the repo's common commands. Needs Task (https://taskfile.dev)
-# and uv. `task` alone lists everything; extra arguments go after `--`:
+# Shorthand for the repo's common commands. Needs Task 3.x (https://taskfile.dev)
+# and uv. `task` alone lists everything; `task --summary NAME` explains one.
+# Extra arguments go after `--`, each passed through as one argument:
 #
-#   task t -- -k tag_normalizer      # pytest -k tag_normalizer
-#   task tags -- tags.csv --out tag_mapping.csv
+#   task t -- -k tag_normalizer
+#   task tags -- "Untitled (1).csv" --out tag_mapping.csv
 version: "3"
+
+set: [errexit, nounset, pipefail]
 
 vars:
   SRC: src
+  # The arguments after `--`, shell-quoted one by one, so a path with spaces
+  # or brackets stays one argument (plain CLI_ARGS would split it).
+  ARGS: "{{range .CLI_ARGS_LIST}} {{shellQuote .}}{{end}}"
 
 tasks:
   default:
     desc: List the tasks
     silent: true
-    cmds:
-      - task --list
+    cmd: "{{.TASK_EXE}} --list"
 
-  # --- setup ----------------------------------------------------------------------
+  # --- internal ---------------------------------------------------------------------
+
+  _uv:
+    internal: true
+    run: once
+    preconditions:
+      - sh: command -v uv
+        msg: "uv is not installed: https://docs.astral.sh/uv/getting-started/installation/"
+
+  _env-file:
+    internal: true
+    status: [test -f .env]
+    cmd: cp .env.example .env
+
+  _stopwords:
+    internal: true
+    deps: [_uv]
+    # Exits 0 only when NLTK can already find the stopword list.
+    status:
+      - uv run python -c "import nltk; nltk.data.find('corpora/stopwords')"
+    cmd: uv run python -c "import nltk; nltk.download('stopwords', quiet=True)"
+
+  # --- setup ------------------------------------------------------------------------
 
   setup:
-    desc: Install everything from uv.lock, including dev tools and the spaCy model
+    desc: Install everything from uv.lock (dev tools, spaCy model), .env and NLTK stopwords
+    summary: |
+      Runs `uv sync` (always: it's quick when nothing changed, and repairs a
+      missing or stale .venv), copies .env.example to .env if there is no
+      .env, and downloads the NLTK stopword list if it isn't there yet.
     aliases: [s, i, install]
+    deps: [_uv]
     cmds:
       - uv sync
-      - test -f .env || cp .env.example .env
-      - uv run python -c "import nltk; nltk.download('stopwords', quiet=True)"
+      - task: _env-file
+      - task: _stopwords
 
   reqs:
-    desc: Re-export requirements.txt from uv.lock (after changing dependencies)
+    desc: Re-export requirements.txt from uv.lock (skipped when uv.lock is unchanged)
     aliases: [rq]
-    cmds:
-      - uv export --format requirements-txt --no-dev --no-hashes -o requirements.txt
+    deps: [_uv]
+    sources: [uv.lock, pyproject.toml]
+    generates: [requirements.txt]
+    cmd: uv export --format requirements-txt --no-dev --no-hashes -o requirements.txt
 
-  # --- run ------------------------------------------------------------------------
+  # --- run --------------------------------------------------------------------------
 
   run:
-    desc: Start the desktop app
+    desc: Start the desktop app (writes its output under the repo root)
     aliases: [r, app]
-    cmds:
-      - uv run python {{.SRC}}/app.py
+    deps: [_uv]
+    cmd: uv run python {{.SRC}}/app.py
 
   tags:
-    desc: "Tag Normalizer CLI (task tags -- FILE [--backend spacy] [--out mapping.csv] [--scripts DIR])"
+    desc: Tag Normalizer CLI (task tags -- FILE [--backend spacy] [--out FILE] [--scripts DIR])
+    summary: |
+      Groups synonymous tags and writes a mapping or Zendesk retag scripts.
+      Runs in the directory you call it from, so relative paths work as typed:
+        task tags -- "Untitled (1).csv" --out tag_mapping.csv
+        task tags -- tags.txt --backend spacy --threshold 0.8
+        task tags -- tags.csv --scripts zendesk_retag_run
+      The default backend (voyage) sends the tag names to Voyage AI.
     aliases: [tn]
-    dir: "{{.SRC}}"
-    cmds:
-      - uv run python -m tag_normalizer {{.CLI_ARGS}}
+    deps: [_uv]
+    dir: "{{.USER_WORKING_DIR}}"
+    env:
+      PYTHONPATH: "{{.ROOT_DIR}}/{{.SRC}}"
+    preconditions:
+      - sh: test {{len .CLI_ARGS_LIST}} -gt 0
+        msg: "Name a tag file: task tags -- FILE (or task tags -- --help)"
+    cmd: uv run --project {{shellQuote .ROOT_DIR}} python -m tag_normalizer{{.ARGS}}
 
   embed:check:
     desc: One tiny Voyage call to test the embedding key (no ticket text)
     aliases: [ec]
+    deps: [_uv]
     dir: "{{.SRC}}"
-    cmds:
-      - uv run python -m embeddings check
+    cmd: uv run python -m embeddings check
 
   embed:backfill:
     desc: Embed new or changed tickets with Voyage (paid; sends ticket text)
     aliases: [eb]
+    deps: [_uv]
     dir: "{{.SRC}}"
     prompt: This sends ticket text to Voyage AI and is billed. Continue?
-    cmds:
-      - uv run python -m embeddings backfill {{.CLI_ARGS}}
+    cmd: uv run python -m embeddings backfill{{.ARGS}}
 
-  # --- test -----------------------------------------------------------------------
+  # --- test -------------------------------------------------------------------------
 
   test:
     desc: Run the test suite (task t -- ARGS passes ARGS to pytest)
     aliases: [t]
-    cmds:
-      - uv run pytest {{.CLI_ARGS}}
+    deps: [_uv]
+    cmd: uv run pytest{{.ARGS}}
 
   test:quick:
-    desc: Tests, stop at the first failure, quiet output
+    desc: Tests, stopping at the first failure, with short output
     aliases: [tq]
-    cmds:
-      - uv run pytest -x -q {{.CLI_ARGS}}
+    deps: [_uv]
+    cmd: uv run pytest -x -q{{.ARGS}}
 
   test:live:
     desc: The live model evaluation (paid; needs CHEAPER_INFERENCE_API_KEY)
     aliases: [tl]
+    deps: [_uv]
     prompt: The live tests make paid model calls. Continue?
     env:
       RUN_LIVE_EVAL: "1"
-    cmds:
-      - uv run pytest -k live {{.CLI_ARGS}}
+    cmd: uv run pytest -k live{{.ARGS}}
 
   # --- lint and format --------------------------------------------------------------
 
   lint:
     desc: Static analysis with prospector (pylint, pyflakes, pycodestyle, ...)
     aliases: [l]
-    cmds:
-      - uv run prospector {{.SRC}} --no-autodetect {{.CLI_ARGS}}
+    deps: [_uv]
+    cmd: uv run prospector {{.SRC}} --no-autodetect{{.ARGS}}
 
   fmt:check:
-    desc: Report files black and isort would change, without changing them
+    desc: Report files isort and black would change, without changing them
     aliases: [fc]
+    deps: [_uv]
     cmds:
       - uv run isort --check-only --diff {{.SRC}} tests
       - uv run black --check {{.SRC}} tests
@@ -102,28 +149,46 @@ tasks:
   fmt:
     desc: Reformat with isort and black (rewrites files in place)
     aliases: [f]
+    deps: [_uv]
     prompt: This rewrites source files in place (most of the repo isn't black-formatted yet). Continue?
     cmds:
       - uv run isort {{.SRC}} tests
       - uv run black {{.SRC}} tests
 
   check:
-    desc: Lint, format check and tests, reporting every failure
+    desc: Lint, format check and tests; runs all three, fails if any failed
+    summary: |
+      Runs lint, fmt:check and test in turn, even after one fails, so one run
+      shows every problem; then exits non-zero naming the ones that failed.
     aliases: [c, ci]
-    cmds:
-      - task: lint
-        ignore_error: true
-      - task: fmt:check
-        ignore_error: true
-      - task: test
+    deps: [_uv]
+    cmd: |
+      failed=""
+      {{.TASK_EXE}} lint || failed="$failed lint"
+      {{.TASK_EXE}} fmt:check || failed="$failed fmt:check"
+      {{.TASK_EXE}} test || failed="$failed test"
+      if [ -n "$failed" ]; then echo "Failed:$failed" >&2; exit 1; fi
 
-  # --- build ----------------------------------------------------------------------
+  # --- build ------------------------------------------------------------------------
 
   build:
-    desc: Build the standalone app with PyInstaller (dist/Lasso.app or dist/Lasso/)
+    desc: Build the standalone app with PyInstaller (skipped when nothing changed; --force rebuilds)
+    summary: |
+      Runs packaging/build.sh: dist/Lasso.app on macOS, dist/Lasso/ on Linux.
+      PyInstaller doesn't cross-compile, and the script is bash, so it runs
+      on macOS and Linux only. Rebuilds only when the sources below changed
+      or dist/ is missing.
     aliases: [b]
-    cmds:
-      - packaging/build.sh
+    deps: [_uv]
+    platforms: [darwin, linux]
+    sources:
+      - "{{.SRC}}/**/*.py"
+      - "{{.SRC}}/zendesk_retag/*"
+      - packaging/**/*
+      - uv.lock
+      - exclude: "{{.SRC}}/**/__pycache__/**"
+    generates: [dist/**/*]
+    cmd: packaging/build.sh
 
   clean:
     desc: Remove build output and caches (not data, models or .env)
