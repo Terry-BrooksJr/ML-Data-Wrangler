@@ -1,0 +1,133 @@
+# Shorthand for the repo's common commands. Needs Task (https://taskfile.dev)
+# and uv. `task` alone lists everything; extra arguments go after `--`:
+#
+#   task t -- -k tag_normalizer      # pytest -k tag_normalizer
+#   task tags -- tags.csv --out tag_mapping.csv
+version: "3"
+
+vars:
+  SRC: src
+
+tasks:
+  default:
+    desc: List the tasks
+    silent: true
+    cmds:
+      - task --list
+
+  # --- setup ----------------------------------------------------------------------
+
+  setup:
+    desc: Install everything from uv.lock, including dev tools and the spaCy model
+    aliases: [s, i, install]
+    cmds:
+      - uv sync
+      - test -f .env || cp .env.example .env
+      - uv run python -c "import nltk; nltk.download('stopwords', quiet=True)"
+
+  reqs:
+    desc: Re-export requirements.txt from uv.lock (after changing dependencies)
+    aliases: [rq]
+    cmds:
+      - uv export --format requirements-txt --no-dev --no-hashes -o requirements.txt
+
+  # --- run ------------------------------------------------------------------------
+
+  run:
+    desc: Start the desktop app
+    aliases: [r, app]
+    cmds:
+      - uv run python {{.SRC}}/app.py
+
+  tags:
+    desc: "Tag Normalizer CLI (task tags -- FILE [--backend spacy] [--out mapping.csv] [--scripts DIR])"
+    aliases: [tn]
+    dir: "{{.SRC}}"
+    cmds:
+      - uv run python -m tag_normalizer {{.CLI_ARGS}}
+
+  embed:check:
+    desc: One tiny Voyage call to test the embedding key (no ticket text)
+    aliases: [ec]
+    dir: "{{.SRC}}"
+    cmds:
+      - uv run python -m embeddings check
+
+  embed:backfill:
+    desc: Embed new or changed tickets with Voyage (paid; sends ticket text)
+    aliases: [eb]
+    dir: "{{.SRC}}"
+    prompt: This sends ticket text to Voyage AI and is billed. Continue?
+    cmds:
+      - uv run python -m embeddings backfill {{.CLI_ARGS}}
+
+  # --- test -----------------------------------------------------------------------
+
+  test:
+    desc: Run the test suite (task t -- ARGS passes ARGS to pytest)
+    aliases: [t]
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  test:quick:
+    desc: Tests, stop at the first failure, quiet output
+    aliases: [tq]
+    cmds:
+      - uv run pytest -x -q {{.CLI_ARGS}}
+
+  test:live:
+    desc: The live model evaluation (paid; needs CHEAPER_INFERENCE_API_KEY)
+    aliases: [tl]
+    prompt: The live tests make paid model calls. Continue?
+    env:
+      RUN_LIVE_EVAL: "1"
+    cmds:
+      - uv run pytest -k live {{.CLI_ARGS}}
+
+  # --- lint and format --------------------------------------------------------------
+
+  lint:
+    desc: Static analysis with prospector (pylint, pyflakes, pycodestyle, ...)
+    aliases: [l]
+    cmds:
+      - uv run prospector {{.SRC}} --no-autodetect {{.CLI_ARGS}}
+
+  fmt:check:
+    desc: Report files black and isort would change, without changing them
+    aliases: [fc]
+    cmds:
+      - uv run isort --check-only --diff {{.SRC}} tests
+      - uv run black --check {{.SRC}} tests
+
+  fmt:
+    desc: Reformat with isort and black (rewrites files in place)
+    aliases: [f]
+    prompt: This rewrites source files in place (most of the repo isn't black-formatted yet). Continue?
+    cmds:
+      - uv run isort {{.SRC}} tests
+      - uv run black {{.SRC}} tests
+
+  check:
+    desc: Lint, format check and tests, reporting every failure
+    aliases: [c, ci]
+    cmds:
+      - task: lint
+        ignore_error: true
+      - task: fmt:check
+        ignore_error: true
+      - task: test
+
+  # --- build ----------------------------------------------------------------------
+
+  build:
+    desc: Build the standalone app with PyInstaller (dist/Lasso.app or dist/Lasso/)
+    aliases: [b]
+    cmds:
+      - packaging/build.sh
+
+  clean:
+    desc: Remove build output and caches (not data, models or .env)
+    aliases: [x]
+    cmds:
+      - rm -rf build dist .pytest_cache
+      - find . -path ./.venv -prune -o -type d -name __pycache__ -exec rm -rf {} +
