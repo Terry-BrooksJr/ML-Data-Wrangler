@@ -8,6 +8,7 @@ nothing here changes how tickets are classified or stored.
 
 import os
 import threading
+import time
 from typing import Any, Callable, List, Optional
 
 import embeddings
@@ -18,7 +19,7 @@ from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5 import QtCore
-from PyQt5.QtCore import pyqtSignal, QThread
+from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -52,6 +53,8 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
+# Table data role on a row's first cell: its review's ID, to keep it selected.
+REVIEW_ID_ROLE = QtCore.Qt.UserRole + 1
 COLUMNS = [
     "Ticket",
     "Subject",
@@ -200,6 +203,67 @@ def latest_outcome(row: dict) -> Optional[dict]:
     return matches[-1] if matches else None
 
 
+def ask_batch_size(parent: QWidget, awaiting: int, note: str) -> Optional[int]:
+    """Asks how many of the awaiting tickets to review; None if cancelled.
+
+    A module function so tests can answer it without a dialog.
+    """
+    text = (
+        f"{awaiting} ticket(s) are awaiting review. How many should this batch "
+        "review, oldest first?\n\nEach ticket is a paid model call. Results are "
+        "saved to MongoDB only. You can stop the batch after any ticket."
+        + (f"\n\nWarning:\n{note}" if note else "")
+    )
+    count, ok = QInputDialog.getInt(parent, "Run Batch", text, awaiting, 1, awaiting, 1)
+    return count if ok else None
+
+
+def format_duration(seconds: float) -> str:
+    """Seconds as "45 s", "3 min 20 s" or "1 h 5 min"."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {seconds} s" if seconds else f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def batch_status(progress: dict, elapsed: float) -> str:
+    """The progress line: tickets done, outcomes, speed and time left.
+
+    The estimate is the average time per finished ticket so far times the
+    tickets left, so it follows the model's current speed.
+    """
+    done, total, counts = progress["done"], progress["total"], progress["summary"]
+    parts = [f"{done} of {total} done"]
+    outcomes = [
+        f"{counts[key]} {label}"
+        for key, label in (
+            ("classified", "classified"),
+            ("manual_fallback", "to manual triage"),
+            ("skipped", "skipped"),
+            ("errored", "errored"),
+        )
+        if counts.get(key)
+    ]
+    if outcomes:
+        parts.append(", ".join(outcomes))
+    if done:
+        per_ticket = elapsed / done
+        parts.append(f"{per_ticket:.1f} s per ticket")
+        if done < total:
+            parts.append(f"about {format_duration(per_ticket * (total - done))} left")
+    return " · ".join(parts)
+
+
+class BatchRelay(QObject):
+    """Carries batch progress from the worker thread to the tab (queued, as it lives on the GUI thread)."""
+
+    progress = pyqtSignal(object)
+
+
 class TriageTab(QWidget):
     """The Decision Engine tab.
 
@@ -247,11 +311,19 @@ class TriageTab(QWidget):
         # interrupted safely, so it always finishes.
         self._cancel = threading.Event()
         self._closing = False
+        # Called on the worker thread as review_batch(tickets, ids, on_progress=...).
         self.review_batch = review_batch or (
-            lambda tickets, zendesk_ids: persistence.run_review_batch(
-                tickets, zendesk_ids, should_stop=self._cancel.is_set
+            lambda tickets, zendesk_ids, on_progress=None: persistence.run_review_batch(
+                tickets,
+                zendesk_ids,
+                should_stop=self._cancel.is_set,
+                on_progress=on_progress,
             )
         )
+        # The running batch: total, start time and subjects, or None.
+        self._batch: Optional[dict] = None
+        self._batch_relay = BatchRelay(self)
+        self._batch_relay.progress.connect(self._on_batch_progress)
         self.review_one = review_one
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
@@ -279,8 +351,12 @@ class TriageTab(QWidget):
         status_row.addWidget(self.status_label, stretch=1)
         status_row.addWidget(self.refresh_button)
 
-        self.review_all_button = Button("Review All Awaiting Tickets", primary=True)
-        self.review_all_button.clicked.connect(self.start_review_all)
+        self.batch_button = Button("Run Batch…", primary=True)
+        self.batch_button.setToolTip(
+            "Review the next N tickets awaiting review, oldest first. "
+            "Each ticket is a paid model call."
+        )
+        self.batch_button.clicked.connect(self.start_batch)
 
         self.ticket_id_input = LineEdit("Ticket")
         self.ticket_id_input.setPlaceholderText("Zendesk ticket ID")
@@ -303,6 +379,15 @@ class TriageTab(QWidget):
         self.busy_bar = ProgressBar()
         self.busy_bar.setRange(0, 0)
         self.busy_bar.setVisible(False)
+        # Shown while a batch runs: its progress, and a way to stop it safely.
+        self.batch_label = hint("")
+        self.batch_label.setVisible(False)
+        self.stop_button = Button("Stop After This Ticket")
+        self.stop_button.setToolTip(
+            "Finishes the ticket being reviewed, saves it, and leaves the rest in the queue."
+        )
+        self.stop_button.clicked.connect(self.stop_batch)
+        self.stop_button.setVisible(False)
 
         self.table = use_si_scrollbars(QTableWidget(0, len(COLUMNS)))
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -353,8 +438,12 @@ class TriageTab(QWidget):
         review_card.body.addWidget(intro)
         review_card.body.addLayout(status_row)
         review_card.body.addLayout(one_row)
-        review_card.body.addLayout(button_row(self.review_all_button, self.embed_button))
+        review_card.body.addLayout(button_row(self.batch_button, self.embed_button))
         review_card.body.addWidget(self.busy_bar)
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.batch_label, stretch=1)
+        batch_row.addWidget(self.stop_button)
+        review_card.body.addLayout(batch_row)
 
         reviews_card = Card(f"Recent Reviews (newest {RECENT_REVIEW_LIMIT})")
         reviews_card.body.addWidget(splitter)
@@ -474,7 +563,7 @@ class TriageTab(QWidget):
 
         for button in (
             self.refresh_button,
-            self.review_all_button,
+            self.batch_button,
             self.review_one_button,
             self.accuracy_button,
             self.embed_button,
@@ -487,6 +576,12 @@ class TriageTab(QWidget):
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
+        if not busy:
+            # A batch's progress UI goes with it.
+            self._batch = None
+            self.busy_bar.setRange(0, 0)
+            self.batch_label.setVisible(False)
+            self.stop_button.setVisible(False)
         if busy and label:
             self.status_label.setText(label)
 
@@ -605,10 +700,10 @@ class TriageTab(QWidget):
         self._rows = rows
         self._fill_table()
 
-    def start_review_all(self) -> None:
-        """Begins the review-all flow by listing awaiting tickets.
+    def start_batch(self) -> None:
+        """Begins a batch: lists the awaiting tickets, then asks how many to review.
 
-        Snapshots the awaiting IDs off the GUI thread before asking, so the
+        Snapshots the awaiting tickets off the GUI thread before asking, so the
         batch reviews exactly the tickets the user approved, not ones inserted
         or reopened while the dialog was open. Shows a warning and stops if
         the environment is not configured.
@@ -616,42 +711,85 @@ class TriageTab(QWidget):
         if not self._configured(REVIEW_ENV, notify=True):
             return
         self._run(
-            lambda: persistence.awaiting_ids(self.collection_factory()),
+            lambda: persistence.awaiting_tickets(self.collection_factory()),
             "Finding tickets awaiting review",
-            self._confirm_review_all,
+            self._confirm_batch,
         )
 
-    def _confirm_review_all(self, zendesk_ids: List[str]) -> None:
-        """Asks before sending the listed tickets to the model, then reviews only those.
+    def _confirm_batch(self, awaiting: List[dict]) -> None:
+        """Asks how many tickets to review (1 to all), then reviews the oldest that many.
 
         Args:
-            zendesk_ids: The tickets awaiting review when the list was taken.
+            awaiting: The tickets awaiting review when the list was taken,
+                oldest first, as {"zendesk_id", "subject"}.
         """
-        awaiting = len(zendesk_ids)
-        self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
-        if awaiting == 0:
+        self.status_label.setText(f"{len(awaiting)} ticket(s) awaiting review.")
+        if not awaiting:
             QMessageBox.information(
                 self, "Nothing to Review", "No tickets are awaiting review."
             )
             return
-        note = optional_models_note()
-        answer = QMessageBox.question(
-            self,
-            "Review All Awaiting Tickets",
-            f"Send {awaiting} ticket(s) to the model for classification?\n\n"
-            "Each ticket is a paid model call. Results are saved to MongoDB only."
-            + (f"\n\nWarning:\n{note}" if note else ""),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
-        )
-        if answer != QMessageBox.Yes:
+        count = ask_batch_size(self, len(awaiting), optional_models_note())
+        if not count:
             return
+        chosen = awaiting[:count]
+        zendesk_ids = [ticket["zendesk_id"] for ticket in chosen]
         self._warn_optional_models()
-        self._run(
-            lambda: self.review_batch(self.collection_factory(), list(zendesk_ids)),
-            f"Reviewing {awaiting} ticket(s)",
-            self._review_all_done,
+        self._cancel.clear()  # a Stop pressed during an earlier batch
+        started = self._run(
+            lambda: self.review_batch(
+                self.collection_factory(),
+                list(zendesk_ids),
+                on_progress=self._batch_relay.progress.emit,
+            ),
+            f"Reviewing {count} ticket(s)",
+            self._batch_done,
         )
+        if not started:
+            return
+        self._batch = {
+            "total": count,
+            "started": time.monotonic(),
+            "subjects": {t["zendesk_id"]: t.get("subject") for t in chosen},
+        }
+        self.busy_bar.setRange(0, count)
+        self.busy_bar.setValue(0)
+        self.batch_label.setText(f"0 of {count} done · starting…")
+        self.batch_label.setVisible(True)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+
+    def stop_batch(self) -> None:
+        """Stops the batch after the ticket in progress, which is still saved."""
+        if self._batch is None:
+            return
+        self._cancel.set()
+        self.stop_button.setEnabled(False)
+        self.batch_label.setText(
+            self.batch_label.text().split(" · about")[0] + " · stopping after this ticket…"
+        )
+        logger.info("Decision Engine: batch will stop after the current ticket.")
+
+    def _on_batch_progress(self, progress: dict) -> None:
+        """After each ticket: moves the bar, updates the counts and time left,
+        and adds a stored review to Recent Reviews."""
+        if self._batch is None:  # a late signal after the batch ended
+            return
+        self.busy_bar.setValue(progress["done"])
+        status = batch_status(progress, time.monotonic() - self._batch["started"])
+        if self._cancel.is_set() and not self._closing:
+            status = status.split(" · about")[0] + " · stopping after this ticket…"
+        self.batch_label.setText(status)
+        review = progress.get("review")
+        if review is not None:
+            zendesk_id = progress["zendesk_id"]
+            row = {
+                "zendesk_id": zendesk_id,
+                "subject": self._batch["subjects"].get(zendesk_id),
+                "review": review,
+            }
+            self._rows = [row, *self._rows][:RECENT_REVIEW_LIMIT]
+            self._fill_table()
 
     def start_embed_tickets(self) -> None:
         """Checks the vector index and lists stale tickets, then asks before sending them to Voyage.
@@ -715,20 +853,26 @@ class TriageTab(QWidget):
         logger.success(message.replace("\n", "; "))
         QMessageBox.information(self, "Embedding Complete", message)
 
-    def _review_all_done(self, summary) -> None:
-        """Logs and announces batch completion, then refreshes the list.
+    def _batch_done(self, summary) -> None:
+        """Logs and announces the batch's end, then refreshes the list.
 
         Args:
             summary: The batch's counts from run_review_batch, or None.
         """
-        logger.success("Review batch finished.")
-        message = "Review batch finished. Results are listed below."
+        stopped_by_user = isinstance(summary, dict) and summary.get("cancelled")
+        logger.success("Review batch stopped." if stopped_by_user else "Review batch finished.")
+        message = (
+            "Batch stopped after the current ticket; the rest are still awaiting review."
+            if stopped_by_user
+            else "Review batch finished. Results are listed below."
+        )
         if isinstance(summary, dict):
             message += "\n\n" + persistence.format_batch_summary(summary)
         if isinstance(summary, dict) and summary.get("stopped"):
             QMessageBox.warning(self, "Review Stopped Early", message)
         else:
-            QMessageBox.information(self, "Review Complete", message)
+            title = "Batch Stopped" if stopped_by_user else "Review Complete"
+            QMessageBox.information(self, title, message)
         self.refresh()
 
     def start_review_one(self) -> None:
@@ -794,6 +938,13 @@ class TriageTab(QWidget):
         columns are resized, and the detail pane is cleared.
         """
 
+        # Read from the table, not self._rows, which may already hold new rows.
+        selected = self.table.selectedItems()
+        keep = (
+            self.table.item(selected[0].row(), 0).data(REVIEW_ID_ROLE)
+            if selected
+            else None
+        )
         # Sorting is paused while filling, or rows reorder mid-insert.
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self._rows))
@@ -817,12 +968,19 @@ class TriageTab(QWidget):
                 )
                 if column == 0:
                     item.setData(QtCore.Qt.UserRole, row_index)
+                    item.setData(REVIEW_ID_ROLE, str(review.get("review_id") or ""))
                 self.table.setItem(row_index, column, item)
         self.table.setSortingEnabled(True)
         # Re-enabling sorting applies the header's current indicator, which
         # defaults to column 0; reset it to newest review first.
         self.table.sortItems(COLUMNS.index("Reviewed (UTC)"), QtCore.Qt.DescendingOrder)
         self.table.resizeColumnsToContents()
+        # Rows added during a batch keep the review being read selected.
+        if keep:
+            for table_row in range(self.table.rowCount()):
+                if self.table.item(table_row, 0).data(REVIEW_ID_ROLE) == keep:
+                    self.table.selectRow(table_row)
+                    return
         self.detail.clear()
 
     def show_selected_review(self) -> None:
