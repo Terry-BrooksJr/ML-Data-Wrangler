@@ -47,6 +47,8 @@ from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
+import tag_normalizer
+from tag_tab import TagTab
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
 from wrangler import DataWrangler, process_progress
@@ -256,9 +258,15 @@ class MainWindow(QMainWindow, QDialog):
         self.triage_tab = TriageTab()
         self.triage_tab.idle.connect(self._finish_pending_close)
 
+        # spaCy tag grouping reuses the model already loaded for LDA.
+        self.tag_tab = TagTab(lambda backend: tag_normalizer.spacy_embedder(nlp) if backend == tag_normalizer.SPACY
+                              else tag_normalizer.embedder(backend))
+        self.tag_tab.idle.connect(self._finish_pending_close)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(topic_tab, "Topic Modeling")
         self.tabs.addTab(self.triage_tab, "Decision Engine")
+        self.tabs.addTab(self.tag_tab, "Tag Normalizer")
 
         # Main layout arrangement
         self.main_layout.addWidget(self.tabs, stretch=3)
@@ -1065,10 +1073,12 @@ class MainWindow(QMainWindow, QDialog):
         return [(label, t) for label, t in candidates if isinstance(t, QThread)]
 
     def running_jobs(self) -> List[str]:
-        """Labels of the background jobs still running, in this window and the Decision Engine tab."""
+        """Labels of the background jobs still running, in this window and its tabs."""
         jobs = [label for label, t in self._app_threads() if t.isRunning()]
         if self.triage_tab.is_busy():
             jobs.append("Decision Engine job")
+        if self.tag_tab.is_busy():
+            jobs.append("tag embedding")
         return jobs
 
     def closeEvent(self, event) -> None:
@@ -1086,6 +1096,7 @@ class MainWindow(QMainWindow, QDialog):
             return
         event.ignore()
         self.triage_tab.request_shutdown()
+        self.tag_tab.request_shutdown()
         self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
         if not self._close_pending:
             self._close_pending = True
@@ -1109,6 +1120,7 @@ class MainWindow(QMainWindow, QDialog):
         another path; it blocks, but never lets a running QThread be destroyed.
         """
         self.triage_tab.wait_for_job()
+        self.tag_tab.wait_for_job()
         for label, thread in self._app_threads():
             if thread.isRunning():
                 logger.warning(f"Waiting for {label} to finish before quitting…")
