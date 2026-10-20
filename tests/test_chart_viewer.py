@@ -1,9 +1,8 @@
 import http.client
 import urllib.parse
 
-import pytest
-
 import chart_viewer
+import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -30,11 +29,24 @@ def test_chart_is_served_sandboxed(tmp_path):
     assert status == 200 and body == chart.read_bytes()
     csp = headers["Content-Security-Policy"]
     assert csp.startswith("sandbox allow-scripts;")
-    assert "allow-same-origin" not in csp and "allow-popups" not in csp and "allow-top-navigation" not in csp
-    for directive in ("default-src 'none'", "connect-src 'none'", "object-src 'none'", "base-uri 'none'",
-                      "form-action 'none'", "frame-ancestors 'none'"):
+    assert (
+        "allow-same-origin" not in csp
+        and "allow-popups" not in csp
+        and "allow-top-navigation" not in csp
+    )
+    for directive in (
+        "default-src 'none'",
+        "connect-src 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ):
         assert directive in csp
-    assert f"script-src 'unsafe-inline' {chart_viewer.D3_URL} {chart_viewer.LDAVIS_URL}" in csp
+    assert (
+        f"script-src 'unsafe-inline' {chart_viewer.D3_URL} {chart_viewer.LDAVIS_URL}"
+        in csp
+    )
     assert headers["X-Content-Type-Options"] == "nosniff"
 
 

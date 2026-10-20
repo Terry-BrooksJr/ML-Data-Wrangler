@@ -2,12 +2,11 @@ import json
 import os
 
 import boto3
+import model_storage
 import mongomock
 import pytest
-from moto import mock_aws
-
-import model_storage
 import topic_store
+from moto import mock_aws
 
 BUCKET = "lasso-models"
 KEY = "k" * 40
@@ -15,8 +14,16 @@ KEY = "k" * 40
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    for name in ("MODEL_BUCKET", "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_ENDPOINT_URL",
-                 "MODEL_STORAGE_REGION", "MODEL_PREFIX", "MONGO_URI", "MODEL_SIGNING_KEY"):
+    for name in (
+        "MODEL_BUCKET",
+        "B2_KEY_ID",
+        "B2_APPLICATION_KEY",
+        "B2_ENDPOINT_URL",
+        "MODEL_STORAGE_REGION",
+        "MODEL_PREFIX",
+        "MONGO_URI",
+        "MODEL_SIGNING_KEY",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MODEL_BUCKET", BUCKET)
     monkeypatch.setenv("B2_KEY_ID", "key-id")
@@ -30,8 +37,12 @@ def env(monkeypatch, tmp_path):
 @pytest.fixture
 def s3(env, monkeypatch):
     with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1", aws_access_key_id="key-id",
-                              aws_secret_access_key="secret")
+        client = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            aws_access_key_id="key-id",
+            aws_secret_access_key="secret",
+        )
         client.create_bucket(Bucket=BUCKET)
         monkeypatch.setattr(model_storage, "make_client", lambda cfg: client)
         yield client
@@ -45,18 +56,29 @@ def _run(tmp_path, run_id="20261014T120000Z-abc123", folder="topic_models", **ex
     (run_dir / "dictionary.dict").write_bytes(b"dict")
     (run_dir / "charts").mkdir()
     (run_dir / "charts" / "lda_model.html").write_text("<html>")
-    run = {"run_id": run_id, "ran_at": "2026-10-14T12:00:00+00:00", "model_dir": str(run_dir), "warnings": [],
-           "charts": {"lda_html": str(run_dir / "charts" / "lda_model.html")}, **extra}
+    run = {
+        "run_id": run_id,
+        "ran_at": "2026-10-14T12:00:00+00:00",
+        "model_dir": str(run_dir),
+        "warnings": [],
+        "charts": {"lda_html": str(run_dir / "charts" / "lda_model.html")},
+        **extra,
+    }
     topic_store.write_run_file(run)
     return run
 
 
 def _keys(s3, prefix=""):
-    return {o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])}
+    return {
+        o["Key"]
+        for o in s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix).get("Contents", [])
+    }
 
 
 def _manifest(s3, run):
-    body = s3.get_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "manifest.json")["Body"].read()
+    body = s3.get_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "manifest.json")[
+        "Body"
+    ].read()
     return json.loads(body)
 
 
@@ -91,7 +113,9 @@ def test_bucket_needs_a_signing_key(env, value):
         model_storage.config()
 
 
-@pytest.mark.parametrize("endpoint", ["http://s3.us-west-004.backblazeb2.com", "s3.example.com"])
+@pytest.mark.parametrize(
+    "endpoint", ["http://s3.us-west-004.backblazeb2.com", "s3.example.com"]
+)
 def test_insecure_endpoint_is_an_error(env, endpoint):
     env.setenv("B2_ENDPOINT_URL", endpoint)
     with pytest.raises(model_storage.StorageNotConfigured, match="https://"):
@@ -102,10 +126,15 @@ def test_backblaze_region_comes_from_endpoint(env):
     env.delenv("MODEL_STORAGE_REGION")
     env.setenv("B2_ENDPOINT_URL", "https://s3.us-west-004.backblazeb2.com")
     cfg = model_storage.config()
-    assert cfg.region == "us-west-004" and cfg.endpoint_url == "https://s3.us-west-004.backblazeb2.com"
+    assert (
+        cfg.region == "us-west-004"
+        and cfg.endpoint_url == "https://s3.us-west-004.backblazeb2.com"
+    )
 
 
-@pytest.mark.parametrize("prefix, expected", [("", ""), ("models", "models/"), ("/a/b/", "a/b/")])
+@pytest.mark.parametrize(
+    "prefix, expected", [("", ""), ("models", "models/"), ("/a/b/", "a/b/")]
+)
 def test_prefix_is_normalized(env, prefix, expected):
     env.setenv("MODEL_PREFIX", prefix)
     assert model_storage.config().prefix == expected
@@ -116,7 +145,9 @@ def test_new_key_command(capsys):
     assert len(capsys.readouterr().out.strip()) >= model_storage.MIN_SIGNING_KEY_CHARS
 
 
-@pytest.mark.parametrize("run_id", ["../evil", "a/b", "..", ".hidden", "", "x" * 101, None, "a\\b"])
+@pytest.mark.parametrize(
+    "run_id", ["../evil", "a/b", "..", ".hidden", "", "x" * 101, None, "a\\b"]
+)
 def test_unsafe_run_ids_are_refused(run_id):
     with pytest.raises(ValueError, match="plain folder name"):
         model_storage.check_run_id(run_id)
@@ -141,10 +172,26 @@ def test_upload_copies_every_file_then_a_signed_manifest(s3, tmp_path):
     storage = model_storage.upload_run(run, model_storage.config(), Recording())
     prefix = f"topic-models/{run['run_id']}/"
     assert uploaded[-2:] == [prefix + "run.json", prefix + "manifest.json"]
-    assert _keys(s3) == {prefix + name for name in ("lda.model", "lda.model.expElogbeta.npy", "dictionary.dict",
-                                                    "charts/lda_model.html", "run.json", "manifest.json")}
-    document = json.loads(s3.get_object(Bucket=BUCKET, Key=prefix + "manifest.json")["Body"].read())
-    assert model_storage.verify(document, run["run_id"], KEY.encode())["files"]["lda.model"]["bytes"] == 5
+    assert _keys(s3) == {
+        prefix + name
+        for name in (
+            "lda.model",
+            "lda.model.expElogbeta.npy",
+            "dictionary.dict",
+            "charts/lda_model.html",
+            "run.json",
+            "manifest.json",
+        )
+    }
+    document = json.loads(
+        s3.get_object(Bucket=BUCKET, Key=prefix + "manifest.json")["Body"].read()
+    )
+    assert (
+        model_storage.verify(document, run["run_id"], KEY.encode())["files"][
+            "lda.model"
+        ]["bytes"]
+        == 5
+    )
     assert storage["region"] == "us-east-1" and storage["files"] == 5
 
 
@@ -161,7 +208,10 @@ def test_symlinks_and_outside_files_are_not_uploaded(s3, tmp_path):
     model_storage.upload_run(run, model_storage.config(), s3)
     keys = _keys(s3)
     assert not any("innocent" in k or "linked_dir" in k for k in keys)
-    assert all(b"PRIVATE" not in s3.get_object(Bucket=BUCKET, Key=k)["Body"].read() for k in keys)
+    assert all(
+        b"PRIVATE" not in s3.get_object(Bucket=BUCKET, Key=k)["Body"].read()
+        for k in keys
+    )
 
 
 def pathlib_path(run):
@@ -191,7 +241,11 @@ def test_reupload_removes_the_old_manifest_first(s3, tmp_path):
         model_storage.upload_run(run, model_storage.config(), FailsMidway())
     assert run["storage"]["prefix"] + "manifest.json" not in _keys(s3)
     with pytest.raises(FileNotFoundError, match="didn't finish"):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), tmp_path / "other" / run["run_id"])
+        model_storage.download_run(
+            _as_seen_elsewhere(run),
+            model_storage.config(),
+            tmp_path / "other" / run["run_id"],
+        )
 
 
 def test_upload_and_record_adds_storage_to_run_json(s3, tmp_path):
@@ -226,7 +280,9 @@ def test_wrong_signing_key_is_refused(s3, tmp_path, env):
     env.setenv("MODEL_SIGNING_KEY", "x" * 40)
     dest = tmp_path / "machine_b" / run["run_id"]
     with pytest.raises(model_storage.UntrustedRun, match="signature"):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), dest)
+        model_storage.download_run(
+            _as_seen_elsewhere(run), model_storage.config(), dest
+        )
     assert not dest.exists()
 
 
@@ -235,20 +291,31 @@ def test_swapped_model_file_is_refused(s3, tmp_path):
     run = _run(tmp_path, folder="machine_a")
     model_storage.upload_and_record(run, model_storage.config(), s3)
     # Same size as the real file, so only the hash check can catch it.
-    s3.put_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "lda.model", Body=b"EVIL!")
+    s3.put_object(
+        Bucket=BUCKET, Key=run["storage"]["prefix"] + "lda.model", Body=b"EVIL!"
+    )
     dest = tmp_path / "machine_b" / run["run_id"]
     with pytest.raises(model_storage.UntrustedRun, match="doesn't match its manifest"):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), dest)
+        model_storage.download_run(
+            _as_seen_elsewhere(run), model_storage.config(), dest
+        )
     assert not dest.exists()
 
 
 def test_swapped_chart_is_refused(s3, tmp_path):
     run = _run(tmp_path, folder="machine_a")
     model_storage.upload_and_record(run, model_storage.config(), s3)
-    s3.put_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "charts/lda_model.html",
-                  Body=b"<script>alert(1)</script>")
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=run["storage"]["prefix"] + "charts/lda_model.html",
+        Body=b"<script>alert(1)</script>",
+    )
     with pytest.raises(model_storage.UntrustedRun):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), tmp_path / "b" / run["run_id"])
+        model_storage.download_run(
+            _as_seen_elsewhere(run),
+            model_storage.config(),
+            tmp_path / "b" / run["run_id"],
+        )
 
 
 def test_forged_manifest_without_the_key_is_refused(s3, tmp_path):
@@ -256,15 +323,25 @@ def test_forged_manifest_without_the_key_is_refused(s3, tmp_path):
     model_storage.upload_and_record(run, model_storage.config(), s3)
     document = _manifest(s3, run)
     document["manifest"]["files"]["lda.model"] = {"sha256": "0" * 64, "bytes": 4}
-    s3.put_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "manifest.json", Body=json.dumps(document))
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=run["storage"]["prefix"] + "manifest.json",
+        Body=json.dumps(document),
+    )
     with pytest.raises(model_storage.UntrustedRun, match="signature"):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), tmp_path / "b" / run["run_id"])
+        model_storage.download_run(
+            _as_seen_elsewhere(run),
+            model_storage.config(),
+            tmp_path / "b" / run["run_id"],
+        )
 
 
 def test_only_listed_files_are_fetched(s3, tmp_path):
     run = _run(tmp_path, folder="machine_a")
     model_storage.upload_and_record(run, model_storage.config(), s3)
-    s3.put_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "huge.bin", Body=b"x" * 10_000)
+    s3.put_object(
+        Bucket=BUCKET, Key=run["storage"]["prefix"] + "huge.bin", Body=b"x" * 10_000
+    )
     dest = tmp_path / "b" / run["run_id"]
     model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), dest)
     assert not (dest / "huge.bin").exists()
@@ -276,22 +353,27 @@ def test_prefix_must_be_the_runs_own_folder(s3, tmp_path):
     remote = _as_seen_elsewhere(run)
     remote["storage"]["prefix"] = "topic-models/"  # broad prefix
     with pytest.raises(model_storage.UntrustedRun, match="isn't this run's folder"):
-        model_storage.download_run(remote, model_storage.config(), tmp_path / "b" / run["run_id"])
+        model_storage.download_run(
+            remote, model_storage.config(), tmp_path / "b" / run["run_id"]
+        )
 
 
 def _signed(manifest):
     return {"manifest": manifest, "hmac": model_storage.sign(manifest, KEY.encode())}
 
 
-@pytest.mark.parametrize("files, problem", [
-    ({f"f{i}": {"sha256": "0" * 64, "bytes": 1} for i in range(201)}, "201 files"),
-    ({"big": {"sha256": "0" * 64, "bytes": 3 * 1024 ** 3}}, "GB"),
-    ({"../escape": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
-    ({"/abs": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
-    ({"a/../b": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
-    ({"x": {"sha256": "0" * 64, "bytes": -1}}, "malformed"),
-    ({}, "0 files"),
-])
+@pytest.mark.parametrize(
+    "files, problem",
+    [
+        ({f"f{i}": {"sha256": "0" * 64, "bytes": 1} for i in range(201)}, "201 files"),
+        ({"big": {"sha256": "0" * 64, "bytes": 3 * 1024**3}}, "GB"),
+        ({"../escape": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
+        ({"/abs": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
+        ({"a/../b": {"sha256": "0" * 64, "bytes": 1}}, "unsafe path"),
+        ({"x": {"sha256": "0" * 64, "bytes": -1}}, "malformed"),
+        ({}, "0 files"),
+    ],
+)
 def test_even_signed_manifests_are_bounded(files, problem):
     manifest = {"version": 1, "run_id": "r1", "files": files}
     with pytest.raises(model_storage.UntrustedRun, match=problem):
@@ -299,7 +381,11 @@ def test_even_signed_manifests_are_bounded(files, problem):
 
 
 def test_manifest_for_another_run_is_refused():
-    manifest = {"version": 1, "run_id": "other", "files": {"a": {"sha256": "0" * 64, "bytes": 1}}}
+    manifest = {
+        "version": 1,
+        "run_id": "other",
+        "files": {"a": {"sha256": "0" * 64, "bytes": 1}},
+    }
     with pytest.raises(model_storage.UntrustedRun, match="different run"):
         model_storage.verify(_signed(manifest), "r1", KEY.encode())
 
@@ -307,21 +393,38 @@ def test_manifest_for_another_run_is_refused():
 def test_oversized_object_stops_streaming(s3, tmp_path):
     run = _run(tmp_path, folder="machine_a")
     model_storage.upload_and_record(run, model_storage.config(), s3)
-    s3.put_object(Bucket=BUCKET, Key=run["storage"]["prefix"] + "lda.model", Body=b"x" * 5_000_000)
+    s3.put_object(
+        Bucket=BUCKET, Key=run["storage"]["prefix"] + "lda.model", Body=b"x" * 5_000_000
+    )
     with pytest.raises(model_storage.UntrustedRun, match="larger than its manifest"):
-        model_storage.download_run(_as_seen_elsewhere(run), model_storage.config(), tmp_path / "b" / run["run_id"])
+        model_storage.download_run(
+            _as_seen_elsewhere(run),
+            model_storage.config(),
+            tmp_path / "b" / run["run_id"],
+        )
     assert not list((tmp_path / "b").glob("**/*.model"))
 
 
 def test_download_uses_the_endpoint_recorded_with_the_run(env, tmp_path, monkeypatch):
     made = []
-    monkeypatch.setattr(model_storage, "make_client", lambda cfg: made.append(cfg) or object())
-    storage = {"bucket": "b", "prefix": "topic-models/r1/", "endpoint_url": "https://s3.eu-central-003.backblazeb2.com"}
+    monkeypatch.setattr(
+        model_storage, "make_client", lambda cfg: made.append(cfg) or object()
+    )
+    storage = {
+        "bucket": "b",
+        "prefix": "topic-models/r1/",
+        "endpoint_url": "https://s3.eu-central-003.backblazeb2.com",
+    }
     model_storage._client_for(storage, model_storage.config())
-    assert made[0].endpoint_url == storage["endpoint_url"] and made[0].region == "eu-central-003"
+    assert (
+        made[0].endpoint_url == storage["endpoint_url"]
+        and made[0].region == "eu-central-003"
+    )
 
     with pytest.raises(model_storage.UntrustedRun, match="isn't https"):
-        model_storage._client_for({**storage, "endpoint_url": "http://evil.example"}, model_storage.config())
+        model_storage._client_for(
+            {**storage, "endpoint_url": "http://evil.example"}, model_storage.config()
+        )
 
 
 def test_concurrent_download_reuses_the_winners_copy(s3, tmp_path, monkeypatch):
@@ -356,14 +459,19 @@ def test_incomplete_local_copy_is_moved_aside(s3, tmp_path):
 # --- CLI --------------------------------------------------------------------------
 
 
-def test_cli_uploads_runs_not_yet_uploaded_and_records_them(s3, tmp_path, env, monkeypatch, capsys):
+def test_cli_uploads_runs_not_yet_uploaded_and_records_them(
+    s3, tmp_path, env, monkeypatch, capsys
+):
     monkeypatch.setattr("settings.load", lambda: None)
     env.setenv("MONGO_URI", "mongodb://test")
     runs = mongomock.MongoClient().db[topic_store.RUNS_COLLECTION]
     import decision_engine.persistence
 
-    monkeypatch.setattr(decision_engine.persistence, "get_database",
-                        lambda: {topic_store.RUNS_COLLECTION: runs})
+    monkeypatch.setattr(
+        decision_engine.persistence,
+        "get_database",
+        lambda: {topic_store.RUNS_COLLECTION: runs},
+    )
     _run(tmp_path, "20261001T000000Z-old111", storage={"url": "s3://elsewhere/"})
     new = _run(tmp_path, "20261014T000000Z-new222")
 
@@ -371,10 +479,18 @@ def test_cli_uploads_runs_not_yet_uploaded_and_records_them(s3, tmp_path, env, m
     out = capsys.readouterr().out
     assert new["run_id"] in out and "old111" not in out
     prefix = f"topic-models/{new['run_id']}/"
-    assert {prefix + "lda.model", prefix + "dictionary.dict", prefix + "run.json", prefix + "manifest.json"} <= _keys(s3)
+    assert {
+        prefix + "lda.model",
+        prefix + "dictionary.dict",
+        prefix + "run.json",
+        prefix + "manifest.json",
+    } <= _keys(s3)
     # Not in Mongo before: now it is, with its upload, so other computers find it.
     record = runs.find_one({"run_id": new["run_id"]})
-    assert record["storage"]["prefix"] == prefix and record["model_dir"] == new["model_dir"]
+    assert (
+        record["storage"]["prefix"] == prefix
+        and record["model_dir"] == new["model_dir"]
+    )
 
     assert model_storage.main(["upload"]) == 0
     assert "Every local run is already uploaded." in capsys.readouterr().out
@@ -386,7 +502,9 @@ def test_cli_keeps_an_existing_mongo_record(s3, tmp_path, monkeypatch):
     runs.insert_one({"run_id": run["run_id"], "assignment": {"assigned": 7}})
     model_storage.record_storage(runs, run, {"url": "s3://b/p/"})
     record = runs.find_one({"run_id": run["run_id"]})
-    assert record["assignment"] == {"assigned": 7} and record["storage"] == {"url": "s3://b/p/"}
+    assert record["assignment"] == {"assigned": 7} and record["storage"] == {
+        "url": "s3://b/p/"
+    }
 
 
 def test_cli_needs_a_bucket(env, monkeypatch, capsys):
@@ -399,7 +517,9 @@ def test_cli_needs_a_bucket(env, monkeypatch, capsys):
 # --- a downloaded run's local details ------------------------------------------------
 
 
-def test_downloaded_run_json_is_rewritten_for_this_computer(s3, tmp_path, env, monkeypatch, capsys):
+def test_downloaded_run_json_is_rewritten_for_this_computer(
+    s3, tmp_path, env, monkeypatch, capsys
+):
     run = _run(tmp_path, folder="machine_a")
     model_storage.upload_and_record(run, model_storage.config(), s3)
     machine_b = tmp_path / "machine_b"

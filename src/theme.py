@@ -5,6 +5,7 @@ the whole QApplication, so every window and dialog follows it. The log pane
 always stays a dark console whatever the theme: LogHighlighter's colours
 (yellow, cyan, green) are only readable on a dark background.
 """
+
 import os
 from typing import Optional
 
@@ -51,7 +52,9 @@ def apply(app, value: Optional[str] = None) -> str:
     value = os.environ.get("LASSO_THEME") if value is None else value
     name = theme_name(value)
     if name is None:
-        logger.warning(f"Unknown theme {value!r}; using {DEFAULT_THEME}. Choose one of: {', '.join(THEMES)}.")
+        logger.warning(
+            f"Unknown theme {value!r}; using {DEFAULT_THEME}. Choose one of: {', '.join(THEMES)}."
+        )
         name = DEFAULT_THEME
     app.setStyleSheet(stylesheet(name))
     return name

@@ -11,6 +11,7 @@ step after step 2 finds nothing for the tags already removed: keep the file.
 
     python 1_find_tickets.py
 """
+
 import csv
 import os
 import sys
@@ -19,12 +20,16 @@ import urllib.parse
 import zd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PAGE_SIZE = 100  # Zendesk's recommendation; larger pages can time out on archived tickets
+PAGE_SIZE = (
+    100  # Zendesk's recommendation; larger pages can time out on archived tickets
+)
 
 
 def tickets_with_tag(tag):
     """[(ticket_id, status)] for tickets tagged with tag."""
-    query = urllib.parse.urlencode({"query": f"tags:{tag}", "filter[type]": "ticket", "page[size]": PAGE_SIZE})
+    query = urllib.parse.urlencode(
+        {"query": f"tags:{tag}", "filter[type]": "ticket", "page[size]": PAGE_SIZE}
+    )
     url = f"/api/v2/search/export.json?{query}"
     found = []
     while url:
@@ -33,7 +38,11 @@ def tickets_with_tag(tag):
             # Search matching isn't documented as exact; the ticket's own tags are.
             if tag in (ticket.get("tags") or []):
                 found.append((ticket["id"], ticket.get("status", "")))
-        url = (reply.get("links") or {}).get("next") if (reply.get("meta") or {}).get("has_more") else None
+        url = (
+            (reply.get("links") or {}).get("next")
+            if (reply.get("meta") or {}).get("has_more")
+            else None
+        )
     return found
 
 
@@ -46,7 +55,9 @@ def main(argv):
         found = tickets_with_tag(old_tag)
         closed += sum(status == zd.CLOSED for _, status in found)
         print(f"{old_tag} -> {new_tag}: {len(found)} ticket(s)")
-        rows.extend((ticket_id, status, old_tag, new_tag) for ticket_id, status in found)
+        rows.extend(
+            (ticket_id, status, old_tag, new_tag) for ticket_id, status in found
+        )
     path = os.path.join(HERE, zd.TICKETS_FILE)
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -54,7 +65,9 @@ def main(argv):
         writer.writerows(rows)
     print(f"\nWrote {len(rows)} ticket/tag pair(s) to {path}.")
     if closed:
-        print(f"{closed} are on closed tickets, which Zendesk won't let anyone update; steps 2 and 3 skip them.")
+        print(
+            f"{closed} are on closed tickets, which Zendesk won't let anyone update; steps 2 and 3 skip them."
+        )
     print("Review it, then run: python 2_remove_old_tags.py")
 
 

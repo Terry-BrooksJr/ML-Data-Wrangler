@@ -8,6 +8,7 @@ the browser, sandboxed (chart_viewer).
 import pathlib
 from typing import List, Optional, Tuple
 
+import chart_viewer
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtGui import QPixmap
@@ -21,8 +22,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import chart_viewer
 
 PLOT_WIDTH = 560
 
@@ -72,17 +71,23 @@ class ResultsDialog(QDialog):
         self.plot_label.setAlignment(QtCore.Qt.AlignCenter)
         pixmap = QPixmap(plot_path) if plot_path else QPixmap()
         if pixmap.isNull():
-            self.plot_label.setText("The coherence plot could not be created; see the log.")
+            self.plot_label.setText(
+                "The coherence plot could not be created; see the log."
+            )
         else:
             self.plot_label.setPixmap(
-                pixmap.scaledToWidth(min(PLOT_WIDTH, pixmap.width()), QtCore.Qt.SmoothTransformation)
+                pixmap.scaledToWidth(
+                    min(PLOT_WIDTH, pixmap.width()), QtCore.Qt.SmoothTransformation
+                )
             )
 
         self.chart_button = QPushButton("Open Interactive Topic Chart")
         self.chart_button.clicked.connect(self.open_chart)
         if not chart_path:
             self.chart_button.setEnabled(False)
-            self.chart_button.setText("Interactive topic chart could not be created; see the log")
+            self.chart_button.setText(
+                "Interactive topic chart could not be created; see the log"
+            )
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.close)
@@ -107,4 +112,6 @@ class ResultsDialog(QDialog):
             chart_viewer.open_chart(self.chart_path)
         except OSError as e:
             logger.error(f"Could not open the topic chart: {e}")
-            QMessageBox.warning(self, "Chart Not Opened", f"Could not open the topic chart:\n{e}")
+            QMessageBox.warning(
+                self, "Chart Not Opened", f"Could not open the topic chart:\n{e}"
+            )

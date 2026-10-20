@@ -8,10 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
+import tag_normalizer
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import QApplication, QMessageBox
-
-import tag_normalizer
 from tag_normalizer import clean_tag, collect, group_tags, mapping, parse_tags
 from tag_tab import TagTab
 
@@ -33,38 +32,49 @@ def fake_embed(texts):
 # --- parsing ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text, expected", [
-    ("a, b c,d_e", ["a", "b c", "d_e"]),
-    ("a\nb, c\r\n\n d ", ["a", "b", "c", "d"]),
-    ('["oil change", "tire_rotation"]', ["oil change", "tire_rotation"]),
-    ("['oil change', 'refund']", ["oil change", "refund"]),
-    ('"quoted tag", \'single\'', ["quoted tag", "single"]),
-    ("[not, valid json]", ["not", "valid json"]),
-    ("﻿a,,  ,b", ["a", "b"]),
-    ("", []),
-    ('name,count\n"agent_ooo",812\n"language__en",301\n', ["agent_ooo", "language__en"]),
-    ("x, 3\ny, 4", ["x", "y"]),  # numbers in the first row too: no header
-    ("a, b\nc, d", ["a", "b", "c", "d"]),  # no count column: not a table
-])
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("a, b c,d_e", ["a", "b c", "d_e"]),
+        ("a\nb, c\r\n\n d ", ["a", "b", "c", "d"]),
+        ('["oil change", "tire_rotation"]', ["oil change", "tire_rotation"]),
+        ("['oil change', 'refund']", ["oil change", "refund"]),
+        ("\"quoted tag\", 'single'", ["quoted tag", "single"]),
+        ("[not, valid json]", ["not", "valid json"]),
+        ("﻿a,,  ,b", ["a", "b"]),
+        ("", []),
+        (
+            'name,count\n"agent_ooo",812\n"language__en",301\n',
+            ["agent_ooo", "language__en"],
+        ),
+        ("x, 3\ny, 4", ["x", "y"]),  # numbers in the first row too: no header
+        ("a, b\nc, d", ["a", "b", "c", "d"]),  # no count column: not a table
+    ],
+)
 def test_parse_tags(text, expected):
     assert parse_tags(text) == expected
 
 
-@pytest.mark.parametrize("raw, cleaned", [
-    ("Car_Maintenance", "car maintenance"),
-    ("car-maintenance", "car maintenance"),
-    ("carMaintenance", "car maintenance"),
-    ("SSOLogin", "sso login"),
-    ("  Tire   Rotation!! ", "tire rotation"),
-    ("api/rate-limit", "api rate limit"),
-    ("___", ""),
-])
+@pytest.mark.parametrize(
+    "raw, cleaned",
+    [
+        ("Car_Maintenance", "car maintenance"),
+        ("car-maintenance", "car maintenance"),
+        ("carMaintenance", "car maintenance"),
+        ("SSOLogin", "sso login"),
+        ("  Tire   Rotation!! ", "tire rotation"),
+        ("api/rate-limit", "api rate limit"),
+        ("___", ""),
+    ],
+)
 def test_clean_tag(raw, cleaned):
     assert clean_tag(raw) == cleaned
 
 
 def test_collect_merges_spellings_and_counts():
-    tags = collect(["car_maintenance", "Car Maintenance", "car_maintenance", "refund", "!!"])
+    tags = collect(
+        ["car_maintenance", "Car Maintenance", "car_maintenance", "refund", "!!"]
+    )
     assert [t.text for t in tags] == ["car maintenance", "refund"]
     assert tags[0].count == 3
     assert tags[0].spelling == "car_maintenance"
@@ -79,13 +89,24 @@ def grouped(raw, threshold=0.9):
 
 
 def test_groups_synonyms_under_most_central_tag():
-    groups = grouped(["oil change", "tire rotation", "car_maintenance", "password reset", "forgot password", "refund"])
+    groups = grouped(
+        [
+            "oil change",
+            "tire rotation",
+            "car_maintenance",
+            "password reset",
+            "forgot password",
+            "refund",
+        ]
+    )
     assert [[t.text for t in g.members] for g in groups] == [
         ["car maintenance", "oil change", "tire rotation"],
         ["password reset", "forgot password"],
         ["refund"],
     ]
-    assert groups[0].canonical == "car_maintenance"  # original spelling, not the cleaned form
+    assert (
+        groups[0].canonical == "car_maintenance"
+    )  # original spelling, not the cleaned form
     assert groups[0].similarity[0] == pytest.approx(1.0)
 
 
@@ -96,7 +117,9 @@ def test_high_threshold_keeps_tags_apart():
 
 def test_single_tag_and_zero_vector():
     tags = collect(["refund"])
-    assert [g.canonical for g in group_tags(tags, fake_embed(["refund"]), 0.9)] == ["refund"]
+    assert [g.canonical for g in group_tags(tags, fake_embed(["refund"]), 0.9)] == [
+        "refund"
+    ]
     tags = collect(["xyzzy", "refund"])
     groups = group_tags(tags, np.array([[0.0, 0.0, 0.0], VECTORS["refund"]]), 0.9)
     assert sorted(len(g.members) for g in groups) == [1, 1]
@@ -104,11 +127,14 @@ def test_single_tag_and_zero_vector():
 
 def test_structured_tags_kept_apart_unless_asked():
     # Opposite values of one facet embed as near-identical.
-    tags = collect(["sentiment__positive", "sentiment__negative", "positive_feedback", "refund"])
+    tags = collect(
+        ["sentiment__positive", "sentiment__negative", "positive_feedback", "refund"]
+    )
     vectors = np.array([[1.0, 0.0], [0.99, 0.1], [1.0, 0.01], [0.0, 1.0]])
     groups = group_tags(tags, vectors, 0.9)
     assert [[t.spelling for t in g.members] for g in groups if len(g.members) > 1] == [
-        ["sentiment__positive", "positive_feedback"]]  # the taxonomy tag names the group
+        ["sentiment__positive", "positive_feedback"]
+    ]  # the taxonomy tag names the group
     merged = group_tags(tags, vectors, 0.9, merge_structured=True)
     assert max(len(g.members) for g in merged) == 3
 
@@ -121,7 +147,9 @@ def test_structured_tags_apart_in_large_groups():
 
 
 def test_tab_toggle_lets_structured_tags_merge(qapp):
-    tab = TagTab(lambda backend: lambda texts: np.array([[1.0, 0.0], [0.99, 0.1]])[:len(texts)])
+    tab = TagTab(
+        lambda backend: lambda texts: np.array([[1.0, 0.0], [0.99, 0.1]])[: len(texts)]
+    )
     tab.input.setPlainText("sentiment__positive, sentiment__negative")
     tab.start_find()
     wait_until_idle(qapp, tab)
@@ -136,12 +164,19 @@ def test_mismatched_vectors_rejected():
 
 
 def test_mapping_covers_every_spelling_and_honours_exclusions():
-    groups = grouped(["car_maintenance", "Car Maintenance", "oil change", "tire rotation", "refund"])
+    groups = grouped(
+        ["car_maintenance", "Car Maintenance", "oil change", "tire rotation", "refund"]
+    )
     assert mapping(groups) == {
-        "car_maintenance": "car_maintenance", "Car Maintenance": "car_maintenance",
-        "oil change": "car_maintenance", "tire rotation": "car_maintenance", "refund": "refund",
+        "car_maintenance": "car_maintenance",
+        "Car Maintenance": "car_maintenance",
+        "oil change": "car_maintenance",
+        "tire rotation": "car_maintenance",
+        "refund": "refund",
     }
-    assert mapping(groups, excluded={"tire rotation"})["tire rotation"] == "tire rotation"
+    assert (
+        mapping(groups, excluded={"tire rotation"})["tire rotation"] == "tire rotation"
+    )
 
 
 def test_csv_and_json_output():
@@ -152,7 +187,9 @@ def test_csv_and_json_output():
     data = json.loads(tag_normalizer.to_json(groups, mapped))
     assert data["mapping"] == mapped
     # A pair ties on centrality and uses, so the shorter tag names it.
-    assert data["groups"] == [{"canonical": "oil change", "tags": ["oil change", "car maintenance"]}]
+    assert data["groups"] == [
+        {"canonical": "oil change", "tags": ["oil change", "car maintenance"]}
+    ]
 
 
 def test_cli_writes_mapping(tmp_path, monkeypatch, capsys):
@@ -160,8 +197,15 @@ def test_cli_writes_mapping(tmp_path, monkeypatch, capsys):
     source = tmp_path / "tags.txt"
     source.write_text("oil_change, Car Maintenance, car_maintenance\nrefund\n")
     out = tmp_path / "mapping.json"
-    assert tag_normalizer.main([str(source), "--backend", "spacy", "--threshold", "0.9", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["mapping"]["oil_change"] == "Car Maintenance"  # more uses wins the tie
+    assert (
+        tag_normalizer.main(
+            [str(source), "--backend", "spacy", "--threshold", "0.9", "--out", str(out)]
+        )
+        == 0
+    )
+    assert (
+        json.loads(out.read_text())["mapping"]["oil_change"] == "Car Maintenance"
+    )  # more uses wins the tie
     assert "1 group(s) to merge" in capsys.readouterr().out
 
 
@@ -193,7 +237,9 @@ def make_tab(calls):
         def embed(texts):
             calls.append((backend, list(texts)))
             return fake_embed(texts)
+
         return embed
+
     return TagTab(factory)
 
 
@@ -215,8 +261,10 @@ def test_tab_groups_regroups_and_caches(qapp):
     tab.input.setPlainText("oil change, car maintenance, refund, password reset")
     tab.start_find()
     wait_until_idle(qapp, tab)
-    assert calls == [("voyage", ["oil change", "car maintenance", "tire rotation", "refund"]),
-                     ("voyage", ["password reset"])]
+    assert calls == [
+        ("voyage", ["oil change", "car maintenance", "tire rotation", "refund"]),
+        ("voyage", ["password reset"]),
+    ]
 
 
 def test_tab_rename_and_untick_shape_mapping(qapp):
@@ -226,10 +274,17 @@ def test_tab_rename_and_untick_shape_mapping(qapp):
     wait_until_idle(qapp, tab)
     top = tab.tree.topLevelItem(0)
     top.setText(0, "vehicle care")
-    tire = next(top.child(i) for i in range(top.childCount()) if top.child(i).text(0) == "tire rotation")
+    tire = next(
+        top.child(i)
+        for i in range(top.childCount())
+        if top.child(i).text(0) == "tire rotation"
+    )
     tire.setCheckState(0, QtCore.Qt.Unchecked)
-    assert tab.mapping() == {"car maintenance": "vehicle care", "oil change": "vehicle care",
-                             "tire rotation": "tire rotation"}
+    assert tab.mapping() == {
+        "car maintenance": "vehicle care",
+        "oil change": "vehicle care",
+        "tire rotation": "tire rotation",
+    }
     tab.threshold.setValue(0.89)  # same group, so the rename survives regrouping
     assert tab.tree.topLevelItem(0).text(0) == "vehicle care"
 
@@ -251,8 +306,11 @@ def test_tab_reports_embedding_error(qapp, monkeypatch):
 
 def test_tab_exports_zendesk_scripts(qapp, tmp_path, monkeypatch):
     from PyQt5.QtWidgets import QFileDialog
+
     shown = []
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(tmp_path))
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *args: str(tmp_path)
+    )
     monkeypatch.setattr(QMessageBox, "information", lambda *args: shown.append(args[2]))
     tab = make_tab([])
     assert not tab.scripts_button.isEnabled()
@@ -263,6 +321,7 @@ def test_tab_exports_zendesk_scripts(qapp, tmp_path, monkeypatch):
     tab.export_scripts()
     (kit,) = tmp_path.iterdir()
     assert kit.name.startswith("zendesk_retag_")
-    assert sorted(row.split(",")[0] for row in (kit / "tag_changes.csv").read_text().split()[1:]) == [
-        "oil_change", "tire_rotation"]
+    assert sorted(
+        row.split(",")[0] for row in (kit / "tag_changes.csv").read_text().split()[1:]
+    ) == ["oil_change", "tire_rotation"]
     assert "2 tag change(s)" in shown[0]

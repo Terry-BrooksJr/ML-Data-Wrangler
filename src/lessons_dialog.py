@@ -11,6 +11,7 @@ import getpass
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
+from decision_engine import feedback
 from loguru import logger
 from pymongo.collection import Collection
 from PyQt5 import QtCore
@@ -33,13 +34,21 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from decision_engine import feedback
-
-LOG_COLUMNS = ["Ticket", "Logged (UTC)", "Classified as", "Should be", "Misread signal", "Reviewed by"]
+LOG_COLUMNS = [
+    "Ticket",
+    "Logged (UTC)",
+    "Classified as",
+    "Should be",
+    "Misread signal",
+    "Reviewed by",
+]
 LESSON_COLUMNS = ["Generated (UTC)", "Status", "Entries", "Summary"]
 
 # run(task, description, on_done, on_error) -> False if another job is running.
-Runner = Callable[[Callable[[], Any], str, Callable[[Any], None], Optional[Callable[[str], None]]], bool]
+Runner = Callable[
+    [Callable[[], Any], str, Callable[[Any], None], Optional[Callable[[str], None]]],
+    bool,
+]
 
 
 def _fmt(moment: Optional[datetime]) -> str:
@@ -61,8 +70,13 @@ class WeeklyReviewDialog(QDialog):
         collections: Returns (misclassification_log, lessons_learned); called on the worker thread.
     """
 
-    def __init__(self, run: Runner, collections: Callable[[], Tuple[Collection, Collection]],
-                 parent: Optional[QWidget] = None, week: Optional[datetime] = None) -> None:
+    def __init__(
+        self,
+        run: Runner,
+        collections: Callable[[], Tuple[Collection, Collection]],
+        parent: Optional[QWidget] = None,
+        week: Optional[datetime] = None,
+    ) -> None:
         super().__init__(parent)
         self.run = run
         self.collections = collections
@@ -104,7 +118,9 @@ class WeeklyReviewDialog(QDialog):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        self.log_table = self._table(LOG_COLUMNS, 4, QAbstractItemView.ExtendedSelection)
+        self.log_table = self._table(
+            LOG_COLUMNS, 4, QAbstractItemView.ExtendedSelection
+        )
         self.log_table.itemSelectionChanged.connect(self._update_buttons)
         self.mark_reviewed_button = QPushButton("Mark Selected Reviewed")
         self.mark_reviewed_button.clicked.connect(self.mark_selected_reviewed)
@@ -116,7 +132,9 @@ class WeeklyReviewDialog(QDialog):
         log_layout.addWidget(self.log_table)
         log_layout.addLayout(log_buttons)
 
-        self.lesson_table = self._table(LESSON_COLUMNS, 3, QAbstractItemView.SingleSelection)
+        self.lesson_table = self._table(
+            LESSON_COLUMNS, 3, QAbstractItemView.SingleSelection
+        )
         self.lesson_table.itemSelectionChanged.connect(self._show_selected_lesson)
         self.lesson_view = QTextEdit()
         self.lesson_view.setReadOnly(True)
@@ -144,7 +162,9 @@ class WeeklyReviewDialog(QDialog):
         lesson_layout.addWidget(self.lesson_table)
         lesson_layout.addWidget(self.lesson_view)
         lesson_layout.addLayout(approve_row)
-        lesson_layout.addWidget(QLabel("New summary (built on the week's reviewed entries):"))
+        lesson_layout.addWidget(
+            QLabel("New summary (built on the week's reviewed entries):")
+        )
         lesson_layout.addWidget(self.draft_input)
         lesson_layout.addLayout(lesson_buttons)
 
@@ -171,7 +191,9 @@ class WeeklyReviewDialog(QDialog):
     def week(self) -> datetime:
         """Midnight UTC on the Monday of the chosen week."""
         date = self.week_input.date()
-        return feedback.week_of(datetime(date.year(), date.month(), date.day(), tzinfo=timezone.utc))
+        return feedback.week_of(
+            datetime(date.year(), date.month(), date.day(), tzinfo=timezone.utc)
+        )
 
     def _shift_week(self, days: int) -> None:
         self.week_input.setDate(self.week_input.date().addDays(days))
@@ -188,26 +210,39 @@ class WeeklyReviewDialog(QDialog):
 
     def _update_buttons(self) -> None:
         idle = not self._busy
-        for widget in (self.week_input, self.prev_button, self.next_button, self.refresh_button):
+        for widget in (
+            self.week_input,
+            self.prev_button,
+            self.next_button,
+            self.refresh_button,
+        ):
             widget.setEnabled(idle)
         self.mark_reviewed_button.setEnabled(
             idle and any(not e.get("reviewed") for e in self._selected_entries())
         )
         lesson = self._selected_lesson()
-        self.approve_button.setEnabled(idle and lesson is not None and not lesson.get("approved"))
+        self.approve_button.setEnabled(
+            idle and lesson is not None and not lesson.get("approved")
+        )
         has_reviewed = any(e.get("reviewed") for e in self.entries)
         self.suggest_button.setEnabled(idle and has_reviewed)
-        self.save_draft_button.setEnabled(idle and has_reviewed and bool(self.draft_input.toPlainText().strip()))
+        self.save_draft_button.setEnabled(
+            idle and has_reviewed and bool(self.draft_input.toPlainText().strip())
+        )
 
     def _reviewer(self, action: str) -> Optional[str]:
         name = self.reviewer_input.text().strip()
         if not name:
-            QMessageBox.warning(self, "Weekly Review", f"Enter your name as Reviewer to {action}.")
+            QMessageBox.warning(
+                self, "Weekly Review", f"Enter your name as Reviewer to {action}."
+            )
             self.reviewer_input.setFocus()
             return None
         return name
 
-    def _job(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]) -> None:
+    def _job(
+        self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]
+    ) -> None:
         """Runs `task` through the tab, with this dialog's controls disabled meanwhile."""
 
         def finish(result):
@@ -225,7 +260,9 @@ class WeeklyReviewDialog(QDialog):
         self.status_label.setText(f"{description}…")
         if not self.run(task, description, finish, failed):
             self._busy = False
-            self.status_label.setText("Another Decision Engine job is running; try again when it finishes.")
+            self.status_label.setText(
+                "Another Decision Engine job is running; try again when it finishes."
+            )
             self._update_buttons()
 
     # --- actions ----------------------------------------------------------------
@@ -236,9 +273,15 @@ class WeeklyReviewDialog(QDialog):
 
         def read():
             log, lessons = self.collections()
-            return feedback.misclassifications_for_week(log, week), feedback.lessons_for_week(lessons, week)
+            return feedback.misclassifications_for_week(
+                log, week
+            ), feedback.lessons_for_week(lessons, week)
 
-        self._job(read, f"Loading the week of {week:%Y-%m-%d}", lambda found: self._show(week, *found))
+        self._job(
+            read,
+            f"Loading the week of {week:%Y-%m-%d}",
+            lambda found: self._show(week, *found),
+        )
 
     def _show(self, week: datetime, entries: List[dict], lessons: List[dict]) -> None:
         if week != self.week():
@@ -252,19 +295,40 @@ class WeeklyReviewDialog(QDialog):
             f"Week of {week:%Y-%m-%d}: {len(entries)} misclassification(s), {reviewed} reviewed; "
             f"{len(lessons)} summary(ies), {approved} approved."
         )
-        self._fill(self.log_table, [
-            [e.get("ticket_id"), _fmt(e.get("logged_at")), e.get("agent_classification"),
-             e.get("correct_classification"), e.get("misread_signal"),
-             e.get("reviewed_by") if e.get("reviewed") else "not reviewed"]
-            for e in entries
-        ])
-        self._fill(self.lesson_table, [
-            [_fmt(lesson.get("generated_at")),
-             f"Approved by {lesson.get('approved_by')}" if lesson.get("approved") else "Draft",
-             len(lesson.get("based_on_log_ids") or []),
-             (lesson.get("summary_text") or "").splitlines()[0] if lesson.get("summary_text") else ""]
-            for lesson in lessons
-        ])
+        self._fill(
+            self.log_table,
+            [
+                [
+                    e.get("ticket_id"),
+                    _fmt(e.get("logged_at")),
+                    e.get("agent_classification"),
+                    e.get("correct_classification"),
+                    e.get("misread_signal"),
+                    e.get("reviewed_by") if e.get("reviewed") else "not reviewed",
+                ]
+                for e in entries
+            ],
+        )
+        self._fill(
+            self.lesson_table,
+            [
+                [
+                    _fmt(lesson.get("generated_at")),
+                    (
+                        f"Approved by {lesson.get('approved_by')}"
+                        if lesson.get("approved")
+                        else "Draft"
+                    ),
+                    len(lesson.get("based_on_log_ids") or []),
+                    (
+                        (lesson.get("summary_text") or "").splitlines()[0]
+                        if lesson.get("summary_text")
+                        else ""
+                    ),
+                ]
+                for lesson in lessons
+            ],
+        )
         self.lesson_view.clear()
 
     @staticmethod
@@ -273,7 +337,9 @@ class WeeklyReviewDialog(QDialog):
         table.setRowCount(len(rows))
         for r, values in enumerate(rows):
             for c, value in enumerate(values):
-                table.setItem(r, c, QTableWidgetItem("" if value is None else str(value)))
+                table.setItem(
+                    r, c, QTableWidgetItem("" if value is None else str(value))
+                )
         table.resizeColumnsToContents()
 
     def _show_selected_lesson(self) -> None:
@@ -282,8 +348,11 @@ class WeeklyReviewDialog(QDialog):
             self.lesson_view.clear()
         else:
             based_on = len(lesson.get("based_on_log_ids") or [])
-            approval = (f"Approved by {lesson.get('approved_by')} at {_fmt(lesson.get('approved_at'))} UTC"
-                        if lesson.get("approved") else "Draft, not approved")
+            approval = (
+                f"Approved by {lesson.get('approved_by')} at {_fmt(lesson.get('approved_at'))} UTC"
+                if lesson.get("approved")
+                else "Draft, not approved"
+            )
             self.lesson_view.setPlainText(
                 f"{approval}. Built on {based_on} reviewed entry(ies).\n\n{lesson.get('summary_text') or ''}"
             )
@@ -302,7 +371,9 @@ class WeeklyReviewDialog(QDialog):
             return feedback.mark_misclassifications_reviewed(log, ids, reviewer)
 
         def done(count):
-            logger.success(f"{count} misclassification(s) marked reviewed by {reviewer}.")
+            logger.success(
+                f"{count} misclassification(s) marked reviewed by {reviewer}."
+            )
             self.load()
 
         self._job(mark, f"Marking {len(ids)} entry(ies) reviewed", done)
@@ -312,8 +383,11 @@ class WeeklyReviewDialog(QDialog):
         suggestion = feedback.suggest_lessons_summary(self.entries)
         if self.draft_input.toPlainText().strip():
             answer = QMessageBox.question(
-                self, "Weekly Review", "Replace the summary you've written with a suggested one?",
-                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+                self,
+                "Weekly Review",
+                "Replace the summary you've written with a suggested one?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
             )
             if answer != QMessageBox.Yes:
                 return
@@ -345,8 +419,11 @@ class WeeklyReviewDialog(QDialog):
         if approver is None:
             return
         answer = QMessageBox.question(
-            self, "Approve Summary", f"Approve this summary as {approver}?",
-            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+            self,
+            "Approve Summary",
+            f"Approve this summary as {approver}?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
         )
         if answer != QMessageBox.Yes:
             return
@@ -357,7 +434,9 @@ class WeeklyReviewDialog(QDialog):
 
         def done(approved):
             if not approved:
-                QMessageBox.information(self, "Approve Summary", "That summary was already approved.")
+                QMessageBox.information(
+                    self, "Approve Summary", "That summary was already approved."
+                )
             self.load()
 
         self._job(approve, "Approving the summary", done)

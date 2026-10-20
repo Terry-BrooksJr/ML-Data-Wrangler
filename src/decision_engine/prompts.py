@@ -7,6 +7,7 @@ work. The two [PLACEHOLDER: ...] blocks are intentionally left unfilled.
 TODO(open item #1): leadership @mention recipient-selection logic.
 TODO(open item #4): confirmed list of available signals.
 """
+
 import hashlib
 
 SYSTEM_INSTRUCTIONS = """You are a ticket triage agent for API Support. You review Zendesk tickets (with

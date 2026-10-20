@@ -20,7 +20,6 @@ from nltk.corpus import stopwords
 from numpy.random import RandomState
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from spacy.language import Language
-
 from wrangler import DataWrangler
 
 try:
@@ -55,7 +54,9 @@ def tokenize(
     tokens: List[List[str]] = []
     total = len(documents) or 1
     # Lemmas only need the tagger, so skip the slower parser and NER.
-    with nlp.select_pipes(disable=[p for p in ("parser", "ner") if p in nlp.pipe_names]):
+    with nlp.select_pipes(
+        disable=[p for p in ("parser", "ner") if p in nlp.pipe_names]
+    ):
         for i, document in enumerate(nlp.pipe(documents)):
             tokens.append(
                 [
@@ -209,7 +210,9 @@ class LatentDirichletAllocator(QObject):
                 self.document_ids = wranglerInstance.ticket_ids()
 
             self.worker_status.emit("Lemmatizing Corpus...")
-            self._tokens = tokenize(nlp, stopwords, self.prelemma_corpus, self.preprocess_progress.emit)
+            self._tokens = tokenize(
+                nlp, stopwords, self.prelemma_corpus, self.preprocess_progress.emit
+            )
             self.worker_status.emit("Lemmatization Completed")
             logger.debug(f"Token Length:{len(self._tokens)}")
 
@@ -233,7 +236,9 @@ class LatentDirichletAllocator(QObject):
             self.error.emit(f"Failed to process data: {e}")
             return False
 
-    def training_settings(self, num_of_topics: int, iterations: int, passes: int) -> dict:
+    def training_settings(
+        self, num_of_topics: int, iterations: int, passes: int
+    ) -> dict:
         """The settings recorded with a run; also what a saved run must match to be reused."""
         return {
             "max_topics": num_of_topics,
@@ -247,9 +252,7 @@ class LatentDirichletAllocator(QObject):
             },
         }
 
-    def model_trained(
-        self, iterations: int, passes: int, num_of_topics: int
-    ) -> bool:
+    def model_trained(self, iterations: int, passes: int, num_of_topics: int) -> bool:
         """Trains LDA models for 2..num_of_topics topics and keeps the most coherent.
 
         Args:
@@ -307,7 +310,9 @@ class LatentDirichletAllocator(QObject):
         num_of_topics: int,
     ) -> bool:
         """Preprocesses the corpus and then trains the models, for use in a worker thread."""
-        return self.process_corpus(nlp, stopwords, wranglerInstance) and self.model_trained(
+        return self.process_corpus(
+            nlp, stopwords, wranglerInstance
+        ) and self.model_trained(
             iterations=iterations,
             passes=passes,
             num_of_topics=num_of_topics,
@@ -330,7 +335,10 @@ class LatentDirichletAllocator(QObject):
             (
                 topic_id,
                 weights[topic_id] / total,
-                [word for word, _ in self.lda_model.show_topic(topic_id, topn=num_words)],
+                [
+                    word
+                    for word, _ in self.lda_model.show_topic(topic_id, topn=num_words)
+                ],
             )
             for topic_id in range(self.lda_model.num_topics)
         ]

@@ -39,6 +39,12 @@ def test_numerical_code_runs_on_a_worker_thread():
         assert results == [[(3, 3), (200, 200), (400, 400)]], results
     """)
     src = os.path.join(os.path.dirname(__file__), "..", "src")
-    result = subprocess.run([sys.executable, "-c", script], cwd=src, capture_output=True, text=True, timeout=120,
-                            env={**os.environ, "PYTHONPATH": src})
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=src,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "PYTHONPATH": src},
+    )
     assert result.returncode == 0, result.stderr[-2000:]

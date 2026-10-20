@@ -9,6 +9,9 @@ import pathlib
 import webbrowser
 from typing import List, Optional
 
+import bertopic_model
+import bertopic_runs
+import topic_store
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,10 +28,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import bertopic_model
-import bertopic_runs
-import topic_store
 
 
 class BertopicOptionsDialog(QDialog):
@@ -52,12 +51,15 @@ class BertopicOptionsDialog(QDialog):
         self.min_cluster_size = QSpinBox()
         self.min_cluster_size.setRange(0, 100_000)
         self.min_cluster_size.setSpecialValueText(
-            f"Automatic (1% of tickets, at least {bertopic_model.MIN_CLUSTER_SIZE_FLOOR})")
+            f"Automatic (1% of tickets, at least {bertopic_model.MIN_CLUSTER_SIZE_FLOOR})"
+        )
         self.nr_topics = QSpinBox()
         self.nr_topics.setRange(0, 1_000)
         self.nr_topics.setSpecialValueText("Keep every topic found")
 
-        self.keep_outliers = QCheckBox("Keep outliers as topic -1 (don't move them to the nearest topic)")
+        self.keep_outliers = QCheckBox(
+            "Keep outliers as topic -1 (don't move them to the nearest topic)"
+        )
 
         self.compare_lda = QComboBox()
         self.compare_lda.addItem("None", None)
@@ -66,7 +68,8 @@ class BertopicOptionsDialog(QDialog):
 
         self.assign = QCheckBox(
             f"Write each ticket's topic to its `{bertopic_model.ASSIGNMENT_FIELD}` field in MongoDB "
-            "(the LDA `topic` field is left alone)")
+            "(the LDA `topic` field is left alone)"
+        )
 
         form = QFormLayout()
         form.addRow("Minimum topic size:", self.min_cluster_size)
@@ -104,7 +107,9 @@ class BertopicResultsDialog(QDialog):
         charts: bertopic_runs.chart_paths(run).
     """
 
-    def __init__(self, run: dict, charts: dict, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self, run: dict, charts: dict, parent: Optional[QWidget] = None
+    ) -> None:
         super().__init__(parent)
         self.charts = charts
         self.setWindowTitle(f"BERTopic Results · {bertopic_runs.describe_run(run)}")
@@ -115,17 +120,25 @@ class BertopicResultsDialog(QDialog):
 
         rows = bertopic_runs.comparison_rows(run)
         self.comparison = QTableWidget(len(rows), 4)
-        self.comparison.setHorizontalHeaderLabels(["Model", "Topics", "c_v coherence", "Topic diversity"])
+        self.comparison.setHorizontalHeaderLabels(
+            ["Model", "Topics", "c_v coherence", "Topic diversity"]
+        )
         for r, row in enumerate(rows):
             for c, value in enumerate(row):
                 self.comparison.setItem(r, c, QTableWidgetItem(value))
         self.comparison.setEditTriggers(QTableWidget.NoEditTriggers)
         self.comparison.verticalHeader().hide()
         self.comparison.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.comparison.setFixedHeight(self.comparison.horizontalHeader().height()
-                                       + sum(self.comparison.rowHeight(r) for r in range(len(rows))) + 4)
-        note = QLabel("Both scored on this run's tickets and tokens." if run.get("comparison") else
-                      "Pick an LDA run when training to compare with it.")
+        self.comparison.setFixedHeight(
+            self.comparison.horizontalHeader().height()
+            + sum(self.comparison.rowHeight(r) for r in range(len(rows)))
+            + 4
+        )
+        note = QLabel(
+            "Both scored on this run's tickets and tokens."
+            if run.get("comparison")
+            else "Pick an LDA run when training to compare with it."
+        )
 
         # Plain text: topic words come from customer tickets.
         self.topic_text = QTextEdit()
@@ -133,13 +146,17 @@ class BertopicResultsDialog(QDialog):
         self.topic_text.setPlainText(bertopic_runs.format_topics(run))
 
         self.chart_buttons = {}
-        for name, label in (("barchart_html", "Open Topic Word Chart"),
-                            ("intertopic_html", "Open Intertopic Distance Map")):
+        for name, label in (
+            ("barchart_html", "Open Topic Word Chart"),
+            ("intertopic_html", "Open Intertopic Distance Map"),
+        ):
             button = QPushButton(label)
             button.clicked.connect(lambda _, name=name: self.open_chart(name))
             if not charts.get(name):
                 button.setEnabled(False)
-                button.setText(f"{label.removeprefix('Open ')} could not be created; see the log")
+                button.setText(
+                    f"{label.removeprefix('Open ')} could not be created; see the log"
+                )
             self.chart_buttons[name] = button
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)

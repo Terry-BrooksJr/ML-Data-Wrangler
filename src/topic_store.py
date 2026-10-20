@@ -9,6 +9,7 @@ only each run's details and a pointer to its directory, in the
 `tickets` document under `topic`, tagged with the run that assigned it;
 re-ingestion never touches that field.
 """
+
 import hashlib
 import json
 import os
@@ -22,10 +23,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import gensim
 from gensim.corpora.dictionary import Dictionary
 from gensim.models.ldamodel import LdaModel
+from LDA_logic import LatentDirichletAllocator, REMOVED_POS, tokenize
 from loguru import logger
 from pymongo.collection import Collection
-
-from LDA_logic import REMOVED_POS, LatentDirichletAllocator, tokenize
 
 RUNS_COLLECTION = os.environ.get("TOPIC_RUNS_COLLECTION", "topic_modeling_run_log")
 MODEL_FILE = "lda.model"
@@ -58,10 +58,13 @@ def preprocessing_info(nlp, stopwords: Sequence[str]) -> dict:
     meta = getattr(nlp, "meta", {}) or {}
     return {
         "spacy_version": spacy.__version__,
-        "spacy_model": f"{meta.get('lang', '')}_{meta.get('name', '')}".strip("_") or None,
+        "spacy_model": f"{meta.get('lang', '')}_{meta.get('name', '')}".strip("_")
+        or None,
         "spacy_model_version": meta.get("version"),
         "stopwords_count": len(stopwords),
-        "stopwords_hash": hashlib.sha256("\n".join(sorted(stopwords)).encode("utf-8")).hexdigest()[:16],
+        "stopwords_hash": hashlib.sha256(
+            "\n".join(sorted(stopwords)).encode("utf-8")
+        ).hexdigest()[:16],
         "removed_pos": list(REMOVED_POS),
         "gensim_version": gensim.__version__,
     }
@@ -96,14 +99,17 @@ def save_run(
         "settings": allocator.settings,
         "preprocessing": preprocessing_info(nlp, stopwords),
         "coherence": [
-            {"num_topics": n, "coherence": c} for n, c in zip(allocator.topic_counts, allocator.coherence_values)
+            {"num_topics": n, "coherence": c}
+            for n, c in zip(allocator.topic_counts, allocator.coherence_values)
         ],
         "best_num_topics": allocator.best_num_topics,
         "topics": [
             {"topic_id": topic_id, "share": share, "words": words}
             for topic_id, share, words in allocator.get_topics()
         ],
-        "dataset": dataset_fingerprint(allocator.prelemma_corpus or [], allocator.document_ids),
+        "dataset": dataset_fingerprint(
+            allocator.prelemma_corpus or [], allocator.document_ids
+        ),
         "model_dir": str(run_dir),
         "charts": {"lda_html": chart_path, "coherence_png": plot_path},
         "warnings": [],
@@ -121,7 +127,9 @@ def write_run_file(run: dict) -> None:
     upload) must not leave an unreadable run.json, which would hide the run.
     """
     run_dir = pathlib.Path(run["model_dir"])
-    text = json.dumps({k: v for k, v in run.items() if k != "_id"}, indent=2, default=str)
+    text = json.dumps(
+        {k: v for k, v in run.items() if k != "_id"}, indent=2, default=str
+    )
     fd, tmp = tempfile.mkstemp(dir=run_dir, prefix=f".{RUN_FILE}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -136,7 +144,11 @@ def write_run_file(run: dict) -> None:
 
 def record_run(runs: Collection, run: dict) -> None:
     """Stores the run's details (not its model files) in the LDA runs collection."""
-    runs.replace_one({"run_id": run["run_id"]}, {k: v for k, v in run.items() if k != "_id"}, upsert=True)
+    runs.replace_one(
+        {"run_id": run["run_id"]},
+        {k: v for k, v in run.items() if k != "_id"},
+        upsert=True,
+    )
 
 
 def _read_run_file(path: pathlib.Path) -> Optional[dict]:
@@ -156,23 +168,40 @@ def _read_run_file(path: pathlib.Path) -> Optional[dict]:
 LDA_METHODS = (None, "lda")
 
 
-def list_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+def list_runs(
+    runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None
+) -> List[dict]:
     """Previous LDA runs, newest first: from Mongo when given, else from the run.json files on disk.
 
     Runs of another method (e.g. a BERTopic run.json copied into
     TOPIC_MODEL_DIR) are skipped: everything listed here is loaded as an LDA model.
     """
     if runs is not None:
-        return list(runs.find({"method": {"$in": list(LDA_METHODS)}}, {"_id": 0}).sort("ran_at", -1))
+        return list(
+            runs.find({"method": {"$in": list(LDA_METHODS)}}, {"_id": 0}).sort(
+                "ran_at", -1
+            )
+        )
     base_dir = base_dir or model_dir()
-    found = [_read_run_file(p) for p in base_dir.glob(f"*/{RUN_FILE}")] if base_dir.exists() else []
-    return sorted((r for r in found if r and r.get("method") in LDA_METHODS),
-                  key=lambda r: str(r.get("ran_at")), reverse=True)
+    found = (
+        [_read_run_file(p) for p in base_dir.glob(f"*/{RUN_FILE}")]
+        if base_dir.exists()
+        else []
+    )
+    return sorted(
+        (r for r in found if r and r.get("method") in LDA_METHODS),
+        key=lambda r: str(r.get("ran_at")),
+        reverse=True,
+    )
 
 
 def describe_run(run: dict) -> str:
     ran_at = run.get("ran_at")
-    ran_at = ran_at.strftime("%Y-%m-%d %H:%M") if isinstance(ran_at, datetime) else str(ran_at)
+    ran_at = (
+        ran_at.strftime("%Y-%m-%d %H:%M")
+        if isinstance(ran_at, datetime)
+        else str(ran_at)
+    )
     best = max((c["coherence"] for c in run.get("coherence") or []), default=None)
     dataset = run.get("dataset") or {}
     return (
@@ -220,7 +249,11 @@ def _recorded_path(path: str) -> pathlib.PurePath:
     A Windows path ("C:\\Users\\...\\charts\\lda_model.html") read on macOS
     or Linux would otherwise be one long file name.
     """
-    if re.match(r"^[A-Za-z]:[\\/]", path) or path.startswith("\\\\") or ("\\" in path and "/" not in path):
+    if (
+        re.match(r"^[A-Za-z]:[\\/]", path)
+        or path.startswith("\\\\")
+        or ("\\" in path and "/" not in path)
+    ):
         return pathlib.PureWindowsPath(path)
     return pathlib.PurePosixPath(path)
 
@@ -245,11 +278,20 @@ def _relocate(run: dict, new_dir: pathlib.Path) -> None:
                 # Recorded under another layout: keep what follows the run's
                 # own folder, else just the file name.
                 parts = recorded.parts
-                after = max((i for i, part in enumerate(parts) if part == run["run_id"]), default=None)
-                relative_parts = parts[after + 1:] if after is not None and after + 1 < len(parts) else (recorded.name,)
+                after = max(
+                    (i for i, part in enumerate(parts) if part == run["run_id"]),
+                    default=None,
+                )
+                relative_parts = (
+                    parts[after + 1 :]
+                    if after is not None and after + 1 < len(parts)
+                    else (recorded.name,)
+                )
             local = new_dir.joinpath(*relative_parts)
             # A recorded chart path can't point outside the run's folder either.
-            charts[name] = str(local) if new_dir.resolve() in local.resolve().parents else None
+            charts[name] = (
+                str(local) if new_dir.resolve() in local.resolve().parents else None
+            )
     run["charts"] = charts
     run["model_dir"] = str(new_dir)
 
@@ -269,7 +311,9 @@ def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
     local = local_dir(run, base_dir)
     if not _complete(local):
         if not run.get("storage"):
-            raise FileNotFoundError(f"Run {run['run_id']}'s model files aren't on this computer and it was never uploaded.")
+            raise FileNotFoundError(
+                f"Run {run['run_id']}'s model files aren't on this computer and it was never uploaded."
+            )
         import model_storage
 
         cfg = model_storage.config()
@@ -280,7 +324,9 @@ def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
             )
         model_storage.download_run(run, cfg, local)
         if not _complete(local):
-            raise FileNotFoundError(f"Run {run['run_id']}'s upload has no {MODEL_FILE} or {DICTIONARY_FILE}.")
+            raise FileNotFoundError(
+                f"Run {run['run_id']}'s upload has no {MODEL_FILE} or {DICTIONARY_FILE}."
+            )
     _relocate(run, local)
     _persist_local_details(run, local)
     return run
@@ -295,7 +341,9 @@ def _persist_local_details(run: dict, local: pathlib.Path) -> None:
     `model_storage upload` would pick the run as never uploaded.
     """
     current = _read_run_file(local / RUN_FILE) or {}
-    if current.get("model_dir") != run["model_dir"] or current.get("storage") != _jsonable(run.get("storage")):
+    if current.get("model_dir") != run["model_dir"] or current.get(
+        "storage"
+    ) != _jsonable(run.get("storage")):
         write_run_file(run)
 
 
@@ -304,32 +352,48 @@ def _jsonable(value):
     return json.loads(json.dumps(value, default=str))
 
 
-def load_run_model(run: dict, base_dir: Optional[pathlib.Path] = None) -> Tuple[LdaModel, Dictionary]:
+def load_run_model(
+    run: dict, base_dir: Optional[pathlib.Path] = None
+) -> Tuple[LdaModel, Dictionary]:
     """Loads a saved run's model and dictionary, without retraining (downloading it if needed).
 
     Only files in this computer's model folder are loaded (see local_dir).
     """
     run_dir = pathlib.Path(ensure_local(run, base_dir)["model_dir"])
-    return LdaModel.load(str(run_dir / MODEL_FILE)), Dictionary.load(str(run_dir / DICTIONARY_FILE))
+    return LdaModel.load(str(run_dir / MODEL_FILE)), Dictionary.load(
+        str(run_dir / DICTIONARY_FILE)
+    )
 
 
 def _without_seed(settings: Optional[dict]) -> dict:
     return {k: v for k, v in (settings or {}).items() if k != "seed"}
 
 
-def find_matching_run(runs: Iterable[dict], dataset: dict, settings: dict, preprocessing: dict) -> Optional[dict]:
+def find_matching_run(
+    runs: Iterable[dict], dataset: dict, settings: dict, preprocessing: dict
+) -> Optional[dict]:
     """The newest run trained on the same tickets with the same settings and preprocessing.
 
     The seed is ignored: each training run picks its own, so retraining with
     identical inputs would only differ by chance.
     """
     wanted = (dataset, _without_seed(settings), preprocessing)
-    matches = [run for run in runs
-               if (run.get("dataset"), _without_seed(run.get("settings")), run.get("preprocessing")) == wanted]
+    matches = [
+        run
+        for run in runs
+        if (
+            run.get("dataset"),
+            _without_seed(run.get("settings")),
+            run.get("preprocessing"),
+        )
+        == wanted
+    ]
     return max(matches, key=lambda run: str(run.get("ran_at")), default=None)
 
 
-def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+def known_runs(
+    runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None
+) -> List[dict]:
     """Runs from Mongo (shared between computers) and this computer's disk, by run_id, newest first."""
     local = {run["run_id"]: run for run in list_runs(base_dir=base_dir)}
     merged = dict(local)
@@ -337,15 +401,23 @@ def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Pat
         # Mongo wins: it has uploads recorded from any computer. A local upload
         # record survives if Mongo missed it (its update failed).
         for run in list_runs(runs):
-            if not run.get("storage") and (local.get(run["run_id"]) or {}).get("storage"):
+            if not run.get("storage") and (local.get(run["run_id"]) or {}).get(
+                "storage"
+            ):
                 run["storage"] = local[run["run_id"]]["storage"]
             merged[run["run_id"]] = run
     return sorted(merged.values(), key=lambda r: str(r.get("ran_at")), reverse=True)
 
 
-def topic_assignment(model: LdaModel, bow, run_id: str, now: datetime) -> Optional[dict]:
+def topic_assignment(
+    model: LdaModel, bow, run_id: str, now: datetime
+) -> Optional[dict]:
     """A ticket's `topic` field: its main topic and topic mix under one run."""
-    mix = sorted(model.get_document_topics(bow, minimum_probability=0.0), key=lambda t: t[1], reverse=True)
+    mix = sorted(
+        model.get_document_topics(bow, minimum_probability=0.0),
+        key=lambda t: t[1],
+        reverse=True,
+    )
     if not bow or not mix:
         return None
     main_topic, probability = mix[0]
@@ -354,12 +426,18 @@ def topic_assignment(model: LdaModel, bow, run_id: str, now: datetime) -> Option
         "main_topic": int(main_topic),
         "probability": float(probability),
         "words": [word for word, _ in model.show_topic(main_topic, topn=5)],
-        "mix": [{"topic": int(t), "probability": float(p)} for t, p in mix if p >= TOPIC_MIX_MIN],
+        "mix": [
+            {"topic": int(t), "probability": float(p)}
+            for t, p in mix
+            if p >= TOPIC_MIX_MIN
+        ],
         "assigned_at": now,
     }
 
 
-def assign_topics(tickets: Collection, run_id: str, model: LdaModel, bows: Dict[str, list]) -> dict:
+def assign_topics(
+    tickets: Collection, run_id: str, model: LdaModel, bows: Dict[str, list]
+) -> dict:
     """Writes each ticket's topic under `run_id` to its tickets document.
 
     Only existing tickets are updated (no upsert). Tickets whose text has no
@@ -375,21 +453,34 @@ def assign_topics(tickets: Collection, run_id: str, model: LdaModel, bows: Dict[
         if assignment is None:
             summary["empty"] += 1
             continue
-        matched = tickets.update_one({"zendesk_id": str(zendesk_id)}, {"$set": {"topic": assignment}}).matched_count
+        matched = tickets.update_one(
+            {"zendesk_id": str(zendesk_id)}, {"$set": {"topic": assignment}}
+        ).matched_count
         summary["assigned" if matched else "not_in_mongo"] += 1
     logger.info(f"Topic assignment for run {run_id}: {summary}")
     return summary
 
 
-def assign_trained_topics(tickets: Collection, run: dict, allocator: LatentDirichletAllocator) -> dict:
+def assign_trained_topics(
+    tickets: Collection, run: dict, allocator: LatentDirichletAllocator
+) -> dict:
     """Assigns topics to the tickets a run was just trained on, reusing its corpus."""
     if len(allocator.document_ids) != len(allocator.corpus):
         raise ValueError("The corpus has no ticket IDs to assign topics to.")
-    return assign_topics(tickets, run["run_id"], allocator.lda_model, dict(zip(allocator.document_ids, allocator.corpus)))
+    return assign_topics(
+        tickets,
+        run["run_id"],
+        allocator.lda_model,
+        dict(zip(allocator.document_ids, allocator.corpus)),
+    )
 
 
 def assign_from_saved_run(
-    tickets: Collection, run: dict, nlp, stopwords: Sequence[str], query: Optional[dict] = None
+    tickets: Collection,
+    run: dict,
+    nlp,
+    stopwords: Sequence[str],
+    query: Optional[dict] = None,
 ) -> dict:
     """Loads a saved run and assigns its topics to tickets read from Mongo.
 
@@ -399,9 +490,14 @@ def assign_from_saved_run(
     from wrangler import DataWrangler
 
     model, dictionary = load_run_model(run)
-    docs = list(tickets.find(query or {}, {"zendesk_id": 1, "subject": 1, "transcript.body": 1}))
+    docs = list(
+        tickets.find(query or {}, {"zendesk_id": 1, "subject": 1, "transcript.body": 1})
+    )
     texts = [DataWrangler.mongo_ticket_document(doc) for doc in docs]
-    bows = {doc["zendesk_id"]: dictionary.doc2bow(tokens) for doc, tokens in zip(docs, tokenize(nlp, stopwords, texts))}
+    bows = {
+        doc["zendesk_id"]: dictionary.doc2bow(tokens)
+        for doc, tokens in zip(docs, tokenize(nlp, stopwords, texts))
+    }
     return assign_topics(tickets, run["run_id"], model, bows)
 
 

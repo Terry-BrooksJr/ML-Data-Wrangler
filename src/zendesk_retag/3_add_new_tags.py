@@ -13,6 +13,7 @@ Without --apply it only prints what it would do. Results go to
     python 3_add_new_tags.py            # dry run
     python 3_add_new_tags.py --apply
 """
+
 import os
 import sys
 from collections import defaultdict
@@ -41,7 +42,9 @@ def main(argv):
     log, failed = [], 0
     for tag, ids in by_tag.items():
         for batch in zd.chunks(ids):
-            for ticket_id, ok, detail in zd.update_many(batch, {"additional_tags": [tag]}):
+            for ticket_id, ok, detail in zd.update_many(
+                batch, {"additional_tags": [tag]}
+            ):
                 failed += not ok
                 log.append((ticket_id, tag, ok, detail))
             print(f"  {tag}: {sum(1 for r in log if r[1] == tag)}/{len(ids)} done")

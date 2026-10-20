@@ -26,6 +26,7 @@ spread wider and miss looser synonyms ("oil change" ~ "car maintenance").
     cd src && python -m tag_normalizer tags.txt                 # Voyage; sends the tags only
     cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8 --out mapping.csv
 """
+
 import argparse
 import ast
 import csv
@@ -101,7 +102,9 @@ def _table_column(text: str) -> Optional[List[str]]:
     width = len(rows[0])
     if width < 2 or any(len(row) != width for row in rows):
         return None
-    numeric = [c for c in range(1, width) if all(_NUMBER.fullmatch(row[c]) for row in rows[1:])]
+    numeric = [
+        c for c in range(1, width) if all(_NUMBER.fullmatch(row[c]) for row in rows[1:])
+    ]
     if not numeric:
         return None
     if not any(_NUMBER.fullmatch(rows[0][c]) for c in numeric):
@@ -216,7 +219,9 @@ def spacy_embedder(nlp=None) -> Embedder:
 
             _nlp = en_core_web_lg.load()
         nlp = _nlp
-    return lambda texts: np.asarray([nlp.make_doc(text).vector for text in texts], dtype=np.float32)
+    return lambda texts: np.asarray(
+        [nlp.make_doc(text).vector for text in texts], dtype=np.float32
+    )
 
 
 def embedder(backend: str) -> Embedder:
@@ -224,7 +229,9 @@ def embedder(backend: str) -> Embedder:
         return voyage_embedder()
     if backend == SPACY:
         return spacy_embedder()
-    raise ValueError(f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}")
+    raise ValueError(
+        f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}"
+    )
 
 
 def unit_rows(vectors: np.ndarray) -> np.ndarray:
@@ -254,7 +261,9 @@ class Group:
         return sum(tag.count for tag in self.members)
 
 
-def _labels(unit: np.ndarray, threshold: float, apart: Optional[np.ndarray] = None) -> np.ndarray:
+def _labels(
+    unit: np.ndarray, threshold: float, apart: Optional[np.ndarray] = None
+) -> np.ndarray:
     """Cluster label per row: average linkage on cosine distance, cut at 1 - threshold.
 
     Args:
@@ -269,7 +278,9 @@ def _labels(unit: np.ndarray, threshold: float, apart: Optional[np.ndarray] = No
         # however many other pairs are averaged in with it.
         distance[np.outer(apart, apart)] = 2.0 * n * n + 1.0
     condensed = np.clip(distance[np.triu_indices(n, k=1)], 0.0, None)
-    return fcluster(linkage(condensed, method="average"), t=1.0 - threshold, criterion="distance")
+    return fcluster(
+        linkage(condensed, method="average"), t=1.0 - threshold, criterion="distance"
+    )
 
 
 def _group(tags: List[Tag], unit: np.ndarray) -> Group:
@@ -277,14 +288,31 @@ def _group(tags: List[Tag], unit: np.ndarray) -> Group:
     # Mean similarity to the group's other tags; the most central tag names it.
     centrality = (similarity.sum(axis=1) - np.diag(similarity)) / max(len(tags) - 1, 1)
     # A taxonomy tag names the group over free-form ones, so tags map onto it.
-    best = min(range(len(tags)), key=lambda i: (not tags[i].structured, -round(float(centrality[i]), 6),
-                                                -tags[i].count, len(tags[i].text)))
-    order = sorted(range(len(tags)), key=lambda i: (i != best, -similarity[best, i], tags[i].text))
-    return Group(tags[best].spelling, [tags[i] for i in order], [float(similarity[best, i]) for i in order])
+    best = min(
+        range(len(tags)),
+        key=lambda i: (
+            not tags[i].structured,
+            -round(float(centrality[i]), 6),
+            -tags[i].count,
+            len(tags[i].text),
+        ),
+    )
+    order = sorted(
+        range(len(tags)), key=lambda i: (i != best, -similarity[best, i], tags[i].text)
+    )
+    return Group(
+        tags[best].spelling,
+        [tags[i] for i in order],
+        [float(similarity[best, i]) for i in order],
+    )
 
 
-def group_tags(tags: List[Tag], vectors: np.ndarray, threshold: float,
-               merge_structured: bool = False) -> List[Group]:
+def group_tags(
+    tags: List[Tag],
+    vectors: np.ndarray,
+    threshold: float,
+    merge_structured: bool = False,
+) -> List[Group]:
     """Groups tags (one row of vectors each) whose meaning matches at threshold.
 
     Every tag lands in exactly one group; a tag with no match is a group of
@@ -306,7 +334,9 @@ def group_tags(tags: List[Tag], vectors: np.ndarray, threshold: float,
     for label in dict.fromkeys(labels):
         rows = [i for i, value in enumerate(labels) if value == label]
         groups.append(_group([tags[i] for i in rows], unit[rows]))
-    return sorted(groups, key=lambda g: (-len(g.members), -g.count, g.canonical.lower()))
+    return sorted(
+        groups, key=lambda g: (-len(g.members), -g.count, g.canonical.lower())
+    )
 
 
 def mapping(groups: List[Group], excluded: Iterable[str] = ()) -> Dict[str, str]:
@@ -347,15 +377,24 @@ def to_json(groups: List[Group], mapped: Dict[str, str]) -> str:
     for spelling, canonical in mapped.items():
         if spelling != canonical:
             merged.setdefault(canonical, [canonical]).append(spelling)
-    return json.dumps({"mapping": mapped,
-                       "groups": [{"canonical": c, "tags": tags} for c, tags in merged.items()]},
-                      indent=2, ensure_ascii=False)
+    return json.dumps(
+        {
+            "mapping": mapped,
+            "groups": [{"canonical": c, "tags": tags} for c, tags in merged.items()],
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 def describe(groups: List[Group]) -> str:
     """Merged groups as indented text, for the command line."""
-    merged = [g for g in groups if len(g.members) > 1 or len(g.members[0].spellings) > 1]
-    lines = [f"{len(merged)} group(s) to merge; {len(groups) - len(merged)} tag(s) with no match."]
+    merged = [
+        g for g in groups if len(g.members) > 1 or len(g.members[0].spellings) > 1
+    ]
+    lines = [
+        f"{len(merged)} group(s) to merge; {len(groups) - len(merged)} tag(s) with no match."
+    ]
     for group in merged:
         lines.append(f"\n{group.canonical}  ({group.count} use(s))")
         for tag, similarity in zip(group.members, group.similarity):
@@ -369,8 +408,17 @@ def describe(groups: List[Group]) -> str:
 
 # The scripts a person runs against Zendesk; this module only copies them.
 # The packaged app bundles them under zendesk_retag/ (see packaging/lasso.spec).
-SCRIPTS_DIR = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).resolve().parent)) / "zendesk_retag"
-SCRIPT_FILES = ("zd.py", "1_find_tickets.py", "2_remove_old_tags.py", "3_add_new_tags.py", "README.txt")
+SCRIPTS_DIR = (
+    pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).resolve().parent))
+    / "zendesk_retag"
+)
+SCRIPT_FILES = (
+    "zd.py",
+    "1_find_tickets.py",
+    "2_remove_old_tags.py",
+    "3_add_new_tags.py",
+    "README.txt",
+)
 
 
 def zendesk_tag(tag: str) -> str:
@@ -393,13 +441,17 @@ def retag_changes(mapped: Dict[str, str]) -> Tuple[List[Tuple[str, str]], List[s
         if old == target:
             continue
         if old != zendesk_tag(old):
-            warnings.append(f"Skipped {old!r}: Zendesk tags have no spaces or capitals, so no ticket has it.")
+            warnings.append(
+                f"Skipped {old!r}: Zendesk tags have no spaces or capitals, so no ticket has it."
+            )
             continue
         changes.append((old, target))
     return changes, warnings
 
 
-def write_retag_scripts(mapped: Dict[str, str], folder: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+def write_retag_scripts(
+    mapped: Dict[str, str], folder: str
+) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Writes the Zendesk retag scripts and their tag_changes.csv into folder (created).
 
     Nothing is sent to Zendesk: a person reviews tag_changes.csv and runs the
@@ -412,7 +464,9 @@ def write_retag_scripts(mapped: Dict[str, str], folder: str) -> Tuple[List[Tuple
     out = pathlib.Path(folder)
     out.mkdir(parents=True, exist_ok=True)
     if (out / "tag_changes.csv").exists():
-        raise FileExistsError(f"{out} already holds retag scripts; choose an empty folder.")
+        raise FileExistsError(
+            f"{out} already holds retag scripts; choose an empty folder."
+        )
     for name in SCRIPT_FILES:
         shutil.copyfile(SCRIPTS_DIR / name, out / name)
     with open(out / "tag_changes.csv", "w", encoding="utf-8", newline="") as f:
@@ -433,18 +487,37 @@ def _threshold(value: str) -> float:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tag_normalizer", description=__doc__.split("\n\n")[0])
-    parser.add_argument("file", help="Text, CSV or JSON file of tags; - reads standard input")
-    parser.add_argument("--backend", choices=BACKENDS, default=VOYAGE,
-                        help="voyage (default; sends the tags to Voyage AI) or spacy (local, coarser)")
-    parser.add_argument("--threshold", type=_threshold,
-                        help=f"Cosine similarity to merge at (default {DEFAULT_THRESHOLDS[VOYAGE]} for voyage, "
-                             f"{DEFAULT_THRESHOLDS[SPACY]} for spacy)")
-    parser.add_argument("--merge-structured", action="store_true",
-                        help="Allow facet__value tags (sentiment__positive) to merge with each other")
-    parser.add_argument("--out", help="Write the mapping here: .json for JSON, anything else for CSV")
-    parser.add_argument("--scripts", metavar="FOLDER",
-                        help="Write the Zendesk retag scripts and tag_changes.csv into this new folder")
+    parser = argparse.ArgumentParser(
+        prog="tag_normalizer", description=__doc__.split("\n\n")[0]
+    )
+    parser.add_argument(
+        "file", help="Text, CSV or JSON file of tags; - reads standard input"
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=VOYAGE,
+        help="voyage (default; sends the tags to Voyage AI) or spacy (local, coarser)",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=_threshold,
+        help=f"Cosine similarity to merge at (default {DEFAULT_THRESHOLDS[VOYAGE]} for voyage, "
+        f"{DEFAULT_THRESHOLDS[SPACY]} for spacy)",
+    )
+    parser.add_argument(
+        "--merge-structured",
+        action="store_true",
+        help="Allow facet__value tags (sentiment__positive) to merge with each other",
+    )
+    parser.add_argument(
+        "--out", help="Write the mapping here: .json for JSON, anything else for CSV"
+    )
+    parser.add_argument(
+        "--scripts",
+        metavar="FOLDER",
+        help="Write the Zendesk retag scripts and tag_changes.csv into this new folder",
+    )
     return parser
 
 
@@ -464,12 +537,20 @@ def main(argv: List[str]) -> int:
         print("No tags found.", file=sys.stderr)
         return 1
     threshold = args.threshold or DEFAULT_THRESHOLDS[args.backend]
-    groups = group_tags(tags, embedder(args.backend)([tag.text for tag in tags]), threshold,
-                        args.merge_structured)
+    groups = group_tags(
+        tags,
+        embedder(args.backend)([tag.text for tag in tags]),
+        threshold,
+        args.merge_structured,
+    )
     mapped = mapping(groups)
     print(describe(groups))
     if args.out:
-        output = to_json(groups, mapped) if args.out.lower().endswith(".json") else to_csv(groups, mapped)
+        output = (
+            to_json(groups, mapped)
+            if args.out.lower().endswith(".json")
+            else to_csv(groups, mapped)
+        )
         with open(args.out, "w", encoding="utf-8", newline="") as f:
             f.write(output)
         print(f"\nWrote {len(mapped)} tag(s) to {args.out}")
@@ -477,8 +558,10 @@ def main(argv: List[str]) -> int:
         changes, warnings = write_retag_scripts(mapped, args.scripts)
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
-        print(f"\nWrote Zendesk retag scripts for {len(changes)} tag change(s) to {args.scripts}; "
-              f"see README.txt there. Nothing was sent to Zendesk.")
+        print(
+            f"\nWrote Zendesk retag scripts for {len(changes)} tag change(s) to {args.scripts}; "
+            f"see README.txt there. Nothing was sent to Zendesk."
+        )
     return 0
 
 

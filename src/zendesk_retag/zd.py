@@ -8,6 +8,7 @@ Credentials come from the environment, never from a file in this folder:
 
 ZENDESK_BASE_URL overrides the subdomain (for a sandbox); it must be https://.
 """
+
 import base64
 import csv
 import json
@@ -60,8 +61,16 @@ def request(method, path_or_url, body=None):
     url = path_or_url if path_or_url.startswith("http") else base_url() + path_or_url
     data = json.dumps(body).encode() if body is not None else None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        req = urllib.request.Request(url, data=data, method=method, headers={
-            "Authorization": _auth_header(), "Content-Type": "application/json", "Accept": "application/json"})
+        req = urllib.request.Request(
+            url,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": _auth_header(),
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
         try:
             with urllib.request.urlopen(req, timeout=60) as reply:
                 return json.loads(reply.read() or b"{}")
@@ -72,13 +81,13 @@ def request(method, path_or_url, body=None):
                 time.sleep(delay + random.uniform(0, 1))
                 continue
             if attempt < MAX_ATTEMPTS and e.code >= 500:
-                time.sleep(min(2 ** attempt, 60))
+                time.sleep(min(2**attempt, 60))
                 continue
             detail = e.read()[:500].decode("utf-8", "replace")
             sys.exit(f"{method} {url} failed: HTTP {e.code} {detail}")
         except urllib.error.URLError as e:
             if attempt < MAX_ATTEMPTS:
-                time.sleep(min(2 ** attempt, 60))
+                time.sleep(min(2**attempt, 60))
                 continue
             sys.exit(f"{method} {url} failed: {e.reason}")
     raise AssertionError("unreachable")
@@ -101,7 +110,7 @@ def read_tickets(folder):
 
 def chunks(items, size=MAX_IDS):
     for start in range(0, len(items), size):
-        yield items[start:start + size]
+        yield items[start : start + size]
 
 
 def wait_for_job(job):
@@ -118,10 +127,22 @@ def wait_for_job(job):
 def update_many(ids, ticket_change):
     """Applies one change to up to 100 tickets; returns [(ticket_id, ok, detail)]."""
     query = urllib.parse.urlencode({"ids": ",".join(str(i) for i in ids)})
-    job = wait_for_job(request("PUT", f"/api/v2/tickets/update_many.json?{query}",
-                               {"ticket": ticket_change})["job_status"])
+    job = wait_for_job(
+        request(
+            "PUT",
+            f"/api/v2/tickets/update_many.json?{query}",
+            {"ticket": ticket_change},
+        )["job_status"]
+    )
     if job.get("status") != "completed":
-        return [(i, False, f"job {job.get('id')} ended {job.get('status')}: {job.get('message') or ''}") for i in ids]
+        return [
+            (
+                i,
+                False,
+                f"job {job.get('id')} ended {job.get('status')}: {job.get('message') or ''}",
+            )
+            for i in ids
+        ]
     results = {str(r.get("id")): r for r in job.get("results") or []}
     outcome = []
     for i in ids:
@@ -130,7 +151,16 @@ def update_many(ids, ticket_change):
             outcome.append((i, False, "not in job results"))
         else:
             ok = result.get("success", result.get("status") != "Failed")
-            outcome.append((i, bool(ok), result.get("error") or result.get("details") or result.get("status") or ""))
+            outcome.append(
+                (
+                    i,
+                    bool(ok),
+                    result.get("error")
+                    or result.get("details")
+                    or result.get("status")
+                    or "",
+                )
+            )
     return outcome
 
 
@@ -145,5 +175,7 @@ def write_log(folder, name, rows):
 
 def parse_apply(argv, step):
     if argv not in ([], ["--apply"]):
-        sys.exit(f"Usage: python {step} [--apply]   (without --apply, only shows what would change)")
+        sys.exit(
+            f"Usage: python {step} [--apply]   (without --apply, only shows what would change)"
+        )
     return argv == ["--apply"]

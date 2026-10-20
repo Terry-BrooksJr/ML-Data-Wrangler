@@ -14,6 +14,7 @@ Without --apply it only prints what it would do. Results go to
     python 2_remove_old_tags.py            # dry run
     python 2_remove_old_tags.py --apply
 """
+
 import os
 import sys
 from collections import defaultdict

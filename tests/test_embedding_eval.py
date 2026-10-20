@@ -3,10 +3,9 @@ import io
 import json
 from types import SimpleNamespace
 
+import embedding_eval as ee
 import numpy as np
 import pytest
-
-import embedding_eval as ee
 from fixtures import CATEGORY_FIXTURES
 
 
@@ -15,7 +14,13 @@ def _ticket(zendesk_id, subject, comments):
 
 
 def _comment(body, role=None, internal=False):
-    return {"author": "a", "role": role, "body": body, "timestamp": "2026-10-01", "is_internal_note": internal}
+    return {
+        "author": "a",
+        "role": role,
+        "body": body,
+        "timestamp": "2026-10-01",
+        "is_internal_note": internal,
+    }
 
 
 def test_neighbours_excludes_self_and_orders_by_similarity():
@@ -69,15 +74,42 @@ def fake_candidates(monkeypatch):
             def embed(texts):
                 calls.append((name, len(texts)))
                 # Same subject -> same direction, so same-category tickets cluster.
-                return np.array([[hash(t.split("\n")[0]) % 97 + 1, len(t) % 13 + 1] for t in texts], dtype=np.float32), 7
+                return (
+                    np.array(
+                        [
+                            [hash(t.split("\n")[0]) % 97 + 1, len(t) % 13 + 1]
+                            for t in texts
+                        ],
+                        dtype=np.float32,
+                    ),
+                    7,
+                )
+
             return embed
+
         return embedder
 
     def fake(voyage_model, openai_model):
         return {
-            "spacy": ee.Candidate("fake spacy", "spacy", "m", None, make("spacy", False), False),
-            "voyage": ee.Candidate("fake voyage", "voyage", voyage_model, "EMBEDDING_API_KEY", make("voyage", True), True),
-            "openai": ee.Candidate("fake openai", "openai", openai_model, "OPENAI_API_KEY", make("openai", True), True),
+            "spacy": ee.Candidate(
+                "fake spacy", "spacy", "m", None, make("spacy", False), False
+            ),
+            "voyage": ee.Candidate(
+                "fake voyage",
+                "voyage",
+                voyage_model,
+                "EMBEDDING_API_KEY",
+                make("voyage", True),
+                True,
+            ),
+            "openai": ee.Candidate(
+                "fake openai",
+                "openai",
+                openai_model,
+                "OPENAI_API_KEY",
+                make("openai", True),
+                True,
+            ),
         }
 
     monkeypatch.setattr(ee, "candidates", fake)
@@ -85,27 +117,56 @@ def fake_candidates(monkeypatch):
     return calls
 
 
-def test_main_skips_providers_without_keys(tmp_path, monkeypatch, capsys, fake_candidates):
+def test_main_skips_providers_without_keys(
+    tmp_path, monkeypatch, capsys, fake_candidates
+):
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    assert ee.main([str(_eval_set(tmp_path)), "--cache", str(tmp_path / "cache"), "-k", "2"]) == 0
+    assert (
+        ee.main(
+            [str(_eval_set(tmp_path)), "--cache", str(tmp_path / "cache"), "-k", "2"]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert "skipping fake voyage: EMBEDDING_API_KEY is not set" in out
     assert "fake spacy" in out and "random neighbours (baseline)" in out
     assert [name for name, _ in fake_candidates] == ["spacy"]
 
 
-def test_main_asks_before_sending_text_and_needs_yes_off_a_terminal(tmp_path, monkeypatch, capsys, fake_candidates):
+def test_main_asks_before_sending_text_and_needs_yes_off_a_terminal(
+    tmp_path, monkeypatch, capsys, fake_candidates
+):
     monkeypatch.setenv("EMBEDDING_API_KEY", "k")
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
-    assert ee.main([str(_eval_set(tmp_path)), "--providers", "voyage", "--cache", str(tmp_path / "c")]) == 1
+    assert (
+        ee.main(
+            [
+                str(_eval_set(tmp_path)),
+                "--providers",
+                "voyage",
+                "--cache",
+                str(tmp_path / "c"),
+            ]
+        )
+        == 1
+    )
     assert "pass --yes" in capsys.readouterr().err
     assert fake_candidates == []
 
 
 def test_main_caches_embeddings(tmp_path, monkeypatch, capsys, fake_candidates):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
-    args = [str(_eval_set(tmp_path)), "--providers", "openai", "--cache", str(tmp_path / "c"), "--yes", "-k", "2"]
+    args = [
+        str(_eval_set(tmp_path)),
+        "--providers",
+        "openai",
+        "--cache",
+        str(tmp_path / "c"),
+        "--yes",
+        "-k",
+        "2",
+    ]
     assert ee.main(args) == 0
     assert ee.main(args + ["--show-neighbours", "2"]) == 0
     out = capsys.readouterr().out
@@ -119,12 +180,20 @@ def test_api_embedder_batches_orders_and_counts_tokens(monkeypatch):
 
     def fake_post(url, api_key, body):
         sent.append(body)
-        data = [{"index": i, "embedding": [float(len(t)), 1.0]} for i, t in enumerate(body["input"])]
-        return {"data": list(reversed(data)), "usage": {"total_tokens": len(body["input"])}}
+        data = [
+            {"index": i, "embedding": [float(len(t)), 1.0]}
+            for i, t in enumerate(body["input"])
+        ]
+        return {
+            "data": list(reversed(data)),
+            "usage": {"total_tokens": len(body["input"])},
+        }
 
     monkeypatch.setattr(ee.embeddings, "post_json", fake_post)
     monkeypatch.setattr(ee, "BATCH_SIZE", 2)
-    vectors, tokens = ee._api_embedder("https://x", "k", "m", {"input_type": "document"})(["a", "bb", "ccc"])
+    vectors, tokens = ee._api_embedder(
+        "https://x", "k", "m", {"input_type": "document"}
+    )(["a", "bb", "ccc"])
     assert vectors[:, 0].tolist() == [1.0, 2.0, 3.0]
     assert tokens == 3
     assert [b["input"] for b in sent] == [["a", "bb"], ["ccc"]]
@@ -138,7 +207,9 @@ def test_voyage_candidate_uses_app_settings(monkeypatch):
 
     def fake_voyage(texts, cfg, input_type):
         sent.append(cfg)
-        return SimpleNamespace(embeddings=[[0.0] * 512 for _ in texts], total_tokens=len(texts))
+        return SimpleNamespace(
+            embeddings=[[0.0] * 512 for _ in texts], total_tokens=len(texts)
+        )
 
     monkeypatch.setattr(ee.embeddings, "voyage_embed", fake_voyage)
     vectors, _ = ee.voyage_embedder("voyage-3.5-lite")(["a"])
@@ -160,14 +231,25 @@ def test_missing_spacy_model_is_skipped(tmp_path, monkeypatch, capsys, fake_cand
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     real_find_spec = ee.importlib.util.find_spec
-    monkeypatch.setattr(ee.importlib.util, "find_spec",
-                        lambda name, *a: None if name == "en_core_web_lg" else real_find_spec(name, *a))
-    assert ee.main([str(_eval_set(tmp_path)), "--cache", str(tmp_path / "c"), "-k", "2"]) == 0
-    assert "skipping fake spacy: the en_core_web_lg model isn't installed" in capsys.readouterr().out
+    monkeypatch.setattr(
+        ee.importlib.util,
+        "find_spec",
+        lambda name, *a: None if name == "en_core_web_lg" else real_find_spec(name, *a),
+    )
+    assert (
+        ee.main([str(_eval_set(tmp_path)), "--cache", str(tmp_path / "c"), "-k", "2"])
+        == 0
+    )
+    assert (
+        "skipping fake spacy: the en_core_web_lg model isn't installed"
+        in capsys.readouterr().out
+    )
     assert fake_candidates == []
 
 
-def test_provider_that_cannot_load_does_not_stop_the_others(tmp_path, monkeypatch, capsys, fake_candidates):
+def test_provider_that_cannot_load_does_not_stop_the_others(
+    tmp_path, monkeypatch, capsys, fake_candidates
+):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     original = ee.candidates
 
@@ -181,14 +263,26 @@ def test_provider_that_cannot_load_does_not_stop_the_others(tmp_path, monkeypatc
         return found
 
     monkeypatch.setattr(ee, "candidates", broken_spacy)
-    args = [str(_eval_set(tmp_path)), "--providers", "spacy", "openai", "--cache", str(tmp_path / "c"), "--yes", "-k", "2"]
+    args = [
+        str(_eval_set(tmp_path)),
+        "--providers",
+        "spacy",
+        "openai",
+        "--cache",
+        str(tmp_path / "c"),
+        "--yes",
+        "-k",
+        "2",
+    ]
     assert ee.main(args) == 0
     captured = capsys.readouterr()
     assert "fake spacy failed: unavailable" in captured.err
     assert "fake openai" in captured.out
 
 
-def test_each_view_scores_only_tickets_with_text_in_it(tmp_path, monkeypatch, capsys, fake_candidates):
+def test_each_view_scores_only_tickets_with_text_in_it(
+    tmp_path, monkeypatch, capsys, fake_candidates
+):
     path = _eval_set(tmp_path)
     cases = json.loads(path.read_text())
     # Three tickets lose their subject and requester: no "opening" text, but
@@ -198,8 +292,23 @@ def test_each_view_scores_only_tickets_with_text_in_it(tmp_path, monkeypatch, ca
         for comment in case["ticket"]["transcript"]:
             comment["role"] = None
     path.write_text(json.dumps(cases))
-    assert ee.main([str(path), "--providers", "spacy", "--text", "opening", "full",
-                    "--cache", str(tmp_path / "c"), "-k", "2"]) == 0
+    assert (
+        ee.main(
+            [
+                str(path),
+                "--providers",
+                "spacy",
+                "--text",
+                "opening",
+                "full",
+                "--cache",
+                str(tmp_path / "c"),
+                "-k",
+                "2",
+            ]
+        )
+        == 0
+    )
     out = capsys.readouterr().out
     assert f"Text: opening ({len(cases) - 3} tickets" in out
     assert f"Text: full ({len(cases)} tickets" in out
@@ -213,10 +322,27 @@ def test_cache_key_includes_the_endpoint(tmp_path):
         def embed(texts):
             calls.append(1)
             return np.ones((len(texts), 2), dtype=np.float32), 0
+
         return embed
 
-    a = ee.Candidate("v", "voyage", "voyage-3.5@1024", None, make, True, "https://api.voyageai.com/v1/embeddings")
-    b = ee.Candidate("v", "voyage", "voyage-3.5@1024", None, make, True, "https://proxy.example.com/v1/embeddings")
+    a = ee.Candidate(
+        "v",
+        "voyage",
+        "voyage-3.5@1024",
+        None,
+        make,
+        True,
+        "https://api.voyageai.com/v1/embeddings",
+    )
+    b = ee.Candidate(
+        "v",
+        "voyage",
+        "voyage-3.5@1024",
+        None,
+        make,
+        True,
+        "https://proxy.example.com/v1/embeddings",
+    )
     ee.cached_embed(a, "opening", ["t"], tmp_path)
     assert ee.cached_embed(a, "opening", ["t"], tmp_path)[2] is True
     assert ee.cached_embed(b, "opening", ["t"], tmp_path)[2] is False

@@ -13,9 +13,10 @@ from datetime import datetime
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import numpy as np
+import tag_normalizer
 from loguru import logger
 from PyQt5 import QtCore
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QThread
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,9 +34,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import tag_normalizer
-from tag_normalizer import SPACY, VOYAGE, Group, Tag
+from tag_normalizer import Group, SPACY, Tag, VOYAGE
 from utility import ThreadWorker, worker_thread
 
 BACKEND_LABELS = {
@@ -64,8 +63,13 @@ class TagTab(QWidget):
 
     idle = pyqtSignal()
 
-    def __init__(self, embedder_factory: Callable[[str], tag_normalizer.Embedder] = tag_normalizer.embedder,
-                 parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        embedder_factory: Callable[
+            [str], tag_normalizer.Embedder
+        ] = tag_normalizer.embedder,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.embedder_factory = embedder_factory
         self._closing = False
@@ -95,7 +99,9 @@ class TagTab(QWidget):
         intro.setWordWrap(True)
 
         self.input = QPlainTextEdit()
-        self.input.setPlaceholderText("car_maintenance, oil change, Tire Rotation\npassword_reset\nforgot password")
+        self.input.setPlaceholderText(
+            "car_maintenance, oil change, Tire Rotation\npassword_reset\nforgot password"
+        )
 
         self.load_button = QPushButton("Load File…")
         self.load_button.clicked.connect(self.load_file)
@@ -115,14 +121,17 @@ class TagTab(QWidget):
         self.threshold.setSingleStep(0.01)
         self.threshold.setDecimals(2)
         self.threshold.setValue(tag_normalizer.DEFAULT_THRESHOLDS[VOYAGE])
-        self.threshold.setToolTip("Cosine similarity a tag needs (on average) to the rest of a group. "
-                                  "Higher merges only closer synonyms.")
+        self.threshold.setToolTip(
+            "Cosine similarity a tag needs (on average) to the rest of a group. "
+            "Higher merges only closer synonyms."
+        )
         self.threshold.valueChanged.connect(self.regroup)
         self.keep_structured_apart = QCheckBox("Keep facet__value tags apart")
         self.keep_structured_apart.setChecked(True)
         self.keep_structured_apart.setToolTip(
             "Never group two structured tags (sentiment__positive, sentiment__negative): they come from a "
-            "fixed taxonomy and embed as near-identical. Free-form tags can still join them.")
+            "fixed taxonomy and embed as near-identical. Free-form tags can still join them."
+        )
         self.keep_structured_apart.toggled.connect(self.regroup)
         self.show_unmatched = QCheckBox("Show tags with no match")
         self.show_unmatched.toggled.connect(self._populate)
@@ -148,8 +157,10 @@ class TagTab(QWidget):
         self.export_button.clicked.connect(self.export_mapping)
         self.export_button.setEnabled(False)
         self.scripts_button = QPushButton("Export Zendesk Scripts…")
-        self.scripts_button.setToolTip("Writes scripts that a person runs to find tickets with each old tag, "
-                                       "remove it, then add the new tag. Nothing is sent to Zendesk from here.")
+        self.scripts_button.setToolTip(
+            "Writes scripts that a person runs to find tickets with each old tag, "
+            "remove it, then add the new tag. Nothing is sent to Zendesk from here."
+        )
         self.scripts_button.clicked.connect(self.export_scripts)
         self.scripts_button.setEnabled(False)
         export_row = QHBoxLayout()
@@ -175,7 +186,9 @@ class TagTab(QWidget):
     # --- input ------------------------------------------------------------------
 
     def load_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load Tags", "", "Tag files (*.txt *.csv *.json);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Tags", "", "Tag files (*.txt *.csv *.json);;All files (*)"
+        )
         if not path:
             return
         try:
@@ -194,7 +207,9 @@ class TagTab(QWidget):
         """
         if self._closing or self._thread is not None:
             return False
-        tags = tag_normalizer.collect(tag_normalizer.parse_tags(self.input.toPlainText()))
+        tags = tag_normalizer.collect(
+            tag_normalizer.parse_tags(self.input.toPlainText())
+        )
         if not tags:
             QMessageBox.information(self, "No tags", "Paste or load some tags first.")
             return False
@@ -235,7 +250,9 @@ class TagTab(QWidget):
         backend, tags, vectors = result
         for text, vector in zip(missing, vectors):
             self._cache[(backend, text)] = np.asarray(vector)
-        self.show_tags(tags, np.stack([self._cache[(backend, tag.text)] for tag in tags]))
+        self.show_tags(
+            tags, np.stack([self._cache[(backend, tag.text)] for tag in tags])
+        )
 
     def _job_failed(self, message: str) -> None:
         self._stop_thread()
@@ -253,8 +270,12 @@ class TagTab(QWidget):
     def regroup(self) -> None:
         if self._vectors is None:
             return
-        self._groups = tag_normalizer.group_tags(self._tags, self._vectors, self.threshold.value(),
-                                                 merge_structured=not self.keep_structured_apart.isChecked())
+        self._groups = tag_normalizer.group_tags(
+            self._tags,
+            self._vectors,
+            self.threshold.value(),
+            merge_structured=not self.keep_structured_apart.isChecked(),
+        )
         for group in self._groups:
             group.canonical = self._renamed.get(self._key(group), group.canonical)
         self._populate()
@@ -276,22 +297,35 @@ class TagTab(QWidget):
             top.setFlags(top.flags() | QtCore.Qt.ItemIsEditable)
             top.setToolTip(0, "Double-click to rename the tag this group maps to.")
             for tag, similarity in zip(group.members, group.similarity):
-                child = QTreeWidgetItem([", ".join(tag.spellings), str(tag.count), f"{similarity:.2f}"])
+                child = QTreeWidgetItem(
+                    [", ".join(tag.spellings), str(tag.count), f"{similarity:.2f}"]
+                )
                 child.setData(0, TAG_ROLE, tag.text)
                 child.setFlags(child.flags() | QtCore.Qt.ItemIsUserCheckable)
-                child.setCheckState(0, QtCore.Qt.Unchecked if tag.text in self._excluded else QtCore.Qt.Checked)
+                child.setCheckState(
+                    0,
+                    (
+                        QtCore.Qt.Unchecked
+                        if tag.text in self._excluded
+                        else QtCore.Qt.Checked
+                    ),
+                )
                 top.addChild(child)
             self.tree.addTopLevelItem(top)
             top.setExpanded(is_merge)
         self.tree.blockSignals(False)
-        self.summary_label.setText(f"{len(self._tags)} distinct tag(s); {merged} group(s) to merge; "
-                                   f"{len(self._groups) - merged} with no match.")
+        self.summary_label.setText(
+            f"{len(self._tags)} distinct tag(s); {merged} group(s) to merge; "
+            f"{len(self._groups) - merged} with no match."
+        )
         for button in (self.export_button, self.scripts_button):
             button.setEnabled(bool(self._groups) and self._thread is None)
 
     def _group_for(self, item: QTreeWidgetItem) -> Optional[Group]:
         top = item if item.parent() is None else item.parent()
-        name_key = frozenset(top.child(i).data(0, TAG_ROLE) for i in range(top.childCount()))
+        name_key = frozenset(
+            top.child(i).data(0, TAG_ROLE) for i in range(top.childCount())
+        )
         return next((g for g in self._groups if self._key(g) == name_key), None)
 
     def _item_changed(self, item: QTreeWidgetItem, column: int) -> None:
@@ -321,13 +355,18 @@ class TagTab(QWidget):
         return tag_normalizer.mapping(self._groups, self._excluded)
 
     def export_mapping(self) -> None:
-        path, chosen = QFileDialog.getSaveFileName(self, "Export Tag Mapping", "tag_mapping.csv",
-                                                   "CSV (*.csv);;JSON (*.json)")
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export Tag Mapping", "tag_mapping.csv", "CSV (*.csv);;JSON (*.json)"
+        )
         if not path:
             return
-        as_json = path.lower().endswith(".json") or (chosen.startswith("JSON") and not path.lower().endswith(".csv"))
+        as_json = path.lower().endswith(".json") or (
+            chosen.startswith("JSON") and not path.lower().endswith(".csv")
+        )
         mapped = self.mapping()
-        output = (tag_normalizer.to_json if as_json else tag_normalizer.to_csv)(self._groups, mapped)
+        output = (tag_normalizer.to_json if as_json else tag_normalizer.to_csv)(
+            self._groups, mapped
+        )
         try:
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(output)
@@ -338,18 +377,26 @@ class TagTab(QWidget):
 
     def export_scripts(self) -> None:
         """Writes the Zendesk retag scripts into a new folder inside the one chosen."""
-        parent = QFileDialog.getExistingDirectory(self, "Folder for Zendesk Retag Scripts")
+        parent = QFileDialog.getExistingDirectory(
+            self, "Folder for Zendesk Retag Scripts"
+        )
         if not parent:
             return
         folder = os.path.join(parent, f"zendesk_retag_{datetime.now():%Y%m%d_%H%M%S}")
         try:
-            changes, warnings = tag_normalizer.write_retag_scripts(self.mapping(), folder)
+            changes, warnings = tag_normalizer.write_retag_scripts(
+                self.mapping(), folder
+            )
         except OSError as e:
             QMessageBox.critical(self, "Could not write scripts", str(e))
             return
-        logger.info(f"Tag Normalizer: wrote Zendesk retag scripts for {len(changes)} tag change(s) to {folder}")
-        text = (f"Wrote scripts for {len(changes)} tag change(s) to\n{folder}\n\n"
-                "Review tag_changes.csv, then follow README.txt there. Nothing was sent to Zendesk.")
+        logger.info(
+            f"Tag Normalizer: wrote Zendesk retag scripts for {len(changes)} tag change(s) to {folder}"
+        )
+        text = (
+            f"Wrote scripts for {len(changes)} tag change(s) to\n{folder}\n\n"
+            "Review tag_changes.csv, then follow README.txt there. Nothing was sent to Zendesk."
+        )
         if warnings:
             text += "\n\n" + "\n".join(warnings)
         QMessageBox.information(self, "Zendesk scripts written", text)
@@ -357,7 +404,13 @@ class TagTab(QWidget):
     # --- busy state and shutdown ------------------------------------------------
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
-        for widget in (self.load_button, self.find_button, self.backend_combo, self.export_button, self.scripts_button):
+        for widget in (
+            self.load_button,
+            self.find_button,
+            self.backend_combo,
+            self.export_button,
+            self.scripts_button,
+        ):
             widget.setEnabled(not busy)
         if not busy:
             self.export_button.setEnabled(bool(self._groups))
