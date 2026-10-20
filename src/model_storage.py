@@ -493,10 +493,16 @@ def main(argv: List[str]) -> int:
         "upload", help="upload saved runs (default: local runs not uploaded yet)"
     )
     upload.add_argument("run_ids", nargs="*")
-    upload.add_argument(
+    kind = upload.add_mutually_exclusive_group()
+    kind.add_argument(
         "--bertopic",
         action="store_true",
         help="upload BERTopic runs (BERTOPIC_MODEL_DIR) instead of LDA runs",
+    )
+    kind.add_argument(
+        "--tags",
+        action="store_true",
+        help="upload Tag Normalizer runs (TAG_RUN_DIR) instead of LDA runs",
     )
     commands.add_parser("new-key", help="print a new random MODEL_SIGNING_KEY")
     args = parser.parse_args(argv)
@@ -530,6 +536,15 @@ def main(argv: List[str]) -> int:
             bertopic_runs.storage_config(cfg),
         )
         collection_name = bertopic_runs.RUNS_COLLECTION
+    elif args.tags:
+        import tag_runs
+
+        runs, run_dir, cfg = (
+            tag_runs.list_runs(),
+            tag_runs.run_dir(),
+            tag_runs.storage_config(cfg),
+        )
+        collection_name = tag_runs.RUNS_COLLECTION
     else:
         runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
         collection_name = topic_store.RUNS_COLLECTION
