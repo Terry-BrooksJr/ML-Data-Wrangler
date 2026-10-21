@@ -5,6 +5,7 @@ types, unknown classification); the caller treats that as an engine error.
 apply_guards then overrides a valid reply that breaks a hard rule, recording
 each override in `reasoning` and `guard_overrides`.
 """
+
 from typing import List
 
 CLASSIFICATIONS = (
@@ -15,11 +16,17 @@ CLASSIFICATIONS = (
     "manual_triage",
 )
 SOLVE_CONFIDENCE_FLOOR = 75  # mirrors the prompt's own stated bar — enforced
-                             # here as a hard backstop, not just trusted from
-                             # the model's self-report
+# here as a hard backstop, not just trusted from
+# the model's self-report
 REENGAGE_LIMIT = 2  # the prompt's ceiling: at most two re-engage attempts
 
-_OPTIONAL_TEXT = ("internal_note", "draft_message", "leadership_recipient", "tag", "ticket_id")
+_OPTIONAL_TEXT = (
+    "internal_note",
+    "draft_message",
+    "leadership_recipient",
+    "tag",
+    "ticket_id",
+)
 
 
 class InvalidReply(ValueError):
@@ -62,13 +69,17 @@ def validate_reply(reply) -> dict:
 
     problems: List[str] = []
     if reply.get("classification") not in CLASSIFICATIONS:
-        problems.append(f"classification ({describe_value(reply.get('classification'))}) is not one of "
-                        f"{', '.join(CLASSIFICATIONS)}")
+        problems.append(
+            f"classification ({describe_value(reply.get('classification'))}) is not one of "
+            f"{', '.join(CLASSIFICATIONS)}"
+        )
 
     confidence = reply.get("confidence")
     # bool is an int subclass; a string "80" is rejected rather than guessed at.
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        problems.append(f"confidence must be a number, got {describe_value(confidence)}")
+        problems.append(
+            f"confidence must be a number, got {describe_value(confidence)}"
+        )
     elif not 0 <= confidence <= 100:
         problems.append("confidence is outside 0-100")
 
@@ -117,7 +128,8 @@ def apply_guards(result: dict, reengage_count: int = 0) -> dict:
         result["draft_message"] = None
         result["internal_note"] = (
             f"Re-engage limit reached ({reengage_count} attempts already). The owner must decide whether to "
-            "keep pursuing or close." + (f"\n\nThe model drafted this follow-up:\n{drafted}" if drafted else "")
+            "keep pursuing or close."
+            + (f"\n\nThe model drafted this follow-up:\n{drafted}" if drafted else "")
         )
         _override(
             result,
@@ -125,11 +137,19 @@ def apply_guards(result: dict, reengage_count: int = 0) -> dict:
             f"attempts (limit {REENGAGE_LIMIT}).",
         )
 
-    if result["classification"] == "flag_reengage" and not (result.get("draft_message") or "").strip():
+    if (
+        result["classification"] == "flag_reengage"
+        and not (result.get("draft_message") or "").strip()
+    ):
         result["classification"] = "manual_triage"
-        _override(result, "Downgraded from flag_reengage: no draft_message was provided.")
+        _override(
+            result, "Downgraded from flag_reengage: no draft_message was provided."
+        )
 
-    if result["classification"] == "flag_solve" and result["confidence"] < SOLVE_CONFIDENCE_FLOOR:
+    if (
+        result["classification"] == "flag_solve"
+        and result["confidence"] < SOLVE_CONFIDENCE_FLOOR
+    ):
         result["classification"] = "manual_triage"
         _override(
             result,
@@ -137,14 +157,20 @@ def apply_guards(result: dict, reengage_count: int = 0) -> dict:
             f"is below the {SOLVE_CONFIDENCE_FLOOR} floor.",
         )
 
-    if result["classification"] != "escalate_leadership" and result.get("leadership_recipient"):
+    if result["classification"] != "escalate_leadership" and result.get(
+        "leadership_recipient"
+    ):
         result["leadership_recipient"] = None
-        _override(result, "Cleared leadership_recipient: only escalate_leadership names one.")
+        _override(
+            result, "Cleared leadership_recipient: only escalate_leadership names one."
+        )
 
     # A tag that disagreed with the model's own classification is an override
     # worth recording; one that only trails a guard's change above is not.
     if model_tag is not None and model_tag != model_classification:
-        _override(result, f"Set tag to {result['classification']} (model gave {model_tag!r}).")
+        _override(
+            result, f"Set tag to {result['classification']} (model gave {model_tag!r})."
+        )
     result["tag"] = result["classification"]
 
     return result

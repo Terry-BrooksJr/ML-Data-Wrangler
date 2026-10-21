@@ -5,6 +5,7 @@ is written so that a correct reading of the system prompt lands on
 `expected`. They are synthetic: open item #2 (a real Escalate-to-Support-Owner
 edge case) is still outstanding.
 """
+
 from datetime import datetime, timedelta, timezone
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -47,8 +48,19 @@ ESCALATE_LEADERSHIP = _ticket(
     "90001",
     "Student responses visible to another district",
     [
-        _comment("Customer", "customer", "Teachers in our district can see student responses from a different district's sessions. This is a data privacy incident for us.", 2),
-        _comment("Support Owner A", "agent", "Confirmed: responses from another tenant are returned by the reports endpoint. Escalating internally.", 1, internal=True),
+        _comment(
+            "Customer",
+            "customer",
+            "Teachers in our district can see student responses from a different district's sessions. This is a data privacy incident for us.",
+            2,
+        ),
+        _comment(
+            "Support Owner A",
+            "agent",
+            "Confirmed: responses from another tenant are returned by the reports endpoint. Escalating internally.",
+            1,
+            internal=True,
+        ),
     ],
     priority="urgent",
 )
@@ -57,7 +69,12 @@ ESCALATION_INTERNAL = _ticket(
     "90002",
     "Need a credit for the outage last week",
     [
-        _comment("Customer", "customer", "We lost two days of testing during the outage. Can you issue a service credit on our account?", 4),
+        _comment(
+            "Customer",
+            "customer",
+            "We lost two days of testing during the outage. Can you issue a service credit on our account?",
+            4,
+        ),
     ],
 )
 
@@ -66,7 +83,12 @@ FLAG_REENGAGE = _ticket(
     "Items fail to render in preview",
     [
         _comment("Customer", "customer", "Some items fail to render in preview.", 12),
-        _comment("Support Owner A", "agent", "Could you send the item reference and the browser console log?", 10),
+        _comment(
+            "Support Owner A",
+            "agent",
+            "Could you send the item reference and the browser console log?",
+            10,
+        ),
     ],
     status="pending",
 )
@@ -75,9 +97,21 @@ FLAG_SOLVE = _ticket(
     "90004",
     "How do I reset 2FA for a teacher account?",
     [
-        _comment("Customer", "customer", "A teacher is locked out; please reset their 2FA.", 3),
-        _comment("Support Owner A", "agent", "Done: 2FA has been reset for that account.", 2),
-        _comment("Customer", "customer", "Confirmed, they're back in. Nothing else needed, thanks!", 1),
+        _comment(
+            "Customer",
+            "customer",
+            "A teacher is locked out; please reset their 2FA.",
+            3,
+        ),
+        _comment(
+            "Support Owner A", "agent", "Done: 2FA has been reset for that account.", 2
+        ),
+        _comment(
+            "Customer",
+            "customer",
+            "Confirmed, they're back in. Nothing else needed, thanks!",
+            1,
+        ),
     ],
 )
 
@@ -96,8 +130,18 @@ PRECEDENCE_CONFLICT = _ticket(
     "90006",
     "Bulk import failing again",
     [
-        _comment("Customer", "customer", "The bulk import failed again. If this isn't fixed before our renewal next month we will move to another vendor; our contract is under review.", 14),
-        _comment("Support Owner A", "agent", "Sorry about that. Can you share the import job ID so we can investigate?", 10),
+        _comment(
+            "Customer",
+            "customer",
+            "The bulk import failed again. If this isn't fixed before our renewal next month we will move to another vendor; our contract is under review.",
+            14,
+        ),
+        _comment(
+            "Support Owner A",
+            "agent",
+            "Sorry about that. Can you share the import job ID so we can investigate?",
+            10,
+        ),
     ],
     priority="high",
 )

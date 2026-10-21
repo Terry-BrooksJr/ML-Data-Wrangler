@@ -1,28 +1,28 @@
 """Settings dialog: edit the environment variables in settings.SETTINGS."""
 
 from itertools import groupby
-from urllib.parse import urlsplit
 from typing import Dict
+from urllib.parse import urlsplit
 
+import settings
+from decision_engine.classify import api_url_problem, is_loopback_url
+from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 from loguru import logger
 from PyQt5.QtWidgets import (
     QAction,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
-    QGroupBox,
-    QLabel,
+    QFrame,
     QLineEdit,
     QMessageBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
+from widgets import Card, hint, LineEdit, use_si_scrollbars
 
-import settings
-from decision_engine.classify import api_url_problem, is_loopback_url
-import theme
-from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
+# Width of the label part of each field, so a group's fields line up.
+TITLE_WIDTH = 190
 
 
 class SettingsDialog(QDialog):
@@ -35,24 +35,27 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(620, 640)
+        self.resize(680, 700)
         self.fields: Dict[str, QLineEdit] = {}
 
-        intro = QLabel(
+        intro = hint(
             "Fields marked * are needed by the Decision Engine (Mongo URI also by "
             "Write Tickets to MongoDB). Leave a field blank to use its default, even if "
             f".env or your shell sets it. Saved to:\n{settings.settings_path()}"
         )
-        intro.setWordWrap(True)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 8, 0)
+        content_layout.setSpacing(12)
         values = settings.current()
         for group, items in groupby(settings.SETTINGS, key=lambda s: s.group):
-            box = QGroupBox(group)
-            form = QFormLayout(box)
+            box = Card(group)
             for setting in items:
-                field = QLineEdit(values[setting.name])
+                label = setting.label + (" *" if setting.required else "")
+                field = LineEdit(label, values[setting.name])
+                field.setTitleWidthMode(LineEdit.TitleWidthMode.Fixed)
+                field.setTitleFixedWidth(TITLE_WIDTH)
                 field.setPlaceholderText(setting.default)
                 field.setClearButtonEnabled(True)
                 tooltip = setting.name + (f"\n{setting.help}" if setting.help else "")
@@ -61,21 +64,25 @@ class SettingsDialog(QDialog):
                 field.setToolTip(tooltip)
                 if setting.secret:
                     self._make_secret(field)
-                label = setting.label + (" *" if setting.required else "")
-                form.addRow(label, field)
+                box.body.addWidget(field)
                 self.fields[setting.name] = field
             content_layout.addWidget(box)
         content_layout.addStretch()
 
-        scroll = QScrollArea()
+        scroll = use_si_scrollbars(QScrollArea())
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidgetResizable(True)
         scroll.setWidget(content)
+        content.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
         layout.addWidget(intro)
         layout.addWidget(scroll)
         layout.addWidget(buttons)
@@ -87,9 +94,13 @@ class SettingsDialog(QDialog):
         toggle = QAction("Show", field)
         toggle.setCheckable(True)
         toggle.setToolTip("Show / hide")
-        toggle.setIcon(field.style().standardIcon(field.style().SP_FileDialogContentsView))
+        toggle.setIcon(
+            field.style().standardIcon(field.style().SP_FileDialogContentsView)
+        )
         toggle.toggled.connect(
-            lambda shown: field.setEchoMode(QLineEdit.Normal if shown else QLineEdit.Password)
+            lambda shown: field.setEchoMode(
+                QLineEdit.Normal if shown else QLineEdit.Password
+            )
         )
         field.addAction(toggle, QLineEdit.TrailingPosition)
 
@@ -129,46 +140,53 @@ class SettingsDialog(QDialog):
         value = self.fields["EMBEDDING_DIMENSIONS"].text().strip()
         if value and parse_dimensions(value) is None:
             QMessageBox.critical(
-                self, "Invalid Dimensions",
+                self,
+                "Invalid Dimensions",
                 f"Dimensions must be one of {', '.join(map(str, ALLOWED_DIMENSIONS))}, or blank for 1024.",
             )
-            return False
-        return True
-
-    def _theme_ok(self) -> bool:
-        """Refuses a theme name the app doesn't have."""
-        value = self.fields["LASSO_THEME"].text()
-        if theme.theme_name(value) is None:
-            QMessageBox.critical(self, "Unknown Theme",
-                                 f"Theme must be one of {', '.join(theme.THEMES)}, or blank for {theme.DEFAULT_THEME}.")
             return False
         return True
 
     def _storage_endpoint_ok(self) -> bool:
         """Refuses an unencrypted storage endpoint: the secret key signs requests to it."""
         url = self.fields["B2_ENDPOINT_URL"].text().strip()
-        if not url or url.startswith("https://") or (url.startswith("http://") and is_loopback_url(url)):
+        if (
+            not url
+            or url.startswith("https://")
+            or (url.startswith("http://") and is_loopback_url(url))
+        ):
             return True
-        QMessageBox.critical(self, "Insecure Storage Endpoint",
-                             f"{url} must start with https:// (http:// is allowed only for localhost).")
+        QMessageBox.critical(
+            self,
+            "Insecure Storage Endpoint",
+            f"{url} must start with https:// (http:// is allowed only for localhost).",
+        )
         return False
 
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
 
-        if not (self._api_urls_ok() and self._dimensions_ok() and self._storage_endpoint_ok()
-                and self._theme_ok()):
+        if not (
+            self._api_urls_ok()
+            and self._dimensions_ok()
+            and self._storage_endpoint_ok()
+        ):
             return
         try:
             restart_needed = settings.save(self.values())
         except OSError as e:
-            QMessageBox.critical(self, "Settings Not Saved", f"Could not write {settings.settings_path()}:\n{e}")
+            QMessageBox.critical(
+                self,
+                "Settings Not Saved",
+                f"Could not write {settings.settings_path()}:\n{e}",
+            )
             return
         logger.info(f"Settings saved to {settings.settings_path()}.")
         if restart_needed:
             QMessageBox.information(
                 self,
                 "Restart Needed",
-                "These changes take effect after you restart the app:\n" + "\n".join(restart_needed),
+                "These changes take effect after you restart the app:\n"
+                + "\n".join(restart_needed),
             )
         self.accept()

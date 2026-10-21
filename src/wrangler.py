@@ -10,11 +10,11 @@ from html import unescape
 from typing import Iterable, List, Optional, TextIO, Tuple, Union
 from xml.etree import ElementTree as ET
 
+import validators
 from loguru import logger
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
-import validators
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
 
@@ -211,7 +211,9 @@ class Ticket:
     def __getitem__(self, key):
         return key
 
-    def output_to_dict(self, output_path: Optional[Union[str, pathlib.Path]] = None) -> dict:
+    def output_to_dict(
+        self, output_path: Optional[Union[str, pathlib.Path]] = None
+    ) -> dict:
         """
         Converts the ticket to a dictionary and writes it to disk as JSON.
 
@@ -675,7 +677,9 @@ class DataWrangler(QObject):
         """Parses Zendesk's "2026-08-18T18:53:13Z" timestamps as aware UTC datetimes."""
         if not value:
             return None
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
 
     @staticmethod
     def _transcript_key(entry: dict) -> tuple:
@@ -692,7 +696,12 @@ class DataWrangler(QObject):
         if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
             # pymongo returns naive UTC datetimes, so compare in that form.
             timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
-        return ("content", entry.get("author"), timestamp, clean_text(entry.get("body")))
+        return (
+            "content",
+            entry.get("author"),
+            timestamp,
+            clean_text(entry.get("body")),
+        )
 
     def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
         """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
@@ -750,10 +759,16 @@ class DataWrangler(QObject):
                     "author": author,
                     # Only the requester can be identified without a Zendesk
                     # users lookup; every other author's role stays unknown.
-                    "role": "requester" if author is not None and author == requester_id else None,
+                    "role": (
+                        "requester"
+                        if author is not None and author == requester_id
+                        else None
+                    ),
                     # Entities decoded here; raw_xml keeps the original text.
                     "body": clean_text(raw_comment.get("plain_body")),
-                    "timestamp": self._parse_zendesk_time(raw_comment.get("created_at")),
+                    "timestamp": self._parse_zendesk_time(
+                        raw_comment.get("created_at")
+                    ),
                     "is_internal_note": not raw_comment.get("public", True),
                 }
             )
@@ -815,7 +830,9 @@ class DataWrangler(QObject):
             A summary: zendesk_id, whether it was inserted, and how many new
             comments were appended.
         """
-        collection = collection if collection is not None else self.get_tickets_collection()
+        collection = (
+            collection if collection is not None else self.get_tickets_collection()
+        )
         document = self.ticket_to_document(ticket)
         zendesk_id = document["zendesk_id"]
         now = datetime.now(timezone.utc)
@@ -828,22 +845,35 @@ class DataWrangler(QObject):
                     "reengage_attempts": [],
                     "agent_reviews": [],
                     "outcomes": [],
-                    "last_ingest": {"at": now, "new_comments": len(document["transcript"])},
+                    "last_ingest": {
+                        "at": now,
+                        "new_comments": len(document["transcript"]),
+                    },
                 }
             )
             try:
                 collection.insert_one(document)
                 logger.success(f"Inserted ticket {zendesk_id} into Mongo")
-                return {"zendesk_id": zendesk_id, "inserted": True, "new_comments": len(document["transcript"])}
+                return {
+                    "zendesk_id": zendesk_id,
+                    "inserted": True,
+                    "new_comments": len(document["transcript"]),
+                }
             except DuplicateKeyError:
                 # Another writer inserted it first (needs a unique index on
                 # zendesk_id); merge into theirs instead.
                 document = self.ticket_to_document(ticket)
-                existing = collection.find_one({"zendesk_id": zendesk_id}, {"transcript": 1})
+                existing = collection.find_one(
+                    {"zendesk_id": zendesk_id}, {"transcript": 1}
+                )
 
         stored = existing.get("transcript", [])
         seen = {self._transcript_key(entry) for entry in stored}
-        candidates = [entry for entry in document.pop("transcript") if self._transcript_key(entry) not in seen]
+        candidates = [
+            entry
+            for entry in document.pop("transcript")
+            if self._transcript_key(entry) not in seen
+        ]
 
         # Each push is conditional on the comment not being in the stored
         # transcript, checked atomically by the server, so two writers
@@ -870,9 +900,16 @@ class DataWrangler(QObject):
         # raw_xml is refreshed too, so it always matches the latest payload.
         collection.update_one(
             {"zendesk_id": zendesk_id},
-            {"$set": {**document, "last_ingest": {"at": now, "new_comments": appended}}},
+            {
+                "$set": {
+                    **document,
+                    "last_ingest": {"at": now, "new_comments": appended},
+                }
+            },
         )
-        logger.success(f"Updated ticket {zendesk_id} in Mongo ({appended} new comments)")
+        logger.success(
+            f"Updated ticket {zendesk_id} in Mongo ({appended} new comments)"
+        )
         return {"zendesk_id": zendesk_id, "inserted": False, "new_comments": appended}
 
     @staticmethod
@@ -880,11 +917,17 @@ class DataWrangler(QObject):
         """A query matching tickets whose transcript doesn't contain `entry` yet."""
         if entry.get("comment_id") is not None:
             return {"transcript.comment_id": {"$ne": entry["comment_id"]}}
-        match = {"author": entry.get("author"), "timestamp": entry.get("timestamp"), "body": entry.get("body")}
+        match = {
+            "author": entry.get("author"),
+            "timestamp": entry.get("timestamp"),
+            "body": entry.get("body"),
+        }
         return {"transcript": {"$not": {"$elemMatch": match}}}
 
     @staticmethod
-    def clean_stored_tickets(collection: Optional[Collection] = None, dry_run: bool = False) -> dict:
+    def clean_stored_tickets(
+        collection: Optional[Collection] = None, dry_run: bool = False
+    ) -> dict:
         """Applies clean_text to tickets already in Mongo (subject and comment bodies).
 
         For tickets stored before cleaning was added; new writes are cleaned
@@ -901,9 +944,20 @@ class DataWrangler(QObject):
         Returns:
             Counts: scanned, tickets_changed, comments_changed, skipped_changed.
         """
-        collection = collection if collection is not None else DataWrangler.get_tickets_collection()
-        summary = {"scanned": 0, "tickets_changed": 0, "comments_changed": 0, "skipped_changed": 0}
-        for doc in collection.find({}, {"zendesk_id": 1, "subject": 1, "transcript": 1}):
+        collection = (
+            collection
+            if collection is not None
+            else DataWrangler.get_tickets_collection()
+        )
+        summary = {
+            "scanned": 0,
+            "tickets_changed": 0,
+            "comments_changed": 0,
+            "skipped_changed": 0,
+        }
+        for doc in collection.find(
+            {}, {"zendesk_id": 1, "subject": 1, "transcript": 1}
+        ):
             summary["scanned"] += 1
             update, guard = {}, {"_id": doc["_id"]}
             subject = clean_text(doc.get("subject"))
@@ -917,12 +971,19 @@ class DataWrangler(QObject):
                     guard[f"transcript.{index}.body"] = entry.get("body")
             if not update:
                 continue
-            if not dry_run and collection.update_one(guard, {"$set": update}).matched_count == 0:
+            if (
+                not dry_run
+                and collection.update_one(guard, {"$set": update}).matched_count == 0
+            ):
                 summary["skipped_changed"] += 1
                 continue
             summary["tickets_changed"] += 1
-            summary["comments_changed"] += sum(key.startswith("transcript.") for key in update)
-        logger.info(f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}")
+            summary["comments_changed"] += sum(
+                key.startswith("transcript.") for key in update
+            )
+        logger.info(
+            f"clean_stored_tickets ({'dry run' if dry_run else 'applied'}): {summary}"
+        )
         return summary
 
     @staticmethod
@@ -961,7 +1022,9 @@ class DataWrangler(QObject):
         Returns:
             One write_ticket_to_mongo summary per ticket.
         """
-        collection = collection if collection is not None else self.get_tickets_collection()
+        collection = (
+            collection if collection is not None else self.get_tickets_collection()
+        )
         self.ensure_ticket_indexes(collection)
         if tickets is None:
             with open(self.ticket_file, "r") as tickets_file:
@@ -1003,7 +1066,10 @@ class DataWrangler(QObject):
         """
         return " ".join(
             [cls._cleanse(ticket_doc.get("subject"))]
-            + [cls._cleanse(entry.get("body")) for entry in ticket_doc.get("transcript") or []]
+            + [
+                cls._cleanse(entry.get("body"))
+                for entry in ticket_doc.get("transcript") or []
+            ]
         )
 
     def ticket_ids(self) -> List[str]:

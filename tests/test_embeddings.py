@@ -4,21 +4,26 @@ import logging
 import socket
 import threading
 import urllib.error
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import embeddings
 import mongomock
 import numpy as np
 import pytest
-
-import embeddings
 from decision_engine import search
 
 
 @pytest.fixture
 def env(monkeypatch):
-    for name in ("EMBEDDING_API_URL", "EMBEDDING_API_ENDPOINT", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS",
-                 "EMBEDDING_TPM", "EMBEDDING_RPM"):
+    for name in (
+        "EMBEDDING_API_URL",
+        "EMBEDDING_API_ENDPOINT",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "EMBEDDING_TPM",
+        "EMBEDDING_RPM",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
     monkeypatch.setattr(embeddings, "_limiters", {})
@@ -49,11 +54,23 @@ def clock(env):
 
 
 def _ticket(zendesk_id, subject, comments, **extra):
-    return {"zendesk_id": zendesk_id, "subject": subject, "transcript": comments, "status": "open", **extra}
+    return {
+        "zendesk_id": zendesk_id,
+        "subject": subject,
+        "transcript": comments,
+        "status": "open",
+        **extra,
+    }
 
 
 def _comment(body, role=None, internal=False):
-    return {"author": "a", "role": role, "body": body, "timestamp": "2026-10-01", "is_internal_note": internal}
+    return {
+        "author": "a",
+        "role": role,
+        "body": body,
+        "timestamp": "2026-10-01",
+        "is_internal_note": internal,
+    }
 
 
 # --- config -----------------------------------------------------------------------
@@ -61,7 +78,9 @@ def _comment(body, role=None, internal=False):
 
 def test_config_defaults_to_voyage_on_mongodb(env):
     cfg = embeddings.config()
-    assert cfg == embeddings.Config("https://ai.mongodb.com/v1/embeddings", "voyage-3.5", 1024, "test-key")
+    assert cfg == embeddings.Config(
+        "https://ai.mongodb.com/v1/embeddings", "voyage-3.5", 1024, "test-key"
+    )
     assert cfg.base_url == "https://ai.mongodb.com/v1"
 
 
@@ -73,18 +92,23 @@ def test_default_endpoint_is_read_when_config_is_built(env):
 
 def test_config_requires_an_embeddings_url(env):
     env.setenv("EMBEDDING_API_URL", "https://ai.mongodb.com/v1")
-    with pytest.raises(embeddings.EmbeddingNotConfigured, match="must end in /embeddings"):
+    with pytest.raises(
+        embeddings.EmbeddingNotConfigured, match="must end in /embeddings"
+    ):
         embeddings.config()
     env.setenv("EMBEDDING_API_URL", "https://api.voyageai.com/v1/embeddings/")
     assert embeddings.config().base_url == "https://api.voyageai.com/v1"
 
 
-@pytest.mark.parametrize("name, value, message", [
-    ("EMBEDDING_API_KEY", "", "EMBEDDING_API_KEY is not set"),
-    ("EMBEDDING_DIMENSIONS", "1000", "must be one of 256, 512, 1024, 2048"),
-    ("EMBEDDING_DIMENSIONS", "big", "must be one of"),
-    ("EMBEDDING_API_URL", "http://api.voyageai.com/v1/embeddings", "not encrypted"),
-])
+@pytest.mark.parametrize(
+    "name, value, message",
+    [
+        ("EMBEDDING_API_KEY", "", "EMBEDDING_API_KEY is not set"),
+        ("EMBEDDING_DIMENSIONS", "1000", "must be one of 256, 512, 1024, 2048"),
+        ("EMBEDDING_DIMENSIONS", "big", "must be one of"),
+        ("EMBEDDING_API_URL", "http://api.voyageai.com/v1/embeddings", "not encrypted"),
+    ],
+)
 def test_config_rejects_bad_settings(env, name, value, message):
     env.setenv(name, value)
     with pytest.raises(embeddings.EmbeddingNotConfigured, match=message):
@@ -101,12 +125,16 @@ def test_config_allows_local_http(env):
 
 
 def test_opening_text_uses_subject_and_first_requester_comment():
-    ticket = _ticket("1", "Login fails", [
-        _comment("internal triage", internal=True),
-        _comment("agent hello"),
-        _comment("I can't log in", role="requester"),
-        _comment("still broken", role="requester"),
-    ])
+    ticket = _ticket(
+        "1",
+        "Login fails",
+        [
+            _comment("internal triage", internal=True),
+            _comment("agent hello"),
+            _comment("I can't log in", role="requester"),
+            _comment("still broken", role="requester"),
+        ],
+    )
     assert embeddings.opening_text(ticket) == "Login fails\n\nI can't log in"
 
 
@@ -116,7 +144,9 @@ def test_opening_text_never_uses_an_unknown_authors_comment():
 
 
 def test_full_text_leaves_out_internal_notes_and_is_capped(monkeypatch):
-    ticket = _ticket("1", "S", [_comment("secret", internal=True), _comment("a"), _comment("b")])
+    ticket = _ticket(
+        "1", "S", [_comment("secret", internal=True), _comment("a"), _comment("b")]
+    )
     assert embeddings.full_text(ticket) == "S\n\na\n\nb"
     monkeypatch.setattr(embeddings, "MAX_CHARS", 3)
     assert embeddings.full_text(ticket) == "S\n\n"
@@ -169,8 +199,16 @@ class FakeVoyage:
 
     @staticmethod
     def reply(texts, dims=1024):
-        data = [{"object": "embedding", "index": i, "embedding": [float(i)] * dims} for i in range(len(texts))]
-        return {"object": "list", "data": data, "model": "voyage-3.5", "usage": {"total_tokens": len(texts)}}
+        data = [
+            {"object": "embedding", "index": i, "embedding": [float(i)] * dims}
+            for i in range(len(texts))
+        ]
+        return {
+            "object": "list",
+            "data": data,
+            "model": "voyage-3.5",
+            "usage": {"total_tokens": len(texts)},
+        }
 
     def paths(self):
         return [path for path, _, _ in self.requests]
@@ -187,13 +225,22 @@ def voyage(env, clock):
 
 
 def test_embed_sends_voyage_request_through_the_client(voyage):
-    vectors, tokens = embeddings.embed(["a", "b"], embeddings.config(), input_type="query")
+    vectors, tokens = embeddings.embed(
+        ["a", "b"], embeddings.config(), input_type="query"
+    )
 
     path, headers, body = voyage.requests[0]
     assert path == "/v1/embeddings" and headers["Authorization"] == "Bearer test-key"
-    assert {k: body[k] for k in ("model", "input", "input_type", "output_dimension", "truncation")} == {
-        "model": "voyage-3.5", "input": ["a", "b"], "input_type": "query", "output_dimension": 1024,
-        "truncation": True}
+    assert {
+        k: body[k]
+        for k in ("model", "input", "input_type", "output_dimension", "truncation")
+    } == {
+        "model": "voyage-3.5",
+        "input": ["a", "b"],
+        "input_type": "query",
+        "output_dimension": 1024,
+        "truncation": True,
+    }
     assert vectors.shape == (2, 1024) and vectors[1, 0] == 1.0 and tokens == 2
 
 
@@ -229,8 +276,9 @@ def test_embed_rejects_wrong_dimensions(voyage):
 @pytest.mark.parametrize("status", [429, 502, 503, 504])
 def test_client_retries_only_when_nothing_was_processed(voyage, status):
     outcomes = [(status, {"detail": "busy"}), (200, None)]
-    voyage.respond = lambda body: (lambda o: (o[0], o[1] or voyage.reply(body["input"])))(
-        outcomes[len(voyage.requests) - 1])
+    voyage.respond = lambda body: (
+        lambda o: (o[0], o[1] or voyage.reply(body["input"]))
+    )(outcomes[len(voyage.requests) - 1])
     vectors, _ = embeddings.embed(["a"], embeddings.config())
     assert vectors.shape == (1, 1024) and len(voyage.requests) == 2
 
@@ -260,7 +308,9 @@ def test_client_retries_a_refused_connection(env):
     env.setattr(embeddings, "_now", lambda: 0.0)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]  # closed once this block ends: connections are refused
+        port = s.getsockname()[
+            1
+        ]  # closed once this block ends: connections are refused
     env.setenv("EMBEDDING_API_URL", f"http://127.0.0.1:{port}/v1/embeddings")
     sleeps = []
     env.setattr(embeddings.time, "sleep", sleeps.append)
@@ -289,7 +339,9 @@ def test_config_reads_rate_limits(env):
     assert (embeddings.config().tpm, embeddings.config().rpm) == (2_000_000, 2000)
 
 
-@pytest.mark.parametrize("name, value", [("EMBEDDING_TPM", "0"), ("EMBEDDING_RPM", "lots")])
+@pytest.mark.parametrize(
+    "name, value", [("EMBEDDING_TPM", "0"), ("EMBEDDING_RPM", "lots")]
+)
 def test_config_rejects_bad_rate_limits(env, name, value):
     env.setenv(name, value)
     with pytest.raises(embeddings.EmbeddingNotConfigured, match=name):
@@ -300,7 +352,11 @@ def test_batches_fit_the_token_budget(env):
     cfg = embeddings.config()
     assert embeddings.batch_chars(cfg) == int(9_000 * embeddings.CHARS_PER_TOKEN_GUESS)
     assert embeddings.batch_chars() == embeddings.MAX_BATCH_CHARS
-    assert embeddings._batches(["x" * 15_000] * 3, embeddings.batch_chars(cfg)) == [(0, 1), (1, 2), (2, 3)]
+    assert embeddings._batches(["x" * 15_000] * 3, embeddings.batch_chars(cfg)) == [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+    ]
 
 
 def test_limiter_keeps_to_requests_per_minute(clock):
@@ -327,7 +383,10 @@ def test_limiter_keeps_to_tokens_per_minute(clock):
 
 def test_limiter_learns_characters_per_token(clock):
     limiter = embeddings.RateLimiter(tpm_budget=100, rpm=10)
-    assert limiter.estimate(["x" * 250]) == int(250 / embeddings.CHARS_PER_TOKEN_GUESS * 1.1) + 1
+    assert (
+        limiter.estimate(["x" * 250])
+        == int(250 / embeddings.CHARS_PER_TOKEN_GUESS * 1.1) + 1
+    )
     entry = limiter.wait_for(limiter.estimate(["x" * 400]))
     limiter.billed(entry, ["x" * 400], 100)
     assert entry[1] == 100 and limiter.chars_per_token() == 4
@@ -336,9 +395,13 @@ def test_limiter_learns_characters_per_token(clock):
 
 
 def test_requests_are_paced_to_the_rate_limit(voyage):
-    vectors, _ = embeddings.embed(["x" * 20_000] * 4, embeddings.config())  # one per batch
+    vectors, _ = embeddings.embed(
+        ["x" * 20_000] * 4, embeddings.config()
+    )  # one per batch
     assert vectors.shape == (4, 1024) and len(voyage.requests) == 4
-    assert voyage.clock.sleeps == [pytest.approx(60.5)]  # the 4th waits for the RPM window
+    assert voyage.clock.sleeps == [
+        pytest.approx(60.5)
+    ]  # the 4th waits for the RPM window
 
 
 def test_429_waits_for_retry_after(voyage):
@@ -364,12 +427,16 @@ def test_429_gives_up_after_its_attempts(voyage):
 
 
 def test_describe_plan_estimates_time(env):
-    plan = embeddings.Plan(embed=[embeddings.StaleTicket(1, "1", "x" * 520_000, "d", {})])
+    plan = embeddings.Plan(
+        embed=[embeddings.StaleTicket(1, "1", "x" * 520_000, "d", {})]
+    )
     assert "about 14 minute(s)" in embeddings.describe_plan(plan, embeddings.config())
 
 
 @pytest.mark.parametrize("status", [400, 422, 429, 500])
-def test_client_error_details_echoing_ticket_text_are_never_exposed(voyage, caplog, status):
+def test_client_error_details_echoing_ticket_text_are_never_exposed(
+    voyage, caplog, status
+):
     """The API may echo the rejected input in `detail`; it must not reach messages or logs."""
     secret = "Student Jane Doe, DOB 2012-04-01, can't see her test"
     voyage.respond = lambda body: (status, {"detail": f"Invalid input: {secret}"})
@@ -383,7 +450,9 @@ def test_client_error_details_echoing_ticket_text_are_never_exposed(voyage, capl
         embeddings.logger.remove(handler)
     error = raised.value
     assert f"HTTP {status}" in str(error)
-    assert "Jane" not in str(error) and all("Jane" not in str(v) for v in vars(error).values())
+    assert "Jane" not in str(error) and all(
+        "Jane" not in str(v) for v in vars(error).values()
+    )
     assert error.__cause__ is None and error.__suppress_context__
     assert all("Jane" not in line for line in logged)
     assert "Jane" not in caplog.text
@@ -398,7 +467,9 @@ class _Reply(io.BytesIO):
 
 
 def _http_error(code, body=b"", headers=None):
-    return urllib.error.HTTPError("https://x", code, "msg", headers or {}, io.BytesIO(body))
+    return urllib.error.HTTPError(
+        "https://x", code, "msg", headers or {}, io.BytesIO(body)
+    )
 
 
 def _attempts(monkeypatch, outcomes):
@@ -417,21 +488,31 @@ def _attempts(monkeypatch, outcomes):
     return calls
 
 
-@pytest.mark.parametrize("error", [
-    _http_error(429), _http_error(503),
-    urllib.error.URLError(ConnectionRefusedError()), urllib.error.URLError(socket.gaierror("no such host")),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        _http_error(429),
+        _http_error(503),
+        urllib.error.URLError(ConnectionRefusedError()),
+        urllib.error.URLError(socket.gaierror("no such host")),
+    ],
+)
 def test_retries_only_when_nothing_was_processed(monkeypatch, error):
     calls = _attempts(monkeypatch, [error, b'{"data": []}'])
     assert embeddings.post_json("https://x", "k", {}) == {"data": []}
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("error", [
-    _http_error(500), _http_error(401, b'{"detail":"bad key"}'),
-    TimeoutError("read timed out"), ConnectionResetError("reset"),
-    urllib.error.URLError(TimeoutError("timed out")),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        _http_error(500),
+        _http_error(401, b'{"detail":"bad key"}'),
+        TimeoutError("read timed out"),
+        ConnectionResetError("reset"),
+        urllib.error.URLError(TimeoutError("timed out")),
+    ],
+)
 def test_does_not_retry_failures_that_may_have_been_billed(monkeypatch, error):
     calls = _attempts(monkeypatch, [error, b'{"data": []}'])
     with pytest.raises(embeddings.ApiError) as raised:
@@ -441,7 +522,10 @@ def test_does_not_retry_failures_that_may_have_been_billed(monkeypatch, error):
 
 
 def test_redirects_are_refused(monkeypatch):
-    calls = _attempts(monkeypatch, [_http_error(307, headers={"Location": "http://evil.example/collect"})])
+    calls = _attempts(
+        monkeypatch,
+        [_http_error(307, headers={"Location": "http://evil.example/collect"})],
+    )
     with pytest.raises(embeddings.ApiError, match="not following"):
         embeddings.post_json("https://x", "k", {"input": ["secret"]})
     assert len(calls) == 1
@@ -449,7 +533,10 @@ def test_redirects_are_refused(monkeypatch):
 
 def test_opener_does_not_follow_redirects():
     handler = embeddings._NoRedirect()
-    assert handler.redirect_request(None, None, 302, "Found", {}, "http://evil.example/") is None
+    assert (
+        handler.redirect_request(None, None, 302, "Found", {}, "http://evil.example/")
+        is None
+    )
 
 
 # --- tickets ----------------------------------------------------------------------
@@ -458,35 +545,63 @@ def test_opener_does_not_follow_redirects():
 @pytest.fixture
 def tickets():
     collection = mongomock.MongoClient().db.tickets
-    collection.insert_many([
-        _ticket("1", "Login fails", [_comment("I can't log in", role="requester")]),
-        _ticket("2", "Export broken", [_comment("CSV export is empty", role="requester")]),
-        _ticket("3", "", []),  # no text: never embedded
-    ])
+    collection.insert_many(
+        [
+            _ticket("1", "Login fails", [_comment("I can't log in", role="requester")]),
+            _ticket(
+                "2",
+                "Export broken",
+                [_comment("CSV export is empty", role="requester")],
+            ),
+            _ticket("3", "", []),  # no text: never embedded
+        ]
+    )
     return collection
 
 
 def _fake_embed(calls):
     def embed_fn(texts, cfg):
         calls.append(list(texts))
-        return np.full((len(texts), cfg.dimensions), 0.5, dtype=np.float32), 10 * len(texts)
+        return np.full((len(texts), cfg.dimensions), 0.5, dtype=np.float32), 10 * len(
+            texts
+        )
+
     return embed_fn
 
 
 def _backfill(tickets, cfg, calls, **kwargs):
-    return embeddings.run_backfill(tickets, cfg, embeddings.plan_backfill(tickets, cfg),
-                                   embed_fn=_fake_embed(calls), **kwargs)
+    return embeddings.run_backfill(
+        tickets,
+        cfg,
+        embeddings.plan_backfill(tickets, cfg),
+        embed_fn=_fake_embed(calls),
+        **kwargs,
+    )
 
 
 def test_backfill_stores_vectors_and_skips_current(env, tickets):
     cfg, calls = embeddings.config(), []
     summary = _backfill(tickets, cfg, calls)
-    assert summary == {"embedded": 2, "changed": 0, "cleared": 0, "tokens": 20, "cancelled": 0, "complete": True}
+    assert summary == {
+        "embedded": 2,
+        "changed": 0,
+        "cleared": 0,
+        "tokens": 20,
+        "cancelled": 0,
+        "complete": True,
+    }
     doc = tickets.find_one({"zendesk_id": "1"})
     assert len(doc["embedding"]) == 1024
-    assert {k: doc["embedding_meta"][k] for k in ("endpoint", "model", "dimensions")} == {
-        "endpoint": embeddings.default_url(), "model": "voyage-3.5", "dimensions": 1024}
-    assert doc["embedding_meta"]["text_sha256"] == embeddings.text_hash("Login fails\n\nI can't log in")
+    assert {
+        k: doc["embedding_meta"][k] for k in ("endpoint", "model", "dimensions")
+    } == {
+        "endpoint": embeddings.default_url(),
+        "model": "voyage-3.5",
+        "dimensions": 1024,
+    }
+    assert doc["embedding_meta"]["text_sha256"] == embeddings.text_hash(
+        "Login fails\n\nI can't log in"
+    )
     assert "embedding" not in tickets.find_one({"zendesk_id": "3"})
 
     assert _backfill(tickets, cfg, calls)["embedded"] == 0
@@ -497,10 +612,15 @@ def test_changed_text_endpoint_model_or_dimensions_re_embed(env, tickets):
     cfg, calls = embeddings.config(), []
     _backfill(tickets, cfg, calls)
 
-    tickets.update_one({"zendesk_id": "1"}, {"$set": {"subject": "Login fails on Safari"}})
+    tickets.update_one(
+        {"zendesk_id": "1"}, {"$set": {"subject": "Login fails on Safari"}}
+    )
     assert [t.zendesk_id for t in embeddings.plan_backfill(tickets, cfg).embed] == ["1"]
-    for name, value in [("EMBEDDING_DIMENSIONS", "512"), ("EMBEDDING_MODEL", "voyage-3.5-lite"),
-                        ("EMBEDDING_API_URL", "https://proxy.example.com/v1/embeddings")]:
+    for name, value in [
+        ("EMBEDDING_DIMENSIONS", "512"),
+        ("EMBEDDING_MODEL", "voyage-3.5-lite"),
+        ("EMBEDDING_API_URL", "https://proxy.example.com/v1/embeddings"),
+    ]:
         env.setenv(name, value)
         assert len(embeddings.plan_backfill(tickets, embeddings.config()).embed) == 2
         env.delenv(name)
@@ -509,7 +629,9 @@ def test_changed_text_endpoint_model_or_dimensions_re_embed(env, tickets):
 def test_only_the_approved_plan_is_sent(env, tickets):
     cfg, calls = embeddings.config(), []
     plan = embeddings.plan_backfill(tickets, cfg)
-    tickets.insert_one(_ticket("4", "Added after the count", [_comment("new", role="requester")]))
+    tickets.insert_one(
+        _ticket("4", "Added after the count", [_comment("new", role="requester")])
+    )
     embeddings.run_backfill(tickets, cfg, plan, embed_fn=_fake_embed(calls))
     assert sum(len(c) for c in calls) == 2
     assert "embedding" not in tickets.find_one({"zendesk_id": "4"})
@@ -520,7 +642,10 @@ def test_ticket_edited_during_embedding_is_not_overwritten(env, tickets):
     plan = embeddings.plan_backfill(tickets, cfg)
 
     def edit_while_embedding(texts, cfg):
-        tickets.update_one({"zendesk_id": "1"}, {"$push": {"transcript": _comment("more detail", role="requester")}})
+        tickets.update_one(
+            {"zendesk_id": "1"},
+            {"$push": {"transcript": _comment("more detail", role="requester")}},
+        )
         return np.zeros((len(texts), cfg.dimensions), dtype=np.float32), 0
 
     summary = embeddings.run_backfill(tickets, cfg, plan, embed_fn=edit_while_embedding)
@@ -542,23 +667,40 @@ def test_tickets_whose_text_is_gone_lose_their_vectors(env, tickets):
 
 def test_duplicate_zendesk_ids_each_get_their_own_vector(env):
     collection = mongomock.MongoClient().db.tickets
-    collection.insert_many([_ticket("7", "First copy", []), _ticket("7", "Second copy", [])])
+    collection.insert_many(
+        [_ticket("7", "First copy", []), _ticket("7", "Second copy", [])]
+    )
     cfg = embeddings.config()
 
     def by_text(texts, cfg):
-        return np.array([[float(len(t))] * cfg.dimensions for t in texts], dtype=np.float32), 0
+        return (
+            np.array(
+                [[float(len(t))] * cfg.dimensions for t in texts], dtype=np.float32
+            ),
+            0,
+        )
 
-    embeddings.run_backfill(collection, cfg, embeddings.plan_backfill(collection, cfg), embed_fn=by_text)
+    embeddings.run_backfill(
+        collection, cfg, embeddings.plan_backfill(collection, cfg), embed_fn=by_text
+    )
     for doc in collection.find():
         assert doc["embedding"][0] == float(len(doc["subject"]))
-        assert doc["embedding_meta"]["text_sha256"] == embeddings.text_hash(doc["subject"])
+        assert doc["embedding_meta"]["text_sha256"] == embeddings.text_hash(
+            doc["subject"]
+        )
 
 
 def test_backfill_stops_between_batches_and_keeps_progress(env, tickets, monkeypatch):
     monkeypatch.setattr(embeddings, "MAX_BATCH_TEXTS", 1)
     calls, stops = [], iter([False, True])
-    summary = _backfill(tickets, embeddings.config(), calls, should_stop=lambda: next(stops))
-    assert (summary["embedded"], summary["cancelled"], summary["complete"]) == (1, 1, False)
+    summary = _backfill(
+        tickets, embeddings.config(), calls, should_stop=lambda: next(stops)
+    )
+    assert (summary["embedded"], summary["cancelled"], summary["complete"]) == (
+        1,
+        1,
+        False,
+    )
     assert tickets.count_documents({"embedding": {"$exists": True}}) == 1
 
 
@@ -573,7 +715,9 @@ def test_embed_error_keeps_earlier_batches(env, tickets, monkeypatch):
 
     cfg = embeddings.config()
     with pytest.raises(embeddings.ApiError):
-        embeddings.run_backfill(tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=flaky)
+        embeddings.run_backfill(
+            tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=flaky
+        )
     assert tickets.count_documents({"embedding": {"$exists": True}}) == 1
 
 
@@ -589,16 +733,23 @@ def test_only_one_backfill_at_a_time(env, tickets):
     embeddings.run_backfill(tickets, cfg, plan, embed_fn=nested)
     # Released afterwards.
     assert tickets.database[embeddings.LOCK_COLLECTION].count_documents({}) == 0
-    embeddings.run_backfill(tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=_fake_embed([]))
+    embeddings.run_backfill(
+        tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=_fake_embed([])
+    )
 
 
 def test_expired_lock_is_taken_over(env, tickets):
-    tickets.database[embeddings.LOCK_COLLECTION].insert_one({
-        "_id": embeddings.LOCK_ID, "holder": "crashed",
-        "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
-    })
+    tickets.database[embeddings.LOCK_COLLECTION].insert_one(
+        {
+            "_id": embeddings.LOCK_ID,
+            "holder": "crashed",
+            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+        }
+    )
     cfg = embeddings.config()
-    summary = embeddings.run_backfill(tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=_fake_embed([]))
+    summary = embeddings.run_backfill(
+        tickets, cfg, embeddings.plan_backfill(tickets, cfg), embed_fn=_fake_embed([])
+    )
     assert summary["complete"]
 
 
@@ -617,8 +768,13 @@ class FakeSearchIndexes:
 
     def create_search_index(self, model):
         self.created.append(model.document)
-        self.indexes.append({"name": model.document["name"], "type": model.document["type"],
-                             "latestDefinition": model.document["definition"]})
+        self.indexes.append(
+            {
+                "name": model.document["name"],
+                "type": model.document["type"],
+                "latestDefinition": model.document["definition"],
+            }
+        )
 
 
 def test_ensure_vector_index_creates_once():
@@ -632,20 +788,57 @@ def test_ensure_vector_index_creates_once():
 
 
 def _index(definition, type_="vectorSearch"):
-    return FakeSearchIndexes([{"name": "tickets_vector", "type": type_, "latestDefinition": definition}])
+    return FakeSearchIndexes(
+        [{"name": "tickets_vector", "type": type_, "latestDefinition": definition}]
+    )
 
 
-@pytest.mark.parametrize("definition, type_, problem", [
-    (search.vector_index_definition(512), "vectorSearch", "numDimensions is 512"),
-    ({"fields": [{**search.vector_index_definition(1024)["fields"][0], "similarity": "euclidean"},
-                 search.vector_index_definition(1024)["fields"][1]]}, "vectorSearch", "similarity"),
-    ({"fields": [{**search.vector_index_definition(1024)["fields"][0], "path": "vec"},
-                 search.vector_index_definition(1024)["fields"][1]]}, "vectorSearch", "no vector field on 'embedding'"),
-    ({"fields": search.vector_index_definition(1024)["fields"][:1]}, "vectorSearch", "no filter field on 'status'"),
-    ({"fields": search.vector_index_definition(1024)["fields"] + [{"type": "filter", "path": "tags"}]},
-     "vectorSearch", "unexpected filter field on 'tags'"),
-    (search.vector_index_definition(1024), "search", "not vectorSearch"),
-])
+@pytest.mark.parametrize(
+    "definition, type_, problem",
+    [
+        (search.vector_index_definition(512), "vectorSearch", "numDimensions is 512"),
+        (
+            {
+                "fields": [
+                    {
+                        **search.vector_index_definition(1024)["fields"][0],
+                        "similarity": "euclidean",
+                    },
+                    search.vector_index_definition(1024)["fields"][1],
+                ]
+            },
+            "vectorSearch",
+            "similarity",
+        ),
+        (
+            {
+                "fields": [
+                    {
+                        **search.vector_index_definition(1024)["fields"][0],
+                        "path": "vec",
+                    },
+                    search.vector_index_definition(1024)["fields"][1],
+                ]
+            },
+            "vectorSearch",
+            "no vector field on 'embedding'",
+        ),
+        (
+            {"fields": search.vector_index_definition(1024)["fields"][:1]},
+            "vectorSearch",
+            "no filter field on 'status'",
+        ),
+        (
+            {
+                "fields": search.vector_index_definition(1024)["fields"]
+                + [{"type": "filter", "path": "tags"}]
+            },
+            "vectorSearch",
+            "unexpected filter field on 'tags'",
+        ),
+        (search.vector_index_definition(1024), "search", "not vectorSearch"),
+    ],
+)
 def test_any_definition_difference_is_a_mismatch(definition, type_, problem):
     with pytest.raises(search.VectorIndexMismatch, match=problem):
         search.ensure_vector_index(_index(definition, type_), 1024)
@@ -659,12 +852,15 @@ def test_index_status_checks_before_embedding(env, monkeypatch):
     assert embeddings.index_status(None, embeddings.config()) == "unavailable"
 
 
-@pytest.mark.parametrize("summary, status, expected", [
-    ({"complete": True, "changed": 0}, "missing", "tickets_vector created"),
-    ({"complete": False, "changed": 0}, "missing", "not created yet"),
-    ({"complete": True, "changed": 1}, "missing", "not created yet"),
-    ({"complete": True, "changed": 0}, "unavailable", "skipped"),
-])
+@pytest.mark.parametrize(
+    "summary, status, expected",
+    [
+        ({"complete": True, "changed": 0}, "missing", "tickets_vector created"),
+        ({"complete": False, "changed": 0}, "missing", "not created yet"),
+        ({"complete": True, "changed": 1}, "missing", "not created yet"),
+        ({"complete": True, "changed": 0}, "unavailable", "skipped"),
+    ],
+)
 def test_index_created_only_after_a_complete_backfill(env, summary, status, expected):
     tickets = FakeSearchIndexes()
     embeddings.finish_index(tickets, embeddings.config(), summary, status)
@@ -711,7 +907,9 @@ def cli(env, tickets, monkeypatch):
     import decision_engine.persistence
 
     monkeypatch.setattr("settings.load", lambda: None)
-    monkeypatch.setattr(decision_engine.persistence, "get_tickets_collection", lambda: tickets)
+    monkeypatch.setattr(
+        decision_engine.persistence, "get_tickets_collection", lambda: tickets
+    )
     calls = []
 
     def fake_embed(texts, cfg, input_type="document"):
@@ -723,15 +921,26 @@ def cli(env, tickets, monkeypatch):
 
 
 def _existing_index(monkeypatch, dimensions):
-    index = {"name": search.VECTOR_INDEX, "type": "vectorSearch",
-             "latestDefinition": search.vector_index_definition(dimensions)}
-    monkeypatch.setattr(search, "_search_indexes", lambda tickets: {search.VECTOR_INDEX: index})
+    index = {
+        "name": search.VECTOR_INDEX,
+        "type": "vectorSearch",
+        "latestDefinition": search.vector_index_definition(dimensions),
+    }
+    monkeypatch.setattr(
+        search, "_search_indexes", lambda tickets: {search.VECTOR_INDEX: index}
+    )
 
 
-def test_cli_dimension_change_aborts_before_paid_calls_or_writes(cli, tickets, monkeypatch, capsys):
+def test_cli_dimension_change_aborts_before_paid_calls_or_writes(
+    cli, tickets, monkeypatch, capsys
+):
     # Embedded at 1024 with a matching index, then settings change to 512.
-    embeddings.run_backfill(tickets, embeddings.config(), embeddings.plan_backfill(tickets, embeddings.config()),
-                            embed_fn=lambda texts, cfg: (np.ones((len(texts), 1024), dtype=np.float32), 0))
+    embeddings.run_backfill(
+        tickets,
+        embeddings.config(),
+        embeddings.plan_backfill(tickets, embeddings.config()),
+        embed_fn=lambda texts, cfg: (np.ones((len(texts), 1024), dtype=np.float32), 0),
+    )
     _existing_index(monkeypatch, 1024)
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "512")
     cli.clear()
@@ -739,10 +948,14 @@ def test_cli_dimension_change_aborts_before_paid_calls_or_writes(cli, tickets, m
     assert embeddings.main(["backfill", "--yes"]) == 2
     assert "numDimensions is 1024, expected 512" in capsys.readouterr().err
     assert cli == []  # no paid calls
-    assert {len(d["embedding"]) for d in tickets.find({"embedding": {"$exists": True}})} == {1024}
+    assert {
+        len(d["embedding"]) for d in tickets.find({"embedding": {"$exists": True}})
+    } == {1024}
 
 
-def test_cli_without_atlas_search_embeds_and_skips_the_index(cli, tickets, monkeypatch, capsys):
+def test_cli_without_atlas_search_embeds_and_skips_the_index(
+    cli, tickets, monkeypatch, capsys
+):
     def unavailable(tickets):
         raise search.SearchUnavailable("no Atlas Search")
 
@@ -752,19 +965,35 @@ def test_cli_without_atlas_search_embeds_and_skips_the_index(cli, tickets, monke
     assert sum(len(c) for c in cli) == 2
 
 
-def test_cli_index_changed_during_the_run_is_an_error(cli, tickets, monkeypatch, capsys):
-    states = iter([{}, {search.VECTOR_INDEX: {"name": search.VECTOR_INDEX, "type": "vectorSearch",
-                                              "latestDefinition": search.vector_index_definition(256)}}])
+def test_cli_index_changed_during_the_run_is_an_error(
+    cli, tickets, monkeypatch, capsys
+):
+    states = iter(
+        [
+            {},
+            {
+                search.VECTOR_INDEX: {
+                    "name": search.VECTOR_INDEX,
+                    "type": "vectorSearch",
+                    "latestDefinition": search.vector_index_definition(256),
+                }
+            },
+        ]
+    )
     monkeypatch.setattr(search, "_search_indexes", lambda tickets: next(states))
     assert embeddings.main(["backfill", "--yes"]) == 2
     captured = capsys.readouterr()
     assert "Embedded: 2" in captured.out and "numDimensions is 256" in captured.err
 
 
-def test_cli_creates_the_index_after_a_complete_backfill(cli, tickets, monkeypatch, capsys):
+def test_cli_creates_the_index_after_a_complete_backfill(
+    cli, tickets, monkeypatch, capsys
+):
     created = []
     monkeypatch.setattr(search, "_search_indexes", lambda tickets: {})
-    monkeypatch.setattr(search, "ensure_vector_index", lambda t, d: created.append(d) or True)
+    monkeypatch.setattr(
+        search, "ensure_vector_index", lambda t, d: created.append(d) or True
+    )
     assert embeddings.main(["backfill", "--yes"]) == 0
     assert created == [1024]
     assert "tickets_vector created" in capsys.readouterr().out

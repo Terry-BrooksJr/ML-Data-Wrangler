@@ -3,7 +3,6 @@ import os
 import sys
 
 import pytest
-
 import settings
 
 
@@ -31,11 +30,16 @@ def test_blank_value_removes_setting(config):
     settings.save({"MONGO_DB": "other", "MONGO_URI": "mongodb://h"})
     settings.save({"MONGO_DB": "  ", "MONGO_URI": "mongodb://h"})
     assert "MONGO_DB" not in os.environ
-    assert json.loads(config.read_text()) == {"MONGO_URI": "mongodb://h", "MONGO_DB": None}
+    assert json.loads(config.read_text()) == {
+        "MONGO_URI": "mongodb://h",
+        "MONGO_DB": None,
+    }
 
 
 def test_restart_needed_only_for_import_time_values(config):
-    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "y"}) == ["LESSONS_COLLECTION"]
+    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "y"}) == [
+        "LESSONS_COLLECTION"
+    ]
 
 
 def test_restart_reminder_survives_later_saves_until_restart(config, monkeypatch):
@@ -43,7 +47,9 @@ def test_restart_reminder_survives_later_saves_until_restart(config, monkeypatch
     settings.load()  # startup: LESSONS_COLLECTION unset
     assert settings.save({"LESSONS_COLLECTION": "x"}) == ["LESSONS_COLLECTION"]
     # Saving again without restarting: the running code still has the old value.
-    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "z"}) == ["LESSONS_COLLECTION"]
+    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "z"}) == [
+        "LESSONS_COLLECTION"
+    ]
     # Changing it back to what's running clears the reminder.
     assert settings.save({"LESSONS_COLLECTION": ""}) == []
 
@@ -82,7 +88,10 @@ def test_failed_write_keeps_previous_settings(config, monkeypatch):
     assert [p.name for p in config.parent.iterdir()] == ["settings.json"]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="mode bits don't protect files on Windows; see the ACL test")
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="mode bits don't protect files on Windows; see the ACL test",
+)
 def test_settings_file_is_owner_only_on_posix(config):
     settings.save({"MONGO_URI": "mongodb://h"})
     assert oct(config.stat().st_mode & 0o777) == "0o600"
@@ -121,7 +130,9 @@ def test_windows_acl_is_owner_only(config):
     import subprocess
 
     settings.save({"MONGO_URI": "mongodb://h"})
-    acl = subprocess.run(["icacls", str(config)], capture_output=True, text=True, check=True).stdout
+    acl = subprocess.run(
+        ["icacls", str(config)], capture_output=True, text=True, check=True
+    ).stdout
     assert "OWNER RIGHTS" in acl
     assert "Users" not in acl and "Everyone" not in acl
 
@@ -161,7 +172,9 @@ def test_corrupt_settings_file_is_set_aside(config, monkeypatch, contents):
     assert settings.load_error and str(config) in settings.load_error
     assert not config.exists()
     [backup] = config.parent.glob("settings.json.corrupt-*")
-    assert backup.read_bytes() == (contents if isinstance(contents, bytes) else contents.encode())
+    assert backup.read_bytes() == (
+        contents if isinstance(contents, bytes) else contents.encode()
+    )
 
     settings.save({"MONGO_URI": "mongodb://h"})
     settings.load()
@@ -170,17 +183,29 @@ def test_corrupt_settings_file_is_set_aside(config, monkeypatch, contents):
 
 
 def test_describe_missing_names_only_affected_features():
-    engine_only = settings.describe_missing(["CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME"])
-    assert "CHEAPER_INFERENCE_API_KEY, CHEAPER_INFERENCE_PRIMARY_MODEL_NAME" in engine_only
+    engine_only = settings.describe_missing(
+        ["CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME"]
+    )
+    assert (
+        "CHEAPER_INFERENCE_API_KEY, CHEAPER_INFERENCE_PRIMARY_MODEL_NAME" in engine_only
+    )
     assert "Decision Engine" in engine_only
     assert "Write Tickets to MongoDB" not in engine_only
 
     with_mongo = settings.describe_missing(["MONGO_URI", "CHEAPER_INFERENCE_API_KEY"])
     first, second = with_mongo.split("\n\n")
     assert "MONGO_URI" in first and "Write Tickets to MongoDB" in first
-    assert "CHEAPER_INFERENCE_API_KEY" in second and "Write Tickets to MongoDB" not in second
+    assert (
+        "CHEAPER_INFERENCE_API_KEY" in second
+        and "Write Tickets to MongoDB" not in second
+    )
 
 
 def test_storage_settings_are_not_required():
     required = {s.name for s in settings.SETTINGS if s.required}
-    assert not required & {"MODEL_BUCKET", "B2_KEY_ID", "B2_APPLICATION_KEY", "B2_ENDPOINT_URL"}
+    assert not required & {
+        "MODEL_BUCKET",
+        "B2_KEY_ID",
+        "B2_APPLICATION_KEY",
+        "B2_ENDPOINT_URL",
+    }

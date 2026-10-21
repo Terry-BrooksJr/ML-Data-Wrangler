@@ -3,32 +3,40 @@ import os
 import pathlib
 import sys
 import time
-from typing import Any, Callable, List, Tuple, Union
 from datetime import datetime
+from typing import Any, Callable, List, Tuple, Union
+
+import settings
 from loguru import logger
-from PyQt5.QtCore import QRect, pyqtSignal, pyqtSlot, QThread, QCoreApplication, QObject, QMutex, QTimer
-from PyQt5.QtGui import QFont, QIcon, QKeySequence
 from PyQt5 import QtCore
+from PyQt5.QtCore import (
+    pyqtSignal,
+    pyqtSlot,
+    QCoreApplication,
+    QMutex,
+    QObject,
+    QRect,
+    QThread,
+    QTimer,
+)
+from PyQt5.QtGui import QFont, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
+    QAction,
     QApplication,
+    QDialog,
     QFileDialog,
-    QFormLayout,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
-    QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
-    QPushButton,
+    QProgressDialog,
+    QScrollArea,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
-    QProgressDialog,
-    QProgressBar,
-    QDialog,
-    QTabWidget,
-    QAction,
 )
-import settings
 
 # Before the local imports: topic_store and decision_engine read env vars at
 # import time. See settings.load() for which source wins.
@@ -38,8 +46,10 @@ settings.use_workspace()
 import bertopic_model
 import bertopic_runs
 import chart_viewer
+import en_core_web_lg
 import macos
 import model_storage
+import tag_normalizer
 import theme
 import topic_store
 from bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
@@ -47,11 +57,11 @@ from decision_engine.persistence import get_database, reset_clients
 from LDA_logic import LatentDirichletAllocator, stopwords
 from results_dialog import ResultsDialog
 from settings_dialog import SettingsDialog
+from tag_tab import TagTab
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
+from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 from wrangler import DataWrangler, process_progress
-import en_core_web_lg
-
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
@@ -79,15 +89,17 @@ class MainWindow(QMainWindow, QDialog):
         allocator (LatentDirichletAllocator): An instance of the LatentDirichletAllocator for topic modeling.
         main_layout (QVBoxLayout): The main layout of the application.
         instruction_layout (QVBoxLayout): Layout for displaying instructions and warnings.
-        data_entry_layout (QVBoxLayout): Layout for data entry components.
-        ticket_file_button (QPushButton): Button for selecting the ticket file.
-        comments_dir_button (QPushButton): Button for selecting the comments directory.
-        process_button (QPushButton): Button for processing the data.
-        train_model_button (QPushButton): Button for training the model.
-        num_topics_input (QLineEdit): Input field for the number of topics.
-        iterations_input (QLineEdit): Input field for the number of iterations.
-        passes_input (QLineEdit): Input field for the number of passes.
+        data_entry_layout (QVBoxLayout): The Topic Modeling tab's cards.
+        ticket_file_button (Button): Button for selecting the ticket file.
+        comments_dir_button (Button): Button for selecting the comments directory.
+        process_button (Button): Button for processing the data.
+        train_model_button (Button): Button for training the model.
+        num_topics_input (LineEdit): Input field for the number of topics.
+        iterations_input (LineEdit): Input field for the number of iterations.
+        passes_input (LineEdit): Input field for the number of passes.
         log_output (QTextEdit): Text area for displaying log output.
+
+    Buttons, line edits and progress bars are PyQt-SiliconUI widgets (see widgets.py).
     """
 
     def __init__(self, windowName: str) -> None:
@@ -122,7 +134,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
-        self.setGeometry(100, 100, 900, 750)
+        self.setGeometry(100, 100, 1000, 860)
 
         # Main layout
         self.main_layout = QVBoxLayout()
@@ -155,36 +167,37 @@ class MainWindow(QMainWindow, QDialog):
             None
         """
         # Instructions and warnings
-        instruction_label = QLabel(
-            "Welcome to Lasso. \n\n"
-            "Identify two file locations.\n"
-            "1. The Ticket File Path from the ZenDesk Tickets API.\n"
-            "2. The path to the comments directory with JSON comments for each ticket.\n\n"
-            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs Mongo URI in Settings; Preferences on macOS)."
+        instruction_label = hint(
+            "Choose the ticket file from the Zendesk Tickets API and the directory of "
+            "JSON comments for each ticket, then Process Data. Write Tickets to MongoDB "
+            "loads them into the decision engine's tickets collection (needs Mongo URI "
+            "in Settings; Preferences on macOS)."
         )
-        warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
-        warning_label.setStyleSheet("color: red;")
+        warning_label = hint(
+            "Ticket and comment files must be in JSON format.", role="warning"
+        )
 
         self.instruction_layout.addWidget(instruction_label)
         self.instruction_layout.addWidget(warning_label)
 
         # Buttons
-        self.wrangling_input_form = QFormLayout()
-        self.ticket_file_button = QPushButton("Select Path to Ticket File")
-        self.ticket_file = QLineEdit()
+        self.ticket_file_button = Button("Select Path to Ticket File")
+        self.ticket_file = LineEdit("Ticket file")
+        self.ticket_file.setPlaceholderText("Not chosen yet")
 
-        self.comments_dir_button = QPushButton("Select Path to Comments Directory")
-        self.comments_dir = QLineEdit()
+        self.comments_dir_button = Button("Select Path to Comments Directory")
+        self.comments_dir = LineEdit("Comments")
+        self.comments_dir.setPlaceholderText("Not chosen yet")
 
-        self.process_button = QPushButton("Process Data")
-        self.mongo_button = QPushButton("Write Tickets to MongoDB")
-        self.train_model_button = QPushButton("Train Model")
+        self.process_button = Button("Process Data", primary=True)
+        self.mongo_button = Button("Write Tickets to MongoDB")
+        self.train_model_button = Button("Train Model", primary=True)
         # Saved runs survive a restart, so these work without processing data.
-        self.previous_runs_button = QPushButton("Show Previous Run…")
-        self.assign_topics_button = QPushButton("Assign Topics from Saved Run…")
+        self.previous_runs_button = Button("Show Previous Run…")
+        self.assign_topics_button = Button("Assign Topics from Saved Run…")
         # BERTopic reads tickets and their embeddings from Mongo, not the files above.
-        self.bertopic_button = QPushButton("Train BERTopic Model…")
-        self.bertopic_runs_button = QPushButton("Show Previous BERTopic Run…")
+        self.bertopic_button = Button("Train BERTopic Model…", primary=True)
+        self.bertopic_runs_button = Button("Show Previous BERTopic Run…")
 
         self.comments_dir.setReadOnly(True)
         self.ticket_file.setReadOnly(True)
@@ -200,11 +213,11 @@ class MainWindow(QMainWindow, QDialog):
         self.bertopic_runs_button.clicked.connect(self.show_previous_bertopic_run)
         self.train_model_button.setEnabled(False)
 
-        # Form layout for inputs
-        self.form_layout = QFormLayout()
-        self.num_topics_input = QLineEdit()
-        self.iterations_input = QLineEdit()
-        self.passes_input = QLineEdit()
+        # The training inputs, side by side
+        self.form_layout = QHBoxLayout()
+        self.num_topics_input = LineEdit("Number of Topics")
+        self.iterations_input = LineEdit("Iterations")
+        self.passes_input = LineEdit("Passes")
 
         for input_field in [
             self.num_topics_input,
@@ -213,18 +226,15 @@ class MainWindow(QMainWindow, QDialog):
         ]:
             input_field.setClearButtonEnabled(True)
             input_field.setEnabled(False)
+            self.form_layout.addWidget(input_field)
 
-        disabled_notice = QLabel(
+        disabled_notice = hint(
             "The next three inputs are disabled until data is processed."
         )
-        self.form_layout.addRow(disabled_notice)
-        self.form_layout.addRow("Number of Topics:", self.num_topics_input)
-        self.form_layout.addRow("Iterations:", self.iterations_input)
-        self.form_layout.addRow("Passes:", self.passes_input)
 
         # Log output display
-        self.log_output = QTextEdit()
-        self.log_output.setObjectName(theme.LOG_PANE)  # styled as a dark console in every theme
+        self.log_output = use_si_scrollbars(QTextEdit())
+        self.log_output.setObjectName(theme.LOG_PANE)  # styled as a console
         self.log_output.setReadOnly(True)
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
@@ -232,37 +242,79 @@ class MainWindow(QMainWindow, QDialog):
         self.log_output.setPlainText(
             f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Lasso on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
         )
-        # Arrange layout
-        self.data_entry_layout.addWidget(self.ticket_file_button)
-        self.data_entry_layout.addWidget(self.comments_dir_button)
-        self.data_entry_layout.addWidget(self.process_button)
-        self.data_entry_layout.addWidget(self.mongo_button)
-        self.data_entry_layout.addLayout(self.form_layout)
-        self.data_entry_layout.addWidget(self.train_model_button)
-        self.data_entry_layout.addWidget(self.previous_runs_button)
-        self.data_entry_layout.addWidget(self.assign_topics_button)
-        self.data_entry_layout.addWidget(QLabel("Embedding topics (BERTopic, on tickets in MongoDB):"))
-        self.data_entry_layout.addWidget(self.bertopic_button)
-        self.data_entry_layout.addWidget(self.bertopic_runs_button)
+        # Arrange layout: one card per step, ticket data first.
+        data_card = Card("Ticket Data")
+        data_card.body.addLayout(self.instruction_layout)
+        for field, button in [
+            (self.ticket_file, self.ticket_file_button),
+            (self.comments_dir, self.comments_dir_button),
+        ]:
+            row = QHBoxLayout()
+            row.addWidget(field, stretch=1)
+            row.addWidget(button)
+            data_card.body.addLayout(row)
+        data_card.body.addLayout(button_row(self.process_button, self.mongo_button))
+
+        lda_card = Card("LDA Topic Model")
+        lda_card.body.addWidget(disabled_notice)
+        lda_card.body.addLayout(self.form_layout)
+        lda_card.body.addLayout(
+            button_row(
+                self.train_model_button,
+                self.previous_runs_button,
+                self.assign_topics_button,
+            )
+        )
+
+        bertopic_card = Card("Embedding Topics (BERTopic)")
+        bertopic_card.body.addWidget(hint("Trains on the tickets in MongoDB."))
+        bertopic_card.body.addLayout(
+            button_row(self.bertopic_button, self.bertopic_runs_button)
+        )
+
+        self.data_entry_layout.setSpacing(12)
+        self.data_entry_layout.addWidget(data_card)
+        self.data_entry_layout.addWidget(lda_card)
+        self.data_entry_layout.addWidget(bertopic_card)
         self.data_entry_layout.addStretch()
 
         # Topic modeling and the decision engine each get a tab; the log pane
-        # sits below both so either tab's output stays visible.
-        topic_tab = QWidget()
-        topic_layout = QVBoxLayout(topic_tab)
-        topic_layout.addLayout(self.instruction_layout)
-        topic_layout.addLayout(self.data_entry_layout)
+        # sits below both so either tab's output stays visible. The topic tab
+        # scrolls when the window is too short for its three cards.
+        topic_page = QWidget()
+        topic_page.setLayout(self.data_entry_layout)
+        topic_tab = use_si_scrollbars(QScrollArea())
+        topic_tab.setFrameShape(QFrame.NoFrame)
+        topic_tab.setWidgetResizable(True)
+        topic_tab.setWidget(topic_page)
 
         self.triage_tab = TriageTab()
         self.triage_tab.idle.connect(self._finish_pending_close)
 
+        # spaCy tag grouping reuses the model already loaded for LDA.
+        self.tag_tab = TagTab(
+            lambda backend: (
+                tag_normalizer.spacy_embedder(nlp)
+                if backend == tag_normalizer.SPACY
+                else tag_normalizer.embedder(backend)
+            )
+        )
+        self.tag_tab.idle.connect(self._finish_pending_close)
+
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.tabs.addTab(topic_tab, "Topic Modeling")
         self.tabs.addTab(self.triage_tab, "Decision Engine")
+        self.tabs.addTab(self.tag_tab, "Tag Normalizer")
+
+        log_card = Card("Log")
+        log_card.body.addWidget(self.log_output)
 
         # Main layout arrangement
+        self.main_layout.setContentsMargins(16, 8, 16, 16)
+        self.main_layout.setSpacing(12)
         self.main_layout.addWidget(self.tabs, stretch=3)
-        self.main_layout.addWidget(self.log_output, stretch=1)
+        self.main_layout.addWidget(log_card, stretch=1)
 
     def init_menu(self) -> None:
         """Adds the Settings… action (the app menu's Preferences… on macOS)."""
@@ -279,7 +331,6 @@ class MainWindow(QMainWindow, QDialog):
         """Shows the settings dialog; saved values apply to the next action."""
         if SettingsDialog(self).exec_() != QDialog.Accepted:
             return
-        theme.apply(QApplication.instance())
         # The Mongo and model clients are cached; rebuild them from the new values.
         reset_clients()
         if self.triage_tab._loaded and not self.triage_tab.is_busy():
@@ -340,7 +391,7 @@ class MainWindow(QMainWindow, QDialog):
         self.pdialog.setAutoClose(False)  # Keep it open until we close it manually
 
         # Create the progress bar and add it to the dialog
-        self.pbar = QProgressBar(self)
+        self.pbar = ProgressBar(self)
         self.pbar.setMaximum(100)
         self.pdialog.setBar(self.pbar)
 
@@ -394,26 +445,44 @@ class MainWindow(QMainWindow, QDialog):
             QMessageBox.warning(self, "Input Validation Error", error_message)
             return
         if self.run_thread is not None:
-            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            QMessageBox.information(
+                self, "Busy", "Wait for the current saved-run job to finish."
+            )
             return
         if self._training_running():
             # The progress dialog closes at 100%, before charts are saved and the
             # model uploaded; a second job would replace the running thread.
-            QMessageBox.information(self, "Busy", "Training is still saving the last model. Wait for it to finish.")
+            QMessageBox.information(
+                self,
+                "Busy",
+                "Training is still saving the last model. Wait for it to finish.",
+            )
             return
 
         self.train_model_button.setEnabled(False)
-        iterations, passes, number_of_topics = int(iterations), int(passes), int(number_of_topics)
+        iterations, passes, number_of_topics = (
+            int(iterations),
+            int(passes),
+            int(number_of_topics),
+        )
         # A run trained on the same tickets with the same settings would only
         # differ by its random seed, so offer it instead of retraining.
-        dataset = topic_store.dataset_fingerprint(self.allocator.prelemma_corpus or [], self.allocator.document_ids)
+        dataset = topic_store.dataset_fingerprint(
+            self.allocator.prelemma_corpus or [], self.allocator.document_ids
+        )
         wanted = self.allocator.training_settings(number_of_topics, iterations, passes)
         preprocessing = topic_store.preprocessing_info(nlp, stop_words)
         self._start_run_job(
-            lambda: topic_store.find_matching_run(self._known_runs(), dataset, wanted, preprocessing),
+            lambda: topic_store.find_matching_run(
+                self._known_runs(), dataset, wanted, preprocessing
+            ),
             "Looking for a matching saved run",
-            lambda match: self._train_or_reuse(match, iterations, passes, number_of_topics),
-            on_error=lambda message: self._train_or_reuse(None, iterations, passes, number_of_topics),
+            lambda match: self._train_or_reuse(
+                match, iterations, passes, number_of_topics
+            ),
+            on_error=lambda message: self._train_or_reuse(
+                None, iterations, passes, number_of_topics
+            ),
         )
 
     def _training_running(self) -> bool:
@@ -425,7 +494,9 @@ class MainWindow(QMainWindow, QDialog):
     def _refresh_train_button(self) -> None:
         """Enables Train Model only with processed data and no training thread running."""
         self.train_model_button.setEnabled(
-            self.allocator is not None and self.allocator.prelemma_corpus is not None and not self._training_running()
+            self.allocator is not None
+            and self.allocator.prelemma_corpus is not None
+            and not self._training_running()
         )
 
     def _known_runs(self) -> List[dict]:
@@ -433,10 +504,14 @@ class MainWindow(QMainWindow, QDialog):
         try:
             return topic_store.known_runs(self._runs_collection())
         except Exception as e:
-            logger.warning(f"Could not list runs from MongoDB ({e}); checking this computer's runs only.")
+            logger.warning(
+                f"Could not list runs from MongoDB ({e}); checking this computer's runs only."
+            )
             return topic_store.known_runs()
 
-    def _train_or_reuse(self, match, iterations: int, passes: int, number_of_topics: int) -> None:
+    def _train_or_reuse(
+        self, match, iterations: int, passes: int, number_of_topics: int
+    ) -> None:
         """Trains, or, if a matching run exists and the user agrees, opens it instead."""
         if match is None:
             self._start_training(iterations, passes, number_of_topics)
@@ -444,8 +519,15 @@ class MainWindow(QMainWindow, QDialog):
         box = QMessageBox(self)
         box.setWindowTitle("Matching Model Found")
         box.setIcon(QMessageBox.Question)
-        where = "on this computer" if topic_store.has_local_files(match) else (
-            f"in {match['storage']['url']}" if match.get("storage") else "in MongoDB only (its files may be missing)")
+        where = (
+            "on this computer"
+            if topic_store.has_local_files(match)
+            else (
+                f"in {match['storage']['url']}"
+                if match.get("storage")
+                else "in MongoDB only (its files may be missing)"
+            )
+        )
         box.setText(
             f"Run {topic_store.describe_run(match)} was trained on the same "
             f"{(match.get('dataset') or {}).get('ticket_count', '?')} tickets with the same settings and preprocessing. "
@@ -465,16 +547,21 @@ class MainWindow(QMainWindow, QDialog):
 
     def _open_saved_run(self, run: dict, on_failed=None) -> None:
         """Shows a saved run, downloading its files from S3 first if they aren't here."""
+
         def shown(local_run):
             self._refresh_train_button()
             try:
                 self.present_results(local_run)
             except Exception as e:
                 logger.exception(f"Showing run {local_run['run_id']} failed: {e}")
-                self.notify_user_of_error((False, f"Could not show run {local_run['run_id']}: {e}"))
+                self.notify_user_of_error(
+                    (False, f"Could not show run {local_run['run_id']}: {e}")
+                )
 
         def failed(message):
-            self.notify_user_of_error((False, f"Could not open run {run['run_id']}: {message}"))
+            self.notify_user_of_error(
+                (False, f"Could not open run {run['run_id']}: {message}")
+            )
             if on_failed:
                 on_failed()
 
@@ -485,8 +572,12 @@ class MainWindow(QMainWindow, QDialog):
             except (OSError, ValueError) as e:
                 failed(str(e))
             return
-        self._start_run_job(lambda: topic_store.ensure_local(run), f"Downloading run {run['run_id']}", shown,
-                            on_error=failed)
+        self._start_run_job(
+            lambda: topic_store.ensure_local(run),
+            f"Downloading run {run['run_id']}",
+            shown,
+            on_error=failed,
+        )
 
     def _start_run_job(self, task, description: str, on_done, on_error=None) -> None:
         """Runs task on run_thread, then calls on_done(result) or on_error(message) on the GUI thread.
@@ -495,7 +586,10 @@ class MainWindow(QMainWindow, QDialog):
         a QObject living on the GUI thread), so Qt queues them there; the
         slots then stop the thread, which is no longer running the task.
         """
-        self._run_job_callbacks = (on_done, on_error or (lambda m: self.notify_user_of_error((False, m))))
+        self._run_job_callbacks = (
+            on_done,
+            on_error or (lambda m: self.notify_user_of_error((False, m))),
+        )
         self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(task, description)
         self.run_worker.moveToThread(self.run_thread)
@@ -521,7 +615,9 @@ class MainWindow(QMainWindow, QDialog):
             return
         callback(value)
 
-    def _start_training(self, iterations: int, passes: int, number_of_topics: int) -> None:
+    def _start_training(
+        self, iterations: int, passes: int, number_of_topics: int
+    ) -> None:
         """Preprocesses the corpus and trains on the training thread."""
         self.train_model_button.setEnabled(False)
         self.show_progress_bar("Training LDA Model...")
@@ -573,18 +669,26 @@ class MainWindow(QMainWindow, QDialog):
         run = topic_store.save_run(self.allocator, nlp, stop_words)
         self._upload_run(run)
         if not os.getenv("MONGO_URI"):
-            run["warnings"].append("MONGO_URI is not set: the run was saved locally only and no ticket topics were written.")
+            run["warnings"].append(
+                "MONGO_URI is not set: the run was saved locally only and no ticket topics were written."
+            )
             return run
-        self.allocator.worker_status.emit("Recording the run and ticket topics in MongoDB...")
+        self.allocator.worker_status.emit(
+            "Recording the run and ticket topics in MongoDB..."
+        )
         try:
             database = get_database()
             topic_store.record_run(database[topic_store.RUNS_COLLECTION], run)
             run["assignment"] = topic_store.assign_trained_topics(
-                database[os.environ.get("MONGO_COLLECTION", "tickets")], run, self.allocator
+                database[os.environ.get("MONGO_COLLECTION", "tickets")],
+                run,
+                self.allocator,
             )
         except Exception as e:
             logger.exception(f"Could not record run {run['run_id']} in MongoDB: {e}")
-            run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")
+            run["warnings"].append(
+                f"Saved locally, but MongoDB could not be updated: {e}"
+            )
         return run
 
     def _upload_run(self, run: dict) -> None:
@@ -600,7 +704,9 @@ class MainWindow(QMainWindow, QDialog):
             return
         if cfg is None:
             return
-        self.allocator.worker_status.emit(f"Uploading the model to s3://{cfg.bucket}/...")
+        self.allocator.worker_status.emit(
+            f"Uploading the model to s3://{cfg.bucket}/..."
+        )
         try:
             model_storage.upload_and_record(run, cfg)
         except Exception as e:
@@ -645,11 +751,15 @@ class MainWindow(QMainWindow, QDialog):
             if run is None:
                 logger.error(f"Training failed while closing: {self._allocator_error}")
             else:
-                logger.info(f"Training finished while closing; saved as run {run['run_id']}.")
+                logger.info(
+                    f"Training finished while closing; saved as run {run['run_id']}."
+                )
             self._finish_pending_close()
             return
         if run is None:
-            self.notify_user_of_error((False, self._allocator_error or "Training failed; see the log."))
+            self.notify_user_of_error(
+                (False, self._allocator_error or "Training failed; see the log.")
+            )
             return
         message = f"LDA Model training has finished successfully.\n\nSaved as run {run['run_id']}."
         if run.get("storage"):
@@ -694,7 +804,9 @@ class MainWindow(QMainWindow, QDialog):
             with open(self.wrangler.ticket_file, "r") as tickets_file:
                 tickets = json.load(tickets_file)
         except (OSError, json.JSONDecodeError) as e:
-            self.notify_user_of_error((False, f"Error: Could not read the ticket file: {e}"))
+            self.notify_user_of_error(
+                (False, f"Error: Could not read the ticket file: {e}")
+            )
             return
 
         self.mongo_ticket_count = len(tickets)
@@ -718,7 +830,9 @@ class MainWindow(QMainWindow, QDialog):
         self.mongo_thread.start()
 
     def update_mongo_progress(self, written: int):
-        self.update_training_progress_bar(written * 100 // max(self.mongo_ticket_count, 1))
+        self.update_training_progress_bar(
+            written * 100 // max(self.mongo_ticket_count, 1)
+        )
 
     def _stop_mongo_thread(self):
         self.wrangler.mongo_write_progress.disconnect(self.update_mongo_progress)
@@ -735,7 +849,9 @@ class MainWindow(QMainWindow, QDialog):
         """Cleans up the thread and summarises what was written."""
         self._stop_mongo_thread()
         if self._close_pending:
-            logger.info(f"MongoDB write finished while closing ({len(summaries)} tickets).")
+            logger.info(
+                f"MongoDB write finished while closing ({len(summaries)} tickets)."
+            )
             self._finish_pending_close()
             return
         inserted = sum(summary["inserted"] for summary in summaries)
@@ -857,26 +973,32 @@ class MainWindow(QMainWindow, QDialog):
         # Kept on self: a dialog with no reference is garbage-collected and closes.
         self.results_dialog = ResultsDialog(
             best_num_topics=run.get("best_num_topics"),
-            topics=[(t["topic_id"], t["share"], t["words"]) for t in run.get("topics") or []],
+            topics=[
+                (t["topic_id"], t["share"], t["words"]) for t in run.get("topics") or []
+            ],
             chart_path=chart_path,
             plot_path=plot_path,
             parent=self,
         )
-        self.results_dialog.setWindowTitle(f"LDA Results · {topic_store.describe_run(run)}")
+        self.results_dialog.setWindowTitle(
+            f"LDA Results · {topic_store.describe_run(run)}"
+        )
         self.results_dialog.show()
         self.results_dialog.open_chart()
 
-    def _runs_collection(self):
-        """The topic_model_runs collection, or None to read runs from disk."""
+    def _runs_collection(self, name: str = topic_store.RUNS_COLLECTION):
+        """A runs collection (LDA by default), or None to read runs from disk."""
         if not os.getenv("MONGO_URI"):
             return None
-        return get_database()[topic_store.RUNS_COLLECTION]
+        return get_database()[name]
 
     def _choose_run(self, title: str):
         """Asks the user to pick a previous run; returns it, or None."""
         runs = self._known_runs()
         if not runs:
-            QMessageBox.information(self, title, "No saved topic-model runs were found.")
+            QMessageBox.information(
+                self, title, "No saved topic-model runs were found."
+            )
             return None
         labels = [topic_store.describe_run(run) for run in runs]
         label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
@@ -885,7 +1007,9 @@ class MainWindow(QMainWindow, QDialog):
     def show_previous_run(self) -> None:
         """Shows a previous run's topics and coherence."""
         if self.run_thread is not None:
-            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            QMessageBox.information(
+                self, "Busy", "Wait for the current saved-run job to finish."
+            )
             return
         run = self._choose_run("Previous Topic-Model Runs")
         if run is None:
@@ -895,10 +1019,16 @@ class MainWindow(QMainWindow, QDialog):
     def start_assign_topics(self) -> None:
         """Loads a saved run and writes its topics to every ticket in MongoDB."""
         if not os.getenv("MONGO_URI"):
-            QMessageBox.warning(self, "MongoDB Not Configured", "MONGO_URI is not set. Set it in Settings (Preferences on macOS).")
+            QMessageBox.warning(
+                self,
+                "MongoDB Not Configured",
+                "MONGO_URI is not set. Set it in Settings (Preferences on macOS).",
+            )
             return
         if self.run_thread is not None:
-            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            QMessageBox.information(
+                self, "Busy", "Wait for the current saved-run job to finish."
+            )
             return
         run = self._choose_run("Assign Topics from Saved Run")
         if run is None:
@@ -907,12 +1037,17 @@ class MainWindow(QMainWindow, QDialog):
         self.run_thread = worker_thread()
         self.run_worker = ThreadWorker(
             lambda: topic_store.assign_from_saved_run(
-                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], run, nlp, stop_words
+                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")],
+                run,
+                nlp,
+                stop_words,
             ),
             f"Assigning topics from run {run['run_id']}",
         )
         self.run_worker.moveToThread(self.run_thread)
-        self.run_worker.finished.connect(lambda summary: self._assign_topics_done(run, summary))
+        self.run_worker.finished.connect(
+            lambda summary: self._assign_topics_done(run, summary)
+        )
         self.run_worker.error.connect(self._assign_topics_failed)
         self.run_thread.started.connect(self.run_worker.run)
         self.run_thread.start()
@@ -927,7 +1062,9 @@ class MainWindow(QMainWindow, QDialog):
     def _assign_topics_done(self, run: dict, summary: dict) -> None:
         self._stop_run_thread()
         if self._close_pending:
-            logger.info(f"Topic assignment for run {run['run_id']} finished while closing: {summary}")
+            logger.info(
+                f"Topic assignment for run {run['run_id']} finished while closing: {summary}"
+            )
             self._finish_pending_close()
             return
         message = (
@@ -950,12 +1087,17 @@ class MainWindow(QMainWindow, QDialog):
     def start_bertopic_training(self) -> None:
         """Asks for BERTopic options, then trains and saves a run on run_thread."""
         if not os.getenv("MONGO_URI"):
-            QMessageBox.warning(self, "MongoDB Not Configured",
-                                "BERTopic reads tickets and their embeddings from MongoDB. "
-                                "Set MONGO_URI in Settings (Preferences on macOS).")
+            QMessageBox.warning(
+                self,
+                "MongoDB Not Configured",
+                "BERTopic reads tickets and their embeddings from MongoDB. "
+                "Set MONGO_URI in Settings (Preferences on macOS).",
+            )
             return
         if self.run_thread is not None:
-            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            QMessageBox.information(
+                self, "Busy", "Wait for the current saved-run job to finish."
+            )
             return
         dialog = BertopicOptionsDialog(bertopic_runs.lda_runs(), self)
         if dialog.exec_() != QDialog.Accepted:
@@ -979,8 +1121,10 @@ class MainWindow(QMainWindow, QDialog):
                 message += f"\nUploaded to {run['storage']['url']}."
             if run.get("assignment"):
                 a = run["assignment"]
-                message += (f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
-                            f" ({a['outliers']} as outliers).")
+                message += (
+                    f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
+                    f" ({a['outliers']} as outliers)."
+                )
             if run.get("warnings"):
                 message += "\n\nWarning:\n" + "\n".join(run["warnings"])
             QMessageBox.information(self, "BERTopic Complete", message)
@@ -990,13 +1134,21 @@ class MainWindow(QMainWindow, QDialog):
             self._end_bertopic_job()
             self.notify_user_of_error((False, message))
 
-        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in topic_model_runs.
+        # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in bertopic_run_log.
         self._start_run_job(
             lambda: bertopic_runs.train_and_save(
-                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")], nlp, stop_words, options,
-                status=self.bertopic_status.message.emit, runs=self._runs_collection(),
-                storage=model_storage.config),
-            "Training the BERTopic model", done, on_error=failed)
+                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")],
+                nlp,
+                stop_words,
+                options,
+                status=self.bertopic_status.message.emit,
+                runs=self._runs_collection(bertopic_runs.RUNS_COLLECTION),
+                storage=model_storage.config,
+            ),
+            "Training the BERTopic model",
+            done,
+            on_error=failed,
+        )
 
     def _end_bertopic_job(self) -> None:
         if self.pdialog is not None:
@@ -1009,18 +1161,26 @@ class MainWindow(QMainWindow, QDialog):
         # This runs as a Qt slot, where an unhandled exception aborts the app.
         try:
             # Kept on self: a dialog with no reference is garbage-collected and closes.
-            self.bertopic_results_dialog = BertopicResultsDialog(run, bertopic_runs.chart_paths(run), self)
+            self.bertopic_results_dialog = BertopicResultsDialog(
+                run, bertopic_runs.chart_paths(run), self
+            )
             self.bertopic_results_dialog.show()
         except Exception as e:
             logger.exception(f"Showing BERTopic run {run.get('run_id')} failed: {e}")
-            self.notify_user_of_error((False, f"Could not show BERTopic run {run.get('run_id')}: {e}"))
+            self.notify_user_of_error(
+                (False, f"Could not show BERTopic run {run.get('run_id')}: {e}")
+            )
 
     def _known_bertopic_runs(self) -> List[dict]:
         """BERTopic runs from Mongo and disk; disk only if Mongo can't be reached."""
         try:
-            return bertopic_runs.known_runs(self._runs_collection())
+            return bertopic_runs.known_runs(
+                self._runs_collection(bertopic_runs.RUNS_COLLECTION)
+            )
         except Exception as e:
-            logger.warning(f"Could not list BERTopic runs from MongoDB ({e}); showing this computer's runs only.")
+            logger.warning(
+                f"Could not list BERTopic runs from MongoDB ({e}); showing this computer's runs only."
+            )
             return bertopic_runs.known_runs()
 
     def show_previous_bertopic_run(self) -> None:
@@ -1028,14 +1188,23 @@ class MainWindow(QMainWindow, QDialog):
         downloading its files from S3 first if they aren't here."""
         title = "Previous BERTopic Runs"
         if self.run_thread is not None:
-            QMessageBox.information(self, "Busy", "Wait for the current saved-run job to finish.")
+            QMessageBox.information(
+                self, "Busy", "Wait for the current saved-run job to finish."
+            )
             return
         runs = self._known_bertopic_runs()
         if not runs:
-            QMessageBox.information(self, title, f"No BERTopic runs were found in MongoDB or "
-                                                 f"{bertopic_model.model_dir()}.")
+            QMessageBox.information(
+                self,
+                title,
+                f"No BERTopic runs were found in MongoDB or "
+                f"{bertopic_model.model_dir()}.",
+            )
             return
-        labels = [f"{bertopic_runs.describe_run(run)} · {bertopic_runs.where(run)}" for run in runs]
+        labels = [
+            f"{bertopic_runs.describe_run(run)} · {bertopic_runs.where(run)}"
+            for run in runs
+        ]
         label, ok = QInputDialog.getItem(self, title, "Run:", labels, 0, False)
         if not ok:
             return
@@ -1046,29 +1215,42 @@ class MainWindow(QMainWindow, QDialog):
             return
 
         def failed(message):
-            self.notify_user_of_error((False, f"Could not download BERTopic run {run['run_id']}: {message}\n\n"
-                                              "Showing its topics and scores without the charts."))
+            self.notify_user_of_error(
+                (
+                    False,
+                    f"Could not download BERTopic run {run['run_id']}: {message}\n\n"
+                    "Showing its topics and scores without the charts.",
+                )
+            )
             self.present_bertopic_results(run)
 
-        self._start_run_job(lambda: bertopic_runs.ensure_local(run), f"Downloading BERTopic run {run['run_id']}",
-                            self.present_bertopic_results, on_error=failed)
+        self._start_run_job(
+            lambda: bertopic_runs.ensure_local(run),
+            f"Downloading BERTopic run {run['run_id']}",
+            self.present_bertopic_results,
+            on_error=failed,
+        )
 
     # --- shutdown --------------------------------------------------------------
 
     def _app_threads(self) -> List[Tuple[str, QThread]]:
         """This window's own worker threads, with a label for each."""
         # self.thread shadows QObject.thread() until training first runs.
-        candidates = [("model training", getattr(self, "thread", None)),
-                      ("MongoDB write", self.mongo_thread),
-                      ("data processing", self.process_thread),
-                      ("saved-run job", self.run_thread)]
+        candidates = [
+            ("model training", getattr(self, "thread", None)),
+            ("MongoDB write", self.mongo_thread),
+            ("data processing", self.process_thread),
+            ("saved-run job", self.run_thread),
+        ]
         return [(label, t) for label, t in candidates if isinstance(t, QThread)]
 
     def running_jobs(self) -> List[str]:
-        """Labels of the background jobs still running, in this window and the Decision Engine tab."""
+        """Labels of the background jobs still running, in this window and its tabs."""
         jobs = [label for label, t in self._app_threads() if t.isRunning()]
         if self.triage_tab.is_busy():
             jobs.append("Decision Engine job")
+        if self.tag_tab.is_busy():
+            jobs.append("tag embedding")
         return jobs
 
     def closeEvent(self, event) -> None:
@@ -1086,10 +1268,15 @@ class MainWindow(QMainWindow, QDialog):
             return
         event.ignore()
         self.triage_tab.request_shutdown()
-        self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+        self.tag_tab.request_shutdown()
+        self.setWindowTitle(
+            f"{self._base_title} — closing after {', '.join(jobs)} finishes…"
+        )
         if not self._close_pending:
             self._close_pending = True
-            logger.warning(f"Close requested; waiting for {', '.join(jobs)} to finish before closing.")
+            logger.warning(
+                f"Close requested; waiting for {', '.join(jobs)} to finish before closing."
+            )
 
     def _finish_pending_close(self) -> None:
         """Closes the window if a close was deferred and every job is now done."""
@@ -1097,7 +1284,9 @@ class MainWindow(QMainWindow, QDialog):
             return
         jobs = self.running_jobs()
         if jobs:
-            self.setWindowTitle(f"{self._base_title} — closing after {', '.join(jobs)} finishes…")
+            self.setWindowTitle(
+                f"{self._base_title} — closing after {', '.join(jobs)} finishes…"
+            )
             return
         # Let the finishing job's slot return before the window goes away.
         QTimer.singleShot(0, self.close)
@@ -1109,6 +1298,7 @@ class MainWindow(QMainWindow, QDialog):
         another path; it blocks, but never lets a running QThread be destroyed.
         """
         self.triage_tab.wait_for_job()
+        self.tag_tab.wait_for_job()
         for label, thread in self._app_threads():
             if thread.isRunning():
                 logger.warning(f"Waiting for {label} to finish before quitting…")
@@ -1176,7 +1366,9 @@ class MainWindow(QMainWindow, QDialog):
             raise RuntimeError("Failed to bind comments. Check the comments directory.")
         if not self.wrangler.create_corpus():
             raise RuntimeError("Failed to create corpus. The corpus is empty.")
-        self.wrangler.worker_status.emit("Writing the processed tickets and corpus files...")
+        self.wrangler.worker_status.emit(
+            "Writing the processed tickets and corpus files..."
+        )
         self.wrangler.generate_json()
         return self.wrangler.ticket_documents(), self.wrangler.ticket_ids()
 
@@ -1184,20 +1376,28 @@ class MainWindow(QMainWindow, QDialog):
         self._process_total = count
 
     def _process_reshape_progress(self, done: int) -> None:
-        self.update_training_progress_bar(process_progress("reshape", done, self._process_total))
+        self.update_training_progress_bar(
+            process_progress("reshape", done, self._process_total)
+        )
 
     def _process_bind_progress(self, done: int) -> None:
-        self.update_training_progress_bar(process_progress("bind", done, self._process_total))
+        self.update_training_progress_bar(
+            process_progress("bind", done, self._process_total)
+        )
 
     def _process_corpus_progress(self, done: int) -> None:
-        self.update_training_progress_bar(process_progress("corpus", done, self._process_total))
+        self.update_training_progress_bar(
+            process_progress("corpus", done, self._process_total)
+        )
 
     def _stop_process_thread(self) -> None:
-        for signal, slot in ((self.wrangler.tickets_loaded, self._process_tickets_loaded),
-                             (self.wrangler.ticket_progress, self._process_reshape_progress),
-                             (self.wrangler.binding_progress, self._process_bind_progress),
-                             (self.wrangler.corpus_creation_progress, self._process_corpus_progress),
-                             (self.wrangler.worker_status, self.update_training_status)):
+        for signal, slot in (
+            (self.wrangler.tickets_loaded, self._process_tickets_loaded),
+            (self.wrangler.ticket_progress, self._process_reshape_progress),
+            (self.wrangler.binding_progress, self._process_bind_progress),
+            (self.wrangler.corpus_creation_progress, self._process_corpus_progress),
+            (self.wrangler.worker_status, self.update_training_status),
+        ):
             signal.disconnect(slot)
         if self.pdialog is not None:
             self.pdialog.close()
@@ -1219,7 +1419,11 @@ class MainWindow(QMainWindow, QDialog):
         self.allocator.prelemma_corpus = documents
         self.allocator.document_ids = ids
         self.train_model_button.setEnabled(True)
-        for input_field in [self.num_topics_input, self.iterations_input, self.passes_input]:
+        for input_field in [
+            self.num_topics_input,
+            self.iterations_input,
+            self.passes_input,
+        ]:
             input_field.setEnabled(True)
 
         success_message = "The Data Located in the Provided Paths Has been Wrangled 🐄 and Massaged 💆🏽‍♂️...Please select Number of Topics, Iterations and Passes. Then Click Train Model to continue."
@@ -1247,7 +1451,9 @@ class MainWindow(QMainWindow, QDialog):
 
 # The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
 ICON_PATH = (
-    pathlib.Path(sys._MEIPASS) / "assets" if settings.is_frozen() else pathlib.Path(__file__).resolve().parents[1] / "packaging"
+    pathlib.Path(sys._MEIPASS) / "assets"
+    if settings.is_frozen()
+    else pathlib.Path(__file__).resolve().parents[1] / "packaging"
 ) / "icon.png"
 
 # Before the QApplication: the macOS menu bar reads the name when it starts.

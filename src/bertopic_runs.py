@@ -12,26 +12,28 @@ only ever touches `embedding_topic`, never the LDA `topic` field.
 Runs are kept the way LDA runs are (see topic_store and model_storage): the
 folder on this computer is the source of truth; when MODEL_BUCKET is set it
 is uploaded, with a signed manifest, to <MODEL_PREFIX>bertopic/<run_id>/; and
-the run's details (not its files) are recorded in the topic_model_runs
-collection, so other computers can list it. A run whose files aren't here is
+the run's details (not its files) are recorded in the bertopic_run_log
+collection (BERTOPIC_RUNS_COLLECTION), apart from the LDA runs, so other
+computers can list it. A run whose files aren't here is
 downloaded and verified before it is opened, into <BERTOPIC_MODEL_DIR>/<run_id>
 only: its model is a pickle, which runs code when loaded.
 """
+
 import dataclasses
+import os
 import pathlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from loguru import logger
-
-from pymongo.collection import Collection
-
 import bertopic_model
 import topic_store
 from LDA_logic import tokenize
+from loguru import logger
+from pymongo.collection import Collection
 
 METHOD = "bertopic"
+RUNS_COLLECTION = os.environ.get("BERTOPIC_RUNS_COLLECTION", "bertopic_run_log")
 # Under MODEL_PREFIX in the bucket, apart from the LDA runs.
 STORAGE_SUBFOLDER = "bertopic/"
 CHARTS = ("barchart_html", "intertopic_html")
@@ -40,6 +42,7 @@ CHARTS = ("barchart_html", "intertopic_html")
 @dataclass
 class TrainOptions:
     """What the user picked in the app; None means bertopic_model's default."""
+
     min_cluster_size: Optional[int] = None
     nr_topics: Optional[int] = None
     keep_outliers: bool = False
@@ -49,19 +52,29 @@ class TrainOptions:
     assign: bool = False
 
     def settings(self) -> bertopic_model.Settings:
-        return bertopic_model.Settings(min_cluster_size=self.min_cluster_size, nr_topics=self.nr_topics,
-                                       reduce_outliers=not self.keep_outliers)
+        return bertopic_model.Settings(
+            min_cluster_size=self.min_cluster_size,
+            nr_topics=self.nr_topics,
+            reduce_outliers=not self.keep_outliers,
+        )
 
 
-def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options: TrainOptions,
-                   status: Callable[[str], None] = lambda message: None,
-                   base_dir: Optional[pathlib.Path] = None, lda_dir: Optional[pathlib.Path] = None,
-                   runs: Optional[Collection] = None, storage: Callable[[], Optional[object]] = lambda: None) -> dict:
+def train_and_save(
+    tickets: Collection,
+    nlp,
+    stop_words: Sequence[str],
+    options: TrainOptions,
+    status: Callable[[str], None] = lambda message: None,
+    base_dir: Optional[pathlib.Path] = None,
+    lda_dir: Optional[pathlib.Path] = None,
+    runs: Optional[Collection] = None,
+    storage: Callable[[], Optional[object]] = lambda: None,
+) -> dict:
     """Trains BERTopic on the tickets' stored embeddings and saves the run.
 
     The run is saved here first, then uploaded (storage() gives the
     model_storage.Config, or None when uploads are off) and recorded in
-    runs (topic_model_runs). Each of those that fails becomes a warning on
+    runs (bertopic_run_log). Each of those that fails becomes a warning on
     the run, as does a comparison LDA run that can't be read, so a trained
     model is never lost. The returned run has `warnings` and, when
     options.assign is set, `assignment`.
@@ -72,8 +85,10 @@ def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options:
     status("Reading tickets and their stored embeddings...")
     corpus = bertopic_model.load_corpus(tickets)
     if not corpus.ids:
-        raise ValueError("No tickets have an embedding made from their current text. "
-                         "Embed them first: cd src && python -m embeddings backfill")
+        raise ValueError(
+            "No tickets have an embedding made from their current text. "
+            "Embed them first: cd src && python -m embeddings backfill"
+        )
     status(f"Lemmatizing {len(corpus.ids)} tickets...")
     tokens = tokenize(nlp, stop_words, corpus.texts)
     status(f"Clustering {len(corpus.ids)} tickets...")
@@ -84,14 +99,22 @@ def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options:
     comparison = None
     if options.compare_lda:
         try:
-            comparison = bertopic_model.compare_lda(options.compare_lda, tokens, lda_dir)
+            comparison = bertopic_model.compare_lda(
+                options.compare_lda, tokens, lda_dir
+            )
         except (OSError, ValueError, KeyError) as e:
             warnings.append(f"LDA run {options.compare_lda} could not be compared: {e}")
     scores = bertopic_model.metrics(result, tokens)
 
     status("Saving the model and its charts...")
-    run = bertopic_model.save_run(result, corpus, topic_store.preprocessing_info(nlp, stop_words), scores,
-                                  comparison, base_dir=base_dir)
+    run = bertopic_model.save_run(
+        result,
+        corpus,
+        topic_store.preprocessing_info(nlp, stop_words),
+        scores,
+        comparison,
+        base_dir=base_dir,
+    )
     run["warnings"] = warnings
     upload(run, storage, status)
     if runs is not None:
@@ -99,11 +122,19 @@ def train_and_save(tickets: Collection, nlp, stop_words: Sequence[str], options:
         try:
             record_run(runs, run)
         except Exception as e:
-            logger.exception(f"Could not record BERTopic run {run['run_id']} in MongoDB: {e}")
-            run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")
+            logger.exception(
+                f"Could not record BERTopic run {run['run_id']} in MongoDB: {e}"
+            )
+            run["warnings"].append(
+                f"Saved locally, but MongoDB could not be updated: {e}"
+            )
     if options.assign:
-        status(f"Writing `{bertopic_model.ASSIGNMENT_FIELD}` to {len(corpus.ids)} tickets...")
-        run["assignment"] = bertopic_model.assign_topics(tickets, run, corpus.ids, result.topics)
+        status(
+            f"Writing `{bertopic_model.ASSIGNMENT_FIELD}` to {len(corpus.ids)} tickets..."
+        )
+        run["assignment"] = bertopic_model.assign_topics(
+            tickets, run, corpus.ids, result.topics
+        )
     return run
 
 
@@ -115,8 +146,12 @@ def storage_config(cfg):
     return dataclasses.replace(cfg, prefix=f"{cfg.prefix}{STORAGE_SUBFOLDER}")
 
 
-def upload(run: dict, storage: Callable[[], Optional[object]], status: Callable[[str], None] = lambda m: None,
-           client=None) -> None:
+def upload(
+    run: dict,
+    storage: Callable[[], Optional[object]],
+    status: Callable[[str], None] = lambda m: None,
+    client=None,
+) -> None:
     """Uploads the run when storage is configured; a failure becomes a warning on the run.
 
     Like the app's LDA upload: the model is already saved here, and
@@ -138,8 +173,10 @@ def upload(run: dict, storage: Callable[[], Optional[object]], status: Callable[
         model_storage.upload_and_record(run, cfg, client)
     except Exception as e:
         logger.exception(f"Could not upload BERTopic run {run['run_id']} to S3: {e}")
-        run["warnings"].append(f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
-                               f"Retry with: python -m model_storage upload --bertopic {run['run_id']}")
+        run["warnings"].append(
+            f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
+            f"Retry with: python -m model_storage upload --bertopic {run['run_id']}"
+        )
 
 
 def _document(run: dict) -> dict:
@@ -148,26 +185,35 @@ def _document(run: dict) -> dict:
 
 
 def record_run(runs: Collection, run: dict) -> None:
-    """Stores the run's details (not its files) in topic_model_runs, marked as BERTopic."""
-    runs.replace_one({"run_id": run["run_id"]}, {**_document(run), "method": METHOD}, upsert=True)
+    """Stores the run's details (not its files) in bertopic_run_log, marked as BERTopic."""
+    runs.replace_one(
+        {"run_id": run["run_id"]}, {**_document(run), "method": METHOD}, upsert=True
+    )
 
 
 # --- saved runs -------------------------------------------------------------------
 
 
-def list_runs(base_dir: Optional[pathlib.Path] = None, runs: Optional[Collection] = None) -> List[dict]:
+def list_runs(
+    base_dir: Optional[pathlib.Path] = None, runs: Optional[Collection] = None
+) -> List[dict]:
     """BERTopic runs, newest first: from Mongo when given, else those saved on this computer."""
     if runs is not None:
         return list(runs.find({"method": METHOD}, {"_id": 0}).sort("ran_at", -1))
     base_dir = base_dir or bertopic_model.model_dir()
     if not base_dir.exists():
         return []
-    found = (topic_store._read_run_file(p) for p in base_dir.glob(f"*/{topic_store.RUN_FILE}"))
+    found = (
+        topic_store._read_run_file(p)
+        for p in base_dir.glob(f"*/{topic_store.RUN_FILE}")
+    )
     runs_found = [r for r in found if r and r.get("method") == METHOD]
     return sorted(runs_found, key=lambda r: str(r.get("ran_at")), reverse=True)
 
 
-def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None) -> List[dict]:
+def known_runs(
+    runs: Optional[Collection] = None, base_dir: Optional[pathlib.Path] = None
+) -> List[dict]:
     """Runs from Mongo (shared between computers) and this computer's disk, by run_id, newest first.
 
     As topic_store.known_runs: Mongo's record wins, but a local upload record
@@ -177,7 +223,9 @@ def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Pat
     merged = dict(local)
     if runs is not None:
         for run in list_runs(runs=runs):
-            if not run.get("storage") and (local.get(run["run_id"]) or {}).get("storage"):
+            if not run.get("storage") and (local.get(run["run_id"]) or {}).get(
+                "storage"
+            ):
                 run["storage"] = local[run["run_id"]]["storage"]
             merged[run["run_id"]] = run
     return sorted(merged.values(), key=lambda r: str(r.get("ran_at")), reverse=True)
@@ -186,12 +234,18 @@ def known_runs(runs: Optional[Collection] = None, base_dir: Optional[pathlib.Pat
 def where(run: dict, base_dir: Optional[pathlib.Path] = None) -> str:
     if has_local_files(run, base_dir):
         return "on this computer"
-    return f"in {run['storage']['url']}" if run.get("storage") else "in MongoDB only (its files aren't available)"
+    return (
+        f"in {run['storage']['url']}"
+        if run.get("storage")
+        else "in MongoDB only (its files aren't available)"
+    )
 
 
 def lda_runs(base_dir: Optional[pathlib.Path] = None) -> List[dict]:
     """LDA runs a BERTopic run can be compared with: those whose run.json is on this computer."""
-    return [run for run in topic_store.list_runs(base_dir=base_dir) if run.get("topics")]
+    return [
+        run for run in topic_store.list_runs(base_dir=base_dir) if run.get("topics")
+    ]
 
 
 def fmt_score(value: Optional[float]) -> str:
@@ -200,22 +254,40 @@ def fmt_score(value: Optional[float]) -> str:
 
 def describe_run(run: dict) -> str:
     ran_at = run.get("ran_at")
-    ran_at = ran_at.strftime("%Y-%m-%d %H:%M") if isinstance(ran_at, datetime) else str(ran_at)
+    ran_at = (
+        ran_at.strftime("%Y-%m-%d %H:%M")
+        if isinstance(ran_at, datetime)
+        else str(ran_at)
+    )
     m = run.get("metrics") or {}
-    return (f"{run['run_id']} · {ran_at} UTC · {m.get('num_topics', '?')} topics · "
-            f"c_v {fmt_score(m.get('coherence_c_v'))} · diversity {fmt_score(m.get('topic_diversity'))} · "
-            f"{m.get('ticket_count', '?')} tickets")
+    return (
+        f"{run['run_id']} · {ran_at} UTC · {m.get('num_topics', '?')} topics · "
+        f"c_v {fmt_score(m.get('coherence_c_v'))} · diversity {fmt_score(m.get('topic_diversity'))} · "
+        f"{m.get('ticket_count', '?')} tickets"
+    )
 
 
 def comparison_rows(run: dict) -> List[Tuple[str, str, str, str]]:
     """(model, topics, c_v, diversity) for this run and, if any, the LDA run it was compared with."""
     m = run.get("metrics") or {}
-    rows = [("BERTopic", str(m.get("num_topics", "?")), fmt_score(m.get("coherence_c_v")),
-             fmt_score(m.get("topic_diversity")))]
+    rows = [
+        (
+            "BERTopic",
+            str(m.get("num_topics", "?")),
+            fmt_score(m.get("coherence_c_v")),
+            fmt_score(m.get("topic_diversity")),
+        )
+    ]
     c = run.get("comparison")
     if c:
-        rows.append((f"LDA {c['run_id']}", str(c.get("num_topics", "?")), fmt_score(c.get("coherence_c_v")),
-                     fmt_score(c.get("topic_diversity"))))
+        rows.append(
+            (
+                f"LDA {c['run_id']}",
+                str(c.get("num_topics", "?")),
+                fmt_score(c.get("coherence_c_v")),
+                fmt_score(c.get("topic_diversity")),
+            )
+        )
     return rows
 
 
@@ -224,11 +296,17 @@ def summary_text(run: dict) -> str:
     m = run.get("metrics") or {}
     embedding = run.get("embedding") or {}
     skipped = (run.get("dataset") or {}).get("skipped") or {}
-    text = (f"{m.get('ticket_count', '?')} tickets embedded with {embedding.get('model', '?')} "
-            f"({embedding.get('dimensions', '?')} dimensions). Outliers: {m.get('outliers_before', '?')} "
-            f"before reassignment, {m.get('outliers_after', '?')} after.")
+    text = (
+        f"{m.get('ticket_count', '?')} tickets embedded with {embedding.get('model', '?')} "
+        f"({embedding.get('dimensions', '?')} dimensions). Outliers: {m.get('outliers_before', '?')} "
+        f"before reassignment, {m.get('outliers_after', '?')} after."
+    )
     if skipped:
-        text += " Left out: " + ", ".join(f"{n} {why.replace('_', ' ')}" for why, n in skipped.items()) + "."
+        text += (
+            " Left out: "
+            + ", ".join(f"{n} {why.replace('_', ' ')}" for why, n in skipped.items())
+            + "."
+        )
     return text
 
 
@@ -237,8 +315,10 @@ def format_topics(run: dict) -> str:
     topics = run.get("topics") or []
     if not topics:
         return "No topics were found."
-    return "\n".join(f"{rank}. {t['share']:.0%} of tickets ({t['count']}): {', '.join(t['words'])}"
-                     for rank, t in enumerate(topics, start=1))
+    return "\n".join(
+        f"{rank}. {t['share']:.0%} of tickets ({t['count']}): {', '.join(t['words'])}"
+        for rank, t in enumerate(topics, start=1)
+    )
 
 
 def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Path:
@@ -257,7 +337,9 @@ def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Pat
 
 
 def _complete(folder: pathlib.Path) -> bool:
-    return (folder / bertopic_model.MODEL_FILE).is_file() and (folder / topic_store.RUN_FILE).is_file()
+    return (folder / bertopic_model.MODEL_FILE).is_file() and (
+        folder / topic_store.RUN_FILE
+    ).is_file()
 
 
 def has_local_files(run: dict, base_dir: Optional[pathlib.Path] = None) -> bool:
@@ -268,8 +350,12 @@ def has_local_files(run: dict, base_dir: Optional[pathlib.Path] = None) -> bool:
         return False
 
 
-def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None, storage: Callable[[], Optional[object]] = None,
-                 client=None) -> dict:
+def ensure_local(
+    run: dict,
+    base_dir: Optional[pathlib.Path] = None,
+    storage: Callable[[], Optional[object]] = None,
+    client=None,
+) -> dict:
     """Makes the run's files available in <BERTOPIC_MODEL_DIR>/<run_id>, downloading them if needed.
 
     As topic_store.ensure_local: the upload is verified against
@@ -286,21 +372,28 @@ def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None, storage: Ca
     local = local_dir(run, base_dir)
     if not _complete(local):
         if not run.get("storage"):
-            raise FileNotFoundError(f"BERTopic run {run['run_id']}'s files aren't on this computer and it was "
-                                    "never uploaded.")
+            raise FileNotFoundError(
+                f"BERTopic run {run['run_id']}'s files aren't on this computer and it was "
+                "never uploaded."
+            )
         cfg = (storage or model_storage.config)()
         if cfg is None:
             raise FileNotFoundError(
                 f"BERTopic run {run['run_id']} isn't on this computer. It was uploaded to {run['storage'].get('url')}; "
-                "set the model storage settings to download it.")
+                "set the model storage settings to download it."
+            )
         model_storage.download_run(run, storage_config(cfg), local, client)
         if not _complete(local):
-            raise FileNotFoundError(f"BERTopic run {run['run_id']}'s upload has no {bertopic_model.MODEL_FILE}.")
+            raise FileNotFoundError(
+                f"BERTopic run {run['run_id']}'s upload has no {bertopic_model.MODEL_FILE}."
+            )
     topic_store._relocate(run, local)
     return run
 
 
-def chart_paths(run: dict, base_dir: Optional[pathlib.Path] = None) -> Dict[str, Optional[str]]:
+def chart_paths(
+    run: dict, base_dir: Optional[pathlib.Path] = None
+) -> Dict[str, Optional[str]]:
     """The run's HTML charts in its own folder; None for a chart that wasn't drawn or is gone."""
     try:
         folder = local_dir(run, base_dir)

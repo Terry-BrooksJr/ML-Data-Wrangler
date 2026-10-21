@@ -93,7 +93,9 @@ class ThreadWorker(QObject):
             logger.exception(f"{self.description} failed: {e}")
             detail = str(e)
             if len(detail) > MAX_ERROR_CHARS:  # e.g. an HTML error page
-                detail = detail[:MAX_ERROR_CHARS] + "… (truncated; full text in the log)"
+                detail = (
+                    detail[:MAX_ERROR_CHARS] + "… (truncated; full text in the log)"
+                )
             self.error.emit(f"Error: {self.description} failed: {detail}")
             return
         self.finished.emit(result)
@@ -209,7 +211,9 @@ class LogHighlighter(QSyntaxHighlighter):
         self.success_format.setFontPointSize(15)
 
         self.user_input_required_format = QTextCharFormat()
-        self.user_input_required_format.setForeground(QColor("deepskyblue"))  # readable on the dark log pane
+        self.user_input_required_format.setForeground(
+            QColor("deepskyblue")
+        )  # readable on the dark log pane
         self.user_input_required_format.setFontCapitalization(
             QFont.Capitalization.AllUppercase
         )
@@ -274,6 +278,3 @@ def remove_useless_data(text: str) -> str:
     ]
     logger.success("Removed Unhelpful and Descriptive Text")
     return " ".join(scrubbed)
-
-
-

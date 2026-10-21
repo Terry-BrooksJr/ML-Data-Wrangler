@@ -4,6 +4,7 @@ Reads mapped ticket documents from Mongo, asks an LLM (via Cheaper Inference)
 for one of five triage classifications, and appends the result to
 tickets.agent_reviews. Never writes to Zendesk; write-back is Module 3.
 """
+
 import ipaddress
 import json
 import os
@@ -15,10 +16,12 @@ from urllib.parse import urlsplit
 import anthropic
 from loguru import logger
 
-from .guards import SOLVE_CONFIDENCE_FLOOR, InvalidReply, apply_guards, validate_reply
+from .guards import apply_guards, InvalidReply, SOLVE_CONFIDENCE_FLOOR, validate_reply
 from .prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
 
-CHEAPER_INFERENCE_BASE_URL = "https://api.cheaperinference.com"  # no /v1 — SDK appends /v1/messages
+CHEAPER_INFERENCE_BASE_URL = (
+    "https://api.cheaperinference.com"  # no /v1 — SDK appends /v1/messages
+)
 
 # TODO(#15): confirm the model ID Cheaper Inference expects. The brief specifies
 # "claude-opus-4.8"; Anthropic's own ID for that model is "claude-opus-4-8".
@@ -29,7 +32,7 @@ MAX_TOKENS = 4096
 REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_RETRIES = 3  # the SDK retries only 408/409/429/5xx and connection errors
 CONFIRMATION_CONFIDENCE_FLOOR = SOLVE_CONFIDENCE_FLOOR  # below this, re-check
-                                                        # with the confirmation model
+# with the confirmation model
 
 
 class EngineError(Exception):
@@ -103,12 +106,18 @@ def api_base_url() -> str:
     Raises:
         InsecureApiUrl: The URL isn't https:// and isn't on this machine.
     """
-    url = (os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL).strip().rstrip("/")
+    url = (
+        (os.environ.get("CHEAPER_INFERENCE_API_URL") or CHEAPER_INFERENCE_BASE_URL)
+        .strip()
+        .rstrip("/")
+    )
     problem = api_url_problem(url)
     if problem:
         raise InsecureApiUrl(f"CHEAPER_INFERENCE_API_URL: {problem}")
     if urlsplit(url).scheme == "http":
-        logger.warning(f"CHEAPER_INFERENCE_API_URL {url} is plain http; allowed only because it is on this machine.")
+        logger.warning(
+            f"CHEAPER_INFERENCE_API_URL {url} is plain http; allowed only because it is on this machine."
+        )
     return url[: -len("/v1")] if url.endswith("/v1") else url
 
 
@@ -156,7 +165,9 @@ def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
     except (anthropic.APIError, EngineError) as e:
         secondary = secondary_model()
         if secondary in (None, primary):
-            logger.error(f"Primary model failed ({e}) and no distinct secondary model is set.")
+            logger.error(
+                f"Primary model failed ({e}) and no distinct secondary model is set."
+            )
             raise
         logger.warning(f"Primary model failed ({e}); retrying on secondary model.")
         result = _classify_with(secondary, ticket_payload, reengage_count)
@@ -176,7 +187,14 @@ def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
         logger.warning(f"Confirmation model failed ({e}); keeping the first result.")
         return result
     confirmed["confirmation_of"] = {
-        key: result.get(key) for key in ("model_version", "classification", "confidence", "reasoning", "audit")
+        key: result.get(key)
+        for key in (
+            "model_version",
+            "classification",
+            "confidence",
+            "reasoning",
+            "audit",
+        )
     }
     return confirmed
 
@@ -212,7 +230,12 @@ def _usage(response) -> dict:
     usage = getattr(response, "usage", None)
     return {
         key: getattr(usage, key, None) or 0
-        for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        )
     }
 
 
@@ -226,7 +249,7 @@ def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> 
                 "type": "text",
                 "text": SYSTEM_INSTRUCTIONS,
                 "cache_control": {"type": "ephemeral"},  # static across every
-                                                           # ticket — cache it
+                # ticket — cache it
             }
         ],
         messages=[{"role": "user", "content": ticket_payload}],
@@ -255,7 +278,9 @@ def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> 
         # The reply itself stays out of the message: the message is logged and
         # stored as the ticket's error, and a reply can quote ticket text. It is
         # kept in full in audit["raw_response"] (stored with last_engine_error).
-        raise EngineError(f"{kind} from model ({len(raw_text)}-character reply): {e}", model, audit) from e
+        raise EngineError(
+            f"{kind} from model ({len(raw_text)}-character reply): {e}", model, audit
+        ) from e
 
     apply_guards(result, reengage_count)
     result["model_version"] = model

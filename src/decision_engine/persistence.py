@@ -12,7 +12,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from .classify import EngineError, InsecureApiUrl, classify_ticket, get_client
+from .classify import classify_ticket, EngineError, get_client, InsecureApiUrl
 from .payload import build_ticket_payload
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -58,7 +58,10 @@ def is_fatal(error: Exception) -> bool:
     """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
     if isinstance(error, InsecureApiUrl):
         return True
-    return isinstance(error, anthropic.APIStatusError) and error.status_code in FATAL_STATUS_CODES
+    return (
+        isinstance(error, anthropic.APIStatusError)
+        and error.status_code in FATAL_STATUS_CODES
+    )
 
 
 def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[dict]:
@@ -82,15 +85,27 @@ def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[
                 {"review_claim.expires_at": {"$lt": now}},
             ],
         },
-        {"$set": {"review_claim": {"worker": worker, "claimed_at": now, "expires_at": now + CLAIM_TTL}}},
+        {
+            "$set": {
+                "review_claim": {
+                    "worker": worker,
+                    "claimed_at": now,
+                    "expires_at": now + CLAIM_TTL,
+                }
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
 
 
-def _release_claim(tickets: Collection, zendesk_id: str, worker: str, update: Optional[dict] = None) -> None:
+def _release_claim(
+    tickets: Collection, zendesk_id: str, worker: str, update: Optional[dict] = None
+) -> None:
     update = update or {}
     update.setdefault("$unset", {})["review_claim"] = ""
-    tickets.update_one({"zendesk_id": zendesk_id, "review_claim.worker": worker}, update)
+    tickets.update_one(
+        {"zendesk_id": zendesk_id, "review_claim.worker": worker}, update
+    )
 
 
 def _review_entry(result: dict, engine_error: Optional[str] = None) -> dict:
@@ -133,7 +148,9 @@ def _manual_triage_fallback(ticket_doc: dict, error: Exception, attempts: int) -
     }
 
 
-def process_one_ticket(zendesk_id: str, tickets: Collection = None, worker: Optional[str] = None):
+def process_one_ticket(
+    zendesk_id: str, tickets: Collection = None, worker: Optional[str] = None
+):
     """
     Claims one awaiting-review ticket, classifies it, and appends the result
     to agent_reviews. Does NOT call Zendesk — tagging/noting the real ticket
@@ -158,7 +175,9 @@ def process_one_ticket(zendesk_id: str, tickets: Collection = None, worker: Opti
 
     try:
         payload = build_ticket_payload(ticket_doc)
-        result = classify_ticket(payload, reengage_count=len(ticket_doc.get("reengage_attempts") or []))
+        result = classify_ticket(
+            payload, reengage_count=len(ticket_doc.get("reengage_attempts") or [])
+        )
     except Exception as e:
         if is_fatal(e):
             _release_claim(tickets, zendesk_id, worker)
@@ -172,16 +191,32 @@ def process_one_ticket(zendesk_id: str, tickets: Collection = None, worker: Opti
             "audit": getattr(e, "audit", None),
         }
         if attempts < MAX_ENGINE_ATTEMPTS:
-            logger.warning(f"{zendesk_id}: engine error (attempt {attempts}/{MAX_ENGINE_ATTEMPTS}): {e}")
+            logger.warning(
+                f"{zendesk_id}: engine error (attempt {attempts}/{MAX_ENGINE_ATTEMPTS}): {e}"
+            )
             _release_claim(
-                tickets, zendesk_id, worker,
-                {"$set": {"review_attempts": attempts, "last_engine_error": error_record}},
+                tickets,
+                zendesk_id,
+                worker,
+                {
+                    "$set": {
+                        "review_attempts": attempts,
+                        "last_engine_error": error_record,
+                    }
+                },
             )
             raise
-        logger.error(f"{zendesk_id}: engine failed {attempts} times; routing to manual triage.")
+        logger.error(
+            f"{zendesk_id}: engine failed {attempts} times; routing to manual triage."
+        )
         result = _manual_triage_fallback(ticket_doc, e, attempts)
-        _save_review(tickets, zendesk_id, worker, _review_entry(result, engine_error=str(e)[:1000]),
-                     {"review_attempts": attempts, "last_engine_error": error_record})
+        _save_review(
+            tickets,
+            zendesk_id,
+            worker,
+            _review_entry(result, engine_error=str(e)[:1000]),
+            {"review_attempts": attempts, "last_engine_error": error_record},
+        )
         result["engine_error"] = str(e)
         return result
 
@@ -190,7 +225,13 @@ def process_one_ticket(zendesk_id: str, tickets: Collection = None, worker: Opti
     return result
 
 
-def _save_review(tickets: Collection, zendesk_id: str, worker: str, entry: dict, extra_set: Optional[dict] = None):
+def _save_review(
+    tickets: Collection,
+    zendesk_id: str,
+    worker: str,
+    entry: dict,
+    extra_set: Optional[dict] = None,
+):
     # Matching on the claim means a worker whose claim expired and was taken
     # over can't append a second entry.
     update = {
@@ -201,7 +242,12 @@ def _save_review(tickets: Collection, zendesk_id: str, worker: str, entry: dict,
     if not extra_set:
         update["$unset"].update({"review_attempts": "", "last_engine_error": ""})
     saved = tickets.update_one(
-        {"zendesk_id": zendesk_id, "awaiting_review": True, "review_claim.worker": worker}, update
+        {
+            "zendesk_id": zendesk_id,
+            "awaiting_review": True,
+            "review_claim.worker": worker,
+        },
+        update,
     )
     if saved.modified_count == 0:
         logger.warning(f"{zendesk_id}: claim lost before saving; review discarded.")
@@ -212,9 +258,23 @@ def _add_usage(totals: dict, audit: Optional[dict]) -> None:
         totals[key] = totals.get(key, 0) + (value or 0)
 
 
+def _oldest_first(zendesk_id) -> tuple:
+    """Sort key: Zendesk IDs are sequential, so a lower number is an older ticket."""
+    text = str(zendesk_id)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
+def awaiting_tickets(tickets: Collection) -> List[dict]:
+    """Every ticket awaiting review, oldest first, as {"zendesk_id", "subject"}."""
+    docs = tickets.find(
+        {"awaiting_review": True}, {"_id": 0, "zendesk_id": 1, "subject": 1}
+    )
+    return sorted(docs, key=lambda doc: _oldest_first(doc["zendesk_id"]))
+
+
 def awaiting_ids(tickets: Collection) -> List[str]:
-    """Zendesk IDs of every ticket currently awaiting review."""
-    return [doc["zendesk_id"] for doc in tickets.find({"awaiting_review": True}, {"zendesk_id": 1})]
+    """Zendesk IDs of every ticket currently awaiting review, oldest first."""
+    return [doc["zendesk_id"] for doc in awaiting_tickets(tickets)]
 
 
 def run_review_batch(
@@ -222,6 +282,7 @@ def run_review_batch(
     zendesk_ids: Optional[Iterable[str]] = None,
     worker: Optional[str] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Reviews awaiting tickets, continuing past per-ticket failures.
 
@@ -235,6 +296,12 @@ def run_review_batch(
             without approval. Any that are no longer awaiting review are
             skipped. Defaults to every ticket awaiting review now.
         should_stop: Checked before each ticket; True cancels the rest.
+        on_progress: Called after each ticket (on the batch's thread) with
+            {"zendesk_id", "outcome", "review", "done", "total", "summary"}:
+            outcome is classified, manual_fallback, skipped or errored;
+            review is the stored review (None unless one was stored); done
+            counts tickets finished so far, of total; summary is the running
+            counts. Not called for a fatal stop or a cancel.
 
     Returns:
         Counts: classified, manual_fallback (gave up after repeated engine
@@ -244,36 +311,69 @@ def run_review_batch(
     """
     tickets = tickets if tickets is not None else get_tickets_collection()
     worker = worker or default_worker_id()
-    summary = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0, "cancelled": 0,
-               "stopped": None, "usage": {}}
+    summary = {
+        "classified": 0,
+        "manual_fallback": 0,
+        "skipped": 0,
+        "errored": 0,
+        "cancelled": 0,
+        "stopped": None,
+        "usage": {},
+    }
     # dict.fromkeys de-duplicates while keeping order, so no ID is billed twice.
-    zendesk_ids = list(dict.fromkeys(zendesk_ids if zendesk_ids is not None else awaiting_ids(tickets)))
+    zendesk_ids = list(
+        dict.fromkeys(zendesk_ids if zendesk_ids is not None else awaiting_ids(tickets))
+    )
+    def report(zendesk_id: str, outcome: str, review: Optional[dict], done: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(
+                {
+                    "zendesk_id": zendesk_id,
+                    "outcome": outcome,
+                    "review": review,
+                    "done": done,
+                    "total": len(zendesk_ids),
+                    "summary": dict(summary),
+                }
+            )
+        except Exception as e:  # a display problem must never stop a paid batch
+            logger.warning(f"Batch progress callback failed: {e}")
+
     for index, zendesk_id in enumerate(zendesk_ids):
         if should_stop and should_stop():
             summary["cancelled"] = len(zendesk_ids) - index
-            logger.warning(f"Batch cancelled; {summary['cancelled']} ticket(s) not started.")
+            logger.warning(
+                f"Batch cancelled; {summary['cancelled']} ticket(s) not started."
+            )
             break
         try:
             result = process_one_ticket(zendesk_id, tickets, worker)
         except Exception as e:
             if is_fatal(e):
                 summary["stopped"] = f"{type(e).__name__}: {e}"
-                logger.error(f"{zendesk_id}: {e} — stopping the batch; every ticket would fail the same way.")
+                logger.error(
+                    f"{zendesk_id}: {e} — stopping the batch; every ticket would fail the same way."
+                )
                 break
             summary["errored"] += 1
             logger.error(f"{zendesk_id}: engine error, left in the queue: {e}")
+            report(zendesk_id, "errored", None, index + 1)
             continue
         if result is None:
             summary["skipped"] += 1
             logger.info(f"{zendesk_id}: already reviewed or claimed elsewhere, skipped")
+            report(zendesk_id, "skipped", None, index + 1)
             continue
         _add_usage(summary["usage"], result.get("audit"))
         _add_usage(summary["usage"], (result.get("confirmation_of") or {}).get("audit"))
-        if result.get("engine_error"):
-            summary["manual_fallback"] += 1
-        else:
-            summary["classified"] += 1
-        logger.info(f"{zendesk_id}: {result['classification']} ({result['confidence']})")
+        outcome = "manual_fallback" if result.get("engine_error") else "classified"
+        summary[outcome] += 1
+        logger.info(
+            f"{zendesk_id}: {result['classification']} ({result['confidence']})"
+        )
+        report(zendesk_id, outcome, result, index + 1)
 
     logger.info(
         f"Batch finished: {summary['classified']} classified, {summary['manual_fallback']} routed to manual "

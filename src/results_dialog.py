@@ -8,6 +8,7 @@ the browser, sandboxed (chart_viewer).
 import pathlib
 from typing import List, Optional, Tuple
 
+import chart_viewer
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtGui import QPixmap
@@ -16,13 +17,11 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QLabel,
     QMessageBox,
-    QPushButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-
-import chart_viewer
+from widgets import Button, heading, hint, use_si_scrollbars
 
 PLOT_WIDTH = 560
 
@@ -61,10 +60,10 @@ class ResultsDialog(QDialog):
         self.setWindowTitle("LDA Results")
         self.resize(700, 750)
 
-        heading = QLabel(f"<b>Topics ({best_num_topics}, the most coherent model)</b>")
+        title = heading(f"Topics ({best_num_topics}, the most coherent model)")
 
         # Plain text: topic words come from customer tickets.
-        self.topic_text = QTextEdit()
+        self.topic_text = use_si_scrollbars(QTextEdit())
         self.topic_text.setReadOnly(True)
         self.topic_text.setPlainText(format_topics(topics))
 
@@ -72,25 +71,33 @@ class ResultsDialog(QDialog):
         self.plot_label.setAlignment(QtCore.Qt.AlignCenter)
         pixmap = QPixmap(plot_path) if plot_path else QPixmap()
         if pixmap.isNull():
-            self.plot_label.setText("The coherence plot could not be created; see the log.")
+            self.plot_label.setText(
+                "The coherence plot could not be created; see the log."
+            )
         else:
             self.plot_label.setPixmap(
-                pixmap.scaledToWidth(min(PLOT_WIDTH, pixmap.width()), QtCore.Qt.SmoothTransformation)
+                pixmap.scaledToWidth(
+                    min(PLOT_WIDTH, pixmap.width()), QtCore.Qt.SmoothTransformation
+                )
             )
 
-        self.chart_button = QPushButton("Open Interactive Topic Chart")
+        self.chart_button = Button("Open Interactive Topic Chart", primary=True)
         self.chart_button.clicked.connect(self.open_chart)
         if not chart_path:
             self.chart_button.setEnabled(False)
-            self.chart_button.setText("Interactive topic chart could not be created; see the log")
+            self.chart_button.setText(
+                "Interactive topic chart could not be created; see the log"
+            )
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.close)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(heading)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(title)
         layout.addWidget(self.topic_text, stretch=1)
-        layout.addWidget(QLabel("Coherence by number of topics:"))
+        layout.addWidget(hint("Coherence by number of topics:"))
         layout.addWidget(self.plot_label)
         layout.addWidget(self.chart_button)
         layout.addWidget(buttons)
@@ -107,4 +114,6 @@ class ResultsDialog(QDialog):
             chart_viewer.open_chart(self.chart_path)
         except OSError as e:
             logger.error(f"Could not open the topic chart: {e}")
-            QMessageBox.warning(self, "Chart Not Opened", f"Could not open the topic chart:\n{e}")
+            QMessageBox.warning(
+                self, "Chart Not Opened", f"Could not open the topic chart:\n{e}"
+            )

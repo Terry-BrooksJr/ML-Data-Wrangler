@@ -8,23 +8,24 @@ nothing here changes how tickets are classified or stored.
 
 import os
 import threading
+import time
 from typing import Any, Callable, List, Optional
 
+import embeddings
+from decision_engine import feedback, persistence, search
+from decision_engine.guards import CLASSIFICATIONS
+from lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5 import QtCore
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
-    QLabel,
-    QLineEdit,
     QMessageBox,
-    QProgressBar,
-    QPushButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -32,18 +33,16 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import embeddings
-from decision_engine import feedback, persistence, search
-from decision_engine.guards import CLASSIFICATIONS
 from utility import ThreadWorker, worker_thread
+from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
 # engine skips that step.
 READ_ENV = ("MONGO_URI",)
 REVIEW_ENV = READ_ENV + (
-    "CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_API_URL",
+    "CHEAPER_INFERENCE_API_KEY",
+    "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
 )
 # Embedding tickets reads and writes Mongo and calls Voyage AI.
@@ -54,7 +53,16 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
-COLUMNS = ["Ticket", "Subject", "Classification", "Confidence", "Reviewed (UTC)", "Model"]
+# Table data role on a row's first cell: its review's ID, to keep it selected.
+REVIEW_ID_ROLE = QtCore.Qt.UserRole + 1
+COLUMNS = [
+    "Ticket",
+    "Subject",
+    "Classification",
+    "Confidence",
+    "Reviewed (UTC)",
+    "Model",
+]
 CONNECTION_HINT = (
     "Could not reach MongoDB. Check that you are on the VPN, that its exit IP "
     "is on the Atlas IP access list, and that the cluster is not paused."
@@ -84,7 +92,9 @@ def optional_models_note() -> str:
         One line per unset model, or "" when both are set.
     """
     return "\n".join(
-        f"{name} is not set: {effect}." for name, effect in OPTIONAL_MODEL_ENV.items() if not os.getenv(name)
+        f"{name} is not set: {effect}."
+        for name, effect in OPTIONAL_MODEL_ENV.items()
+        if not os.getenv(name)
     )
 
 
@@ -111,7 +121,15 @@ def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> Lis
         {"$unwind": "$agent_reviews"},
         {"$sort": {"agent_reviews.reviewed_at": -1}},
         {"$limit": limit},
-        {"$project": {"_id": 0, "zendesk_id": 1, "subject": 1, "outcomes": 1, "review": "$agent_reviews"}},
+        {
+            "$project": {
+                "_id": 0,
+                "zendesk_id": 1,
+                "subject": 1,
+                "outcomes": 1,
+                "review": "$agent_reviews",
+            }
+        },
     ]
     return list(tickets.aggregate(pipeline))
 
@@ -124,9 +142,11 @@ def format_review(row: dict) -> str:
     lines = [
         f"Ticket {row.get('zendesk_id')}: {row.get('subject') or '(no subject)'}",
         f"Classification: {review.get('classification')} (confidence {review.get('confidence')})",
-        f"Reviewed: {reviewed_at:%Y-%m-%d %H:%M} UTC · Model: {review.get('model_version')}"
-        if reviewed_at
-        else f"Model: {review.get('model_version')}",
+        (
+            f"Reviewed: {reviewed_at:%Y-%m-%d %H:%M} UTC · Model: {review.get('model_version')}"
+            if reviewed_at
+            else f"Model: {review.get('model_version')}"
+        ),
         "",
         "Signals matched:",
         *[f"  - {signal}" for signal in review.get("signals_matched") or ["(none)"]],
@@ -149,12 +169,22 @@ def format_review(row: dict) -> str:
     if review.get("leadership_recipient"):
         lines += ["", f"Leadership recipient: {review['leadership_recipient']}"]
     if review.get("guard_overrides"):
-        lines += ["", "Overridden by code checks:", *[f"  - {o}" for o in review["guard_overrides"]]]
+        lines += [
+            "",
+            "Overridden by code checks:",
+            *[f"  - {o}" for o in review["guard_overrides"]],
+        ]
     if review.get("engine_error"):
-        lines += ["", f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}"]
+        lines += [
+            "",
+            f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
+        ]
     if outcome := latest_outcome(row):
-        lines += ["", f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
-                  + (f": {outcome['detail']}" if outcome.get("detail") else "")]
+        lines += [
+            "",
+            f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
+            + (f": {outcome['detail']}" if outcome.get("detail") else ""),
+        ]
     if audit := review.get("audit") or {}:
         usage = audit.get("usage") or {}
         lines += [
@@ -171,6 +201,67 @@ def latest_outcome(row: dict) -> Optional[dict]:
     review_id = row["review"].get("review_id")
     matches = [o for o in row.get("outcomes") or [] if o.get("review_id") == review_id]
     return matches[-1] if matches else None
+
+
+def ask_batch_size(parent: QWidget, awaiting: int, note: str) -> Optional[int]:
+    """Asks how many of the awaiting tickets to review; None if cancelled.
+
+    A module function so tests can answer it without a dialog.
+    """
+    text = (
+        f"{awaiting} ticket(s) are awaiting review. How many should this batch "
+        "review, oldest first?\n\nEach ticket is a paid model call. Results are "
+        "saved to MongoDB only. You can stop the batch after any ticket."
+        + (f"\n\nWarning:\n{note}" if note else "")
+    )
+    count, ok = QInputDialog.getInt(parent, "Run Batch", text, awaiting, 1, awaiting, 1)
+    return count if ok else None
+
+
+def format_duration(seconds: float) -> str:
+    """Seconds as "45 s", "3 min 20 s" or "1 h 5 min"."""
+    seconds = max(0, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {seconds} s" if seconds else f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def batch_status(progress: dict, elapsed: float) -> str:
+    """The progress line: tickets done, outcomes, speed and time left.
+
+    The estimate is the average time per finished ticket so far times the
+    tickets left, so it follows the model's current speed.
+    """
+    done, total, counts = progress["done"], progress["total"], progress["summary"]
+    parts = [f"{done} of {total} done"]
+    outcomes = [
+        f"{counts[key]} {label}"
+        for key, label in (
+            ("classified", "classified"),
+            ("manual_fallback", "to manual triage"),
+            ("skipped", "skipped"),
+            ("errored", "errored"),
+        )
+        if counts.get(key)
+    ]
+    if outcomes:
+        parts.append(", ".join(outcomes))
+    if done:
+        per_ticket = elapsed / done
+        parts.append(f"{per_ticket:.1f} s per ticket")
+        if done < total:
+            parts.append(f"about {format_duration(per_ticket * (total - done))} left")
+    return " · ".join(parts)
+
+
+class BatchRelay(QObject):
+    """Carries batch progress from the worker thread to the tab (queued, as it lives on the GUI thread)."""
+
+    progress = pyqtSignal(object)
 
 
 class TriageTab(QWidget):
@@ -199,9 +290,13 @@ class TriageTab(QWidget):
 
     def __init__(
         self,
-        collection_factory: Callable[[], Collection] = persistence.get_tickets_collection,
+        collection_factory: Callable[
+            [], Collection
+        ] = persistence.get_tickets_collection,
         review_batch: Optional[Callable[[Collection, List[str]], Any]] = None,
-        review_one: Callable[[str, Collection], Optional[dict]] = persistence.process_one_ticket,
+        review_one: Callable[
+            [str, Collection], Optional[dict]
+        ] = persistence.process_one_ticket,
         parent: Optional[QWidget] = None,
     ) -> None:
         """Stores the injected callables, initializes job and table state, and builds the UI.
@@ -216,15 +311,25 @@ class TriageTab(QWidget):
         # interrupted safely, so it always finishes.
         self._cancel = threading.Event()
         self._closing = False
+        # Called on the worker thread as review_batch(tickets, ids, on_progress=...).
         self.review_batch = review_batch or (
-            lambda tickets, zendesk_ids: persistence.run_review_batch(
-                tickets, zendesk_ids, should_stop=self._cancel.is_set
+            lambda tickets, zendesk_ids, on_progress=None: persistence.run_review_batch(
+                tickets,
+                zendesk_ids,
+                should_stop=self._cancel.is_set,
+                on_progress=on_progress,
             )
         )
+        # The running batch: total, start time and subjects, or None.
+        self._batch: Optional[dict] = None
+        self._batch_relay = BatchRelay(self)
+        self._batch_relay.progress.connect(self._on_batch_progress)
         self.review_one = review_one
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
         self._on_done: Optional[Callable[[Any], None]] = None
+        self._on_error: Optional[Callable[[str], None]] = None
+        self.weekly_review_dialog = None
         self._rows: List[dict] = []
         self._loaded = False
         self._build_ui()
@@ -234,33 +339,36 @@ class TriageTab(QWidget):
     def _build_ui(self) -> None:
         """Creates the widgets and layout, starting in the idle state."""
 
-        intro = QLabel(
+        intro = hint(
             "Classifies tickets awaiting review and records each result on the ticket "
             "in MongoDB. Nothing is written to Zendesk. Each ticket reviewed is a paid model call."
         )
-        intro.setWordWrap(True)
 
-        self.status_label = QLabel()
-        self.refresh_button = QPushButton("Refresh")
+        self.status_label = hint("")
+        self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status_label, stretch=1)
         status_row.addWidget(self.refresh_button)
 
-        self.review_all_button = QPushButton("Review All Awaiting Tickets")
-        self.review_all_button.clicked.connect(self.start_review_all)
+        self.batch_button = Button("Run Batch…", primary=True)
+        self.batch_button.setToolTip(
+            "Review the next N tickets awaiting review, oldest first. "
+            "Each ticket is a paid model call."
+        )
+        self.batch_button.clicked.connect(self.start_batch)
 
-        self.ticket_id_input = QLineEdit()
+        self.ticket_id_input = LineEdit("Ticket")
         self.ticket_id_input.setPlaceholderText("Zendesk ticket ID")
         self.ticket_id_input.setClearButtonEnabled(True)
         self.ticket_id_input.returnPressed.connect(self.start_review_one)
-        self.review_one_button = QPushButton("Classify One Ticket")
+        self.review_one_button = Button("Classify One Ticket")
         self.review_one_button.clicked.connect(self.start_review_one)
         one_row = QHBoxLayout()
         one_row.addWidget(self.ticket_id_input, stretch=1)
         one_row.addWidget(self.review_one_button)
 
-        self.embed_button = QPushButton("Embed Tickets (Voyage AI)…")
+        self.embed_button = Button("Embed Tickets (Voyage AI)…")
         self.embed_button.setToolTip(
             "Stores a Voyage embedding on each new or changed ticket and creates the vector index."
         )
@@ -268,11 +376,20 @@ class TriageTab(QWidget):
 
         # Range 0..0 makes the bar an indeterminate "busy" indicator:
         # run_review_batch reports no progress.
-        self.busy_bar = QProgressBar()
+        self.busy_bar = ProgressBar()
         self.busy_bar.setRange(0, 0)
         self.busy_bar.setVisible(False)
+        # Shown while a batch runs: its progress, and a way to stop it safely.
+        self.batch_label = hint("")
+        self.batch_label.setVisible(False)
+        self.stop_button = Button("Stop After This Ticket")
+        self.stop_button.setToolTip(
+            "Finishes the ticket being reviewed, saves it, and leaves the rest in the queue."
+        )
+        self.stop_button.clicked.connect(self.stop_batch)
+        self.stop_button.setVisible(False)
 
-        self.table = QTableWidget(0, len(COLUMNS))
+        self.table = use_si_scrollbars(QTableWidget(0, len(COLUMNS)))
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -282,20 +399,28 @@ class TriageTab(QWidget):
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self.show_selected_review)
 
-        self.detail = QTextEdit()
+        self.detail = use_si_scrollbars(QTextEdit())
         self.detail.setReadOnly(True)
-        self.detail.setPlaceholderText("Select a review to see its reasoning, note and draft message.")
+        self.detail.setPlaceholderText(
+            "Select a review to see its reasoning, note and draft message."
+        )
 
-        self.mark_good_button = QPushButton("Mark Correct")
+        self.mark_good_button = Button("Mark Correct")
         self.mark_good_button.clicked.connect(self.mark_selected_correct)
-        self.mark_bad_button = QPushButton("Mark Misclassified…")
+        self.mark_bad_button = Button("Mark Misclassified…")
         self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
-        self.accuracy_button = QPushButton("Accuracy Report")
+        self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        self.weekly_review_button = Button("Weekly Review…")
+        self.weekly_review_button.setToolTip(
+            "Review the week's misclassifications and write the lessons learned from them."
+        )
+        self.weekly_review_button.clicked.connect(self.open_weekly_review)
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.weekly_review_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
@@ -309,15 +434,25 @@ class TriageTab(QWidget):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
+        review_card = Card("Review Tickets")
+        review_card.body.addWidget(intro)
+        review_card.body.addLayout(status_row)
+        review_card.body.addLayout(one_row)
+        review_card.body.addLayout(button_row(self.batch_button, self.embed_button))
+        review_card.body.addWidget(self.busy_bar)
+        batch_row = QHBoxLayout()
+        batch_row.addWidget(self.batch_label, stretch=1)
+        batch_row.addWidget(self.stop_button)
+        review_card.body.addLayout(batch_row)
+
+        reviews_card = Card(f"Recent Reviews (newest {RECENT_REVIEW_LIMIT})")
+        reviews_card.body.addWidget(splitter)
+
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
-        layout.addLayout(status_row)
-        layout.addWidget(self.review_all_button)
-        layout.addLayout(one_row)
-        layout.addWidget(self.embed_button)
-        layout.addWidget(self.busy_bar)
-        layout.addWidget(QLabel(f"Recent reviews (newest {RECENT_REVIEW_LIMIT})"))
-        layout.addWidget(splitter, stretch=1)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(review_card)
+        layout.addWidget(reviews_card, stretch=1)
 
         self._set_busy(False)
 
@@ -413,7 +548,7 @@ class TriageTab(QWidget):
         self._thread.wait()
         self._thread = None
         self._worker = None
-        self._on_done = None
+        self._on_done = self._on_error = None
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
         """Switches the tab between busy and idle states.
@@ -426,8 +561,14 @@ class TriageTab(QWidget):
             label: Text for the busy bar and, when busy, the status label.
         """
 
-        for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button,
-                       self.embed_button):
+        for button in (
+            self.refresh_button,
+            self.batch_button,
+            self.review_one_button,
+            self.accuracy_button,
+            self.embed_button,
+            self.weekly_review_button,
+        ):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
@@ -435,12 +576,29 @@ class TriageTab(QWidget):
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
+        if not busy:
+            # A batch's progress UI goes with it.
+            self._batch = None
+            self.busy_bar.setRange(0, 0)
+            self.batch_label.setVisible(False)
+            self.stop_button.setVisible(False)
         if busy and label:
             self.status_label.setText(label)
 
-    def _run(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]) -> None:
-        if self._closing:
-            return
+    def _run(
+        self,
+        task: Callable[[], Any],
+        description: str,
+        on_done: Callable[[Any], None],
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Runs `task` on a worker thread, then `on_done(result)` (or `on_error(message)`) here.
+
+        Returns:
+            False, without running anything, while another job runs or the tab is closing.
+        """
+        if self._closing or self._thread is not None:
+            return False
 
         def with_connection_hint():
             try:
@@ -450,6 +608,7 @@ class TriageTab(QWidget):
 
         self._set_busy(True, f"{description}…")
         self._on_done = on_done
+        self._on_error = on_error
         self._thread = worker_thread(self)
         self._worker = ThreadWorker(with_connection_hint, description)
         self._worker.moveToThread(self._thread)
@@ -457,6 +616,7 @@ class TriageTab(QWidget):
         self._worker.error.connect(self._job_failed)
         self._thread.started.connect(self._worker.run)
         self._thread.start()
+        return True
 
     def _stop_thread(self) -> None:
         """Shuts down the current worker thread and returns to the idle state.
@@ -473,7 +633,7 @@ class TriageTab(QWidget):
 
     def _job_finished(self, result: Any) -> None:
         """Handles a successful job.
-             
+
         Stops the thread first, then invokes the stored `on_done` callback with
         the result. The order matters: the callback may start the next job.
         Completion is reported by each callback, not here, so refreshes and
@@ -483,7 +643,7 @@ class TriageTab(QWidget):
             result: The value returned by the task.
         """
         self._stop_thread()
-        on_done, self._on_done = self._on_done, None
+        on_done, self._on_done, self._on_error = self._on_done, None, None
         if self._closing:
             # Don't start follow-up jobs or show dialogs while closing.
             self.idle.emit()
@@ -500,13 +660,15 @@ class TriageTab(QWidget):
             message: The error text from the worker, shown to the user.
         """
         self._stop_thread()
-        self._on_done = None
+        on_error, self._on_done, self._on_error = self._on_error, None, None
         if self._closing:
             logger.error(f"Decision Engine job failed while closing: {message}")
             self.idle.emit()
             return
         self.status_label.setText("Last action failed; see the log.")
         QMessageBox.critical(self, "Decision Engine Error", message)
+        if on_error is not None:
+            on_error(message)
 
     # --- actions ---------------------------------------------------------------
 
@@ -538,10 +700,10 @@ class TriageTab(QWidget):
         self._rows = rows
         self._fill_table()
 
-    def start_review_all(self) -> None:
-        """Begins the review-all flow by listing awaiting tickets.
+    def start_batch(self) -> None:
+        """Begins a batch: lists the awaiting tickets, then asks how many to review.
 
-        Snapshots the awaiting IDs off the GUI thread before asking, so the
+        Snapshots the awaiting tickets off the GUI thread before asking, so the
         batch reviews exactly the tickets the user approved, not ones inserted
         or reopened while the dialog was open. Shows a warning and stops if
         the environment is not configured.
@@ -549,40 +711,85 @@ class TriageTab(QWidget):
         if not self._configured(REVIEW_ENV, notify=True):
             return
         self._run(
-            lambda: persistence.awaiting_ids(self.collection_factory()),
+            lambda: persistence.awaiting_tickets(self.collection_factory()),
             "Finding tickets awaiting review",
-            self._confirm_review_all,
+            self._confirm_batch,
         )
 
-    def _confirm_review_all(self, zendesk_ids: List[str]) -> None:
-        """Asks before sending the listed tickets to the model, then reviews only those.
+    def _confirm_batch(self, awaiting: List[dict]) -> None:
+        """Asks how many tickets to review (1 to all), then reviews the oldest that many.
 
         Args:
-            zendesk_ids: The tickets awaiting review when the list was taken.
+            awaiting: The tickets awaiting review when the list was taken,
+                oldest first, as {"zendesk_id", "subject"}.
         """
-        awaiting = len(zendesk_ids)
-        self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
-        if awaiting == 0:
-            QMessageBox.information(self, "Nothing to Review", "No tickets are awaiting review.")
+        self.status_label.setText(f"{len(awaiting)} ticket(s) awaiting review.")
+        if not awaiting:
+            QMessageBox.information(
+                self, "Nothing to Review", "No tickets are awaiting review."
+            )
             return
-        note = optional_models_note()
-        answer = QMessageBox.question(
-            self,
-            "Review All Awaiting Tickets",
-            f"Send {awaiting} ticket(s) to the model for classification?\n\n"
-            "Each ticket is a paid model call. Results are saved to MongoDB only."
-            + (f"\n\nWarning:\n{note}" if note else ""),
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
-        )
-        if answer != QMessageBox.Yes:
+        count = ask_batch_size(self, len(awaiting), optional_models_note())
+        if not count:
             return
+        chosen = awaiting[:count]
+        zendesk_ids = [ticket["zendesk_id"] for ticket in chosen]
         self._warn_optional_models()
-        self._run(
-            lambda: self.review_batch(self.collection_factory(), list(zendesk_ids)),
-            f"Reviewing {awaiting} ticket(s)",
-            self._review_all_done,
+        self._cancel.clear()  # a Stop pressed during an earlier batch
+        started = self._run(
+            lambda: self.review_batch(
+                self.collection_factory(),
+                list(zendesk_ids),
+                on_progress=self._batch_relay.progress.emit,
+            ),
+            f"Reviewing {count} ticket(s)",
+            self._batch_done,
         )
+        if not started:
+            return
+        self._batch = {
+            "total": count,
+            "started": time.monotonic(),
+            "subjects": {t["zendesk_id"]: t.get("subject") for t in chosen},
+        }
+        self.busy_bar.setRange(0, count)
+        self.busy_bar.setValue(0)
+        self.batch_label.setText(f"0 of {count} done · starting…")
+        self.batch_label.setVisible(True)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+
+    def stop_batch(self) -> None:
+        """Stops the batch after the ticket in progress, which is still saved."""
+        if self._batch is None:
+            return
+        self._cancel.set()
+        self.stop_button.setEnabled(False)
+        self.batch_label.setText(
+            self.batch_label.text().split(" · about")[0] + " · stopping after this ticket…"
+        )
+        logger.info("Decision Engine: batch will stop after the current ticket.")
+
+    def _on_batch_progress(self, progress: dict) -> None:
+        """After each ticket: moves the bar, updates the counts and time left,
+        and adds a stored review to Recent Reviews."""
+        if self._batch is None:  # a late signal after the batch ended
+            return
+        self.busy_bar.setValue(progress["done"])
+        status = batch_status(progress, time.monotonic() - self._batch["started"])
+        if self._cancel.is_set() and not self._closing:
+            status = status.split(" · about")[0] + " · stopping after this ticket…"
+        self.batch_label.setText(status)
+        review = progress.get("review")
+        if review is not None:
+            zendesk_id = progress["zendesk_id"]
+            row = {
+                "zendesk_id": zendesk_id,
+                "subject": self._batch["subjects"].get(zendesk_id),
+                "review": review,
+            }
+            self._rows = [row, *self._rows][:RECENT_REVIEW_LIMIT]
+            self._fill_table()
 
     def start_embed_tickets(self) -> None:
         """Checks the vector index and lists stale tickets, then asks before sending them to Voyage.
@@ -604,8 +811,11 @@ class TriageTab(QWidget):
             status = embeddings.index_status(tickets, cfg)  # raises VectorIndexMismatch
             return embeddings.plan_backfill(tickets, cfg), status
 
-        self._run(prepare, "Finding tickets that need embeddings",
-                  lambda prepared: self._confirm_embed(cfg, *prepared))
+        self._run(
+            prepare,
+            "Finding tickets that need embeddings",
+            lambda prepared: self._confirm_embed(cfg, *prepared),
+        )
 
     def _confirm_embed(self, cfg, plan, status: str) -> None:
         """Asks before the paid calls, then embeds exactly the approved tickets."""
@@ -613,7 +823,8 @@ class TriageTab(QWidget):
             answer = QMessageBox.question(
                 self,
                 "Embed Tickets",
-                embeddings.describe_plan(plan, cfg) + " Tickets with a current embedding are skipped.\n\nContinue?",
+                embeddings.describe_plan(plan, cfg)
+                + " Tickets with a current embedding are skipped.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
@@ -622,7 +833,9 @@ class TriageTab(QWidget):
 
         def embed_and_index():
             tickets = self.collection_factory()
-            summary = embeddings.run_backfill(tickets, cfg, plan, should_stop=self._cancel.is_set)
+            summary = embeddings.run_backfill(
+                tickets, cfg, plan, should_stop=self._cancel.is_set
+            )
             # A VectorIndexMismatch here (the index changed in Atlas during the
             # run) propagates and is shown as an error, not a warning.
             try:
@@ -631,27 +844,35 @@ class TriageTab(QWidget):
                 summary["index"] = f"skipped: {e}"
             return summary
 
-        self._run(embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done)
+        self._run(
+            embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done
+        )
 
     def _embed_done(self, summary: dict) -> None:
         message = embeddings.format_summary(summary)
         logger.success(message.replace("\n", "; "))
         QMessageBox.information(self, "Embedding Complete", message)
 
-    def _review_all_done(self, summary) -> None:
-        """Logs and announces batch completion, then refreshes the list.
+    def _batch_done(self, summary) -> None:
+        """Logs and announces the batch's end, then refreshes the list.
 
         Args:
             summary: The batch's counts from run_review_batch, or None.
         """
-        logger.success("Review batch finished.")
-        message = "Review batch finished. Results are listed below."
+        stopped_by_user = isinstance(summary, dict) and summary.get("cancelled")
+        logger.success("Review batch stopped." if stopped_by_user else "Review batch finished.")
+        message = (
+            "Batch stopped after the current ticket; the rest are still awaiting review."
+            if stopped_by_user
+            else "Review batch finished. Results are listed below."
+        )
         if isinstance(summary, dict):
             message += "\n\n" + persistence.format_batch_summary(summary)
         if isinstance(summary, dict) and summary.get("stopped"):
             QMessageBox.warning(self, "Review Stopped Early", message)
         else:
-            QMessageBox.information(self, "Review Complete", message)
+            title = "Batch Stopped" if stopped_by_user else "Review Complete"
+            QMessageBox.information(self, title, message)
         self.refresh()
 
     def start_review_one(self) -> None:
@@ -663,7 +884,9 @@ class TriageTab(QWidget):
 
         zendesk_id = self.ticket_id_input.text().strip()
         if not zendesk_id:
-            QMessageBox.warning(self, "No Ticket ID", "Enter a Zendesk ticket ID to classify.")
+            QMessageBox.warning(
+                self, "No Ticket ID", "Enter a Zendesk ticket ID to classify."
+            )
             return
         if not self._configured(REVIEW_ENV, notify=True):
             return
@@ -695,7 +918,11 @@ class TriageTab(QWidget):
             message += f"\n\nThe engine failed repeatedly, so the ticket was routed to manual triage: {result['engine_error']}"
         logger.success(message)
         note = optional_models_note()
-        QMessageBox.information(self, "Ticket Classified", message + (f"\n\nWarning:\n{note}" if note else ""))
+        QMessageBox.information(
+            self,
+            "Ticket Classified",
+            message + (f"\n\nWarning:\n{note}" if note else ""),
+        )
         self.ticket_id_input.clear()
         self.refresh()
 
@@ -711,6 +938,13 @@ class TriageTab(QWidget):
         columns are resized, and the detail pane is cleared.
         """
 
+        # Read from the table, not self._rows, which may already hold new rows.
+        selected = self.table.selectedItems()
+        keep = (
+            self.table.item(selected[0].row(), 0).data(REVIEW_ID_ROLE)
+            if selected
+            else None
+        )
         # Sorting is paused while filling, or rows reorder mid-insert.
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self._rows))
@@ -728,15 +962,25 @@ class TriageTab(QWidget):
             for column, value in enumerate(values):
                 item = QTableWidgetItem()
                 # DisplayRole with the raw value so numbers sort numerically.
-                item.setData(QtCore.Qt.DisplayRole, value if isinstance(value, (int, float)) else str(value or ""))
+                item.setData(
+                    QtCore.Qt.DisplayRole,
+                    value if isinstance(value, (int, float)) else str(value or ""),
+                )
                 if column == 0:
                     item.setData(QtCore.Qt.UserRole, row_index)
+                    item.setData(REVIEW_ID_ROLE, str(review.get("review_id") or ""))
                 self.table.setItem(row_index, column, item)
         self.table.setSortingEnabled(True)
         # Re-enabling sorting applies the header's current indicator, which
         # defaults to column 0; reset it to newest review first.
         self.table.sortItems(COLUMNS.index("Reviewed (UTC)"), QtCore.Qt.DescendingOrder)
         self.table.resizeColumnsToContents()
+        # Rows added during a batch keep the review being read selected.
+        if keep:
+            for table_row in range(self.table.rowCount()):
+                if self.table.item(table_row, 0).data(REVIEW_ID_ROLE) == keep:
+                    self.table.selectRow(table_row)
+                    return
         self.detail.clear()
 
     def show_selected_review(self) -> None:
@@ -760,7 +1004,9 @@ class TriageTab(QWidget):
         selected = self.table.selectedItems() if hasattr(self, "table") else []
         if not selected:
             return None
-        return self._rows[self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)]
+        return self._rows[
+            self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)
+        ]
 
     # --- feedback ----------------------------------------------------------------
 
@@ -771,9 +1017,13 @@ class TriageTab(QWidget):
             return
         zendesk_id, review_id = row["zendesk_id"], row["review"]["review_id"]
         self._run(
-            lambda: feedback.record_outcome(self.collection_factory(), zendesk_id, review_id, "good"),
+            lambda: feedback.record_outcome(
+                self.collection_factory(), zendesk_id, review_id, "good"
+            ),
             f"Recording outcome for ticket {zendesk_id}",
-            lambda _: self._feedback_done(f"Ticket {zendesk_id}: review marked correct."),
+            lambda _: self._feedback_done(
+                f"Ticket {zendesk_id}: review marked correct."
+            ),
         )
 
     def mark_selected_misclassified(self) -> None:
@@ -784,24 +1034,35 @@ class TriageTab(QWidget):
         zendesk_id, review = row["zendesk_id"], row["review"]
         choices = [c for c in CLASSIFICATIONS if c != review.get("classification")]
         correct, ok = QInputDialog.getItem(
-            self, "Mark Misclassified", f"Ticket {zendesk_id} was classified {review.get('classification')}. "
-            "What should it have been?", choices, 0, False,
+            self,
+            "Mark Misclassified",
+            f"Ticket {zendesk_id} was classified {review.get('classification')}. "
+            "What should it have been?",
+            choices,
+            0,
+            False,
         )
         if not ok:
             return
-        misread, ok = QInputDialog.getText(self, "Mark Misclassified", "Which signal was misread? (optional)")
+        misread, ok = QInputDialog.getText(
+            self, "Mark Misclassified", "Which signal was misread? (optional)"
+        )
         if not ok:
             return
 
         def log_it():
             tickets = self.collection_factory()
             log, _ = feedback.get_feedback_collections(tickets.database)
-            return feedback.log_misclassification(tickets, log, zendesk_id, review["review_id"], correct, misread.strip())
+            return feedback.log_misclassification(
+                tickets, log, zendesk_id, review["review_id"], correct, misread.strip()
+            )
 
         self._run(
             log_it,
             f"Logging misclassification for ticket {zendesk_id}",
-            lambda _: self._feedback_done(f"Ticket {zendesk_id}: logged as misclassified (should be {correct})."),
+            lambda _: self._feedback_done(
+                f"Ticket {zendesk_id}: logged as misclassified (should be {correct})."
+            ),
         )
 
     def _feedback_done(self, message: str) -> None:
@@ -817,7 +1078,26 @@ class TriageTab(QWidget):
             lambda: feedback.accuracy_report(self.collection_factory()),
             "Building accuracy report",
             lambda report: QMessageBox.information(
-                self, "Accuracy Report",
-                feedback.format_accuracy_report(report) if report else "No reviews yet.",
+                self,
+                "Accuracy Report",
+                (
+                    feedback.format_accuracy_report(report)
+                    if report
+                    else "No reviews yet."
+                ),
             ),
         )
+
+    def open_weekly_review(self) -> None:
+        """Opens the weekly review of misclassification_log and lessons_learned."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.weekly_review_dialog = WeeklyReviewDialog(
+            self._run,
+            lambda: feedback.get_feedback_collections(
+                self.collection_factory().database
+            ),
+            self,
+        )
+        self.weekly_review_dialog.show()

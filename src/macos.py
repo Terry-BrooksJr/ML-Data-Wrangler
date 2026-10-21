@@ -8,6 +8,7 @@ name. The packaged Lasso.app has its own Info.plist and doesn't need this.
 
 Uses the Objective-C runtime through ctypes, so it needs no PyObjC.
 """
+
 import ctypes
 import ctypes.util
 import sys
@@ -26,7 +27,9 @@ def _runtime():
 
     def send(restype, *argtypes):
         # objc_msgSend must be called with the method's exact signature (arm64).
-        return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(address)
+        return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(
+            address
+        )
 
     return objc.objc_getClass, objc.sel_registerName, send
 
@@ -43,13 +46,18 @@ def set_app_name(name: str) -> bool:
         cls, sel, send = _runtime()
         bundle = send(ctypes.c_void_p)(cls(b"NSBundle"), sel(b"mainBundle"))
         info = send(ctypes.c_void_p)(bundle, sel(b"infoDictionary"))
-        if not info or not send(ctypes.c_bool, ctypes.c_void_p)(info, sel(b"respondsToSelector:"),
-                                                               sel(b"setObject:forKey:")):
+        if not info or not send(ctypes.c_bool, ctypes.c_void_p)(
+            info, sel(b"respondsToSelector:"), sel(b"setObject:forKey:")
+        ):
             return False
         string = send(ctypes.c_void_p, ctypes.c_char_p)
-        value = string(cls(b"NSString"), sel(b"stringWithUTF8String:"), name.encode("utf-8"))
+        value = string(
+            cls(b"NSString"), sel(b"stringWithUTF8String:"), name.encode("utf-8")
+        )
         key = string(cls(b"NSString"), sel(b"stringWithUTF8String:"), b"CFBundleName")
-        send(None, ctypes.c_void_p, ctypes.c_void_p)(info, sel(b"setObject:forKey:"), value, key)
+        send(None, ctypes.c_void_p, ctypes.c_void_p)(
+            info, sel(b"setObject:forKey:"), value, key
+        )
         return True
     except (OSError, AttributeError, TypeError) as e:
         logger.debug(f"Couldn't set the macOS app name: {e}")

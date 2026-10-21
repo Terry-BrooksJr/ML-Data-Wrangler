@@ -116,11 +116,17 @@ instead of retraining: the only difference would be the random seed.
 
 ### Appearance
 
-The app uses [QDarkStyleSheet](https://github.com/ColinDuquesnoy/QDarkStyleSheet)'s
-dark theme by default. Settings > Appearance > Theme switches to `light`, or
-`native` for the operating system's own look; the change applies when you
-save. The log pane stays a dark console in every theme, so its coloured log
-levels stay readable.
+The app is styled with [PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI)
+(GPL-3.0, like PyQt5 itself). Its buttons, combo boxes, checkboxes, progress
+bars, scroll bars and cards are SiliconUI widgets (`src/widgets.py`); the
+plain Qt widgets around them (tabs, tables, text boxes, dialogs) get a
+stylesheet built from SiliconUI's colour tokens (`src/theme.py`). SiliconUI's
+widgets come only in dark, so there is no longer a light or native theme and
+the Theme setting is gone; a saved `LASSO_THEME` is ignored.
+
+SiliconUI isn't on PyPI in a current version, so `pyproject.toml` installs it
+from GitHub at a pinned commit. To try a newer one, change `rev` under
+`[tool.uv.sources]` and run `uv lock`.
 
 ### Embedding topics (BERTopic)
 
@@ -139,8 +145,8 @@ distance map in the browser.
 
 Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
 LDA runs in `topic_models/`, and kept the same way LDA runs are: recorded in
-MongoDB's `topic_model_runs` (marked `"method": "bertopic"`, so the LDA lists
-skip them) and, with model storage set up, uploaded with a signed manifest to
+MongoDB's `bertopic_run_log` (`BERTOPIC_RUNS_COLLECTION`; LDA runs go to
+`topic_modeling_run_log`, `TOPIC_RUNS_COLLECTION`) and, with model storage set up, uploaded with a signed manifest to
 `s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
 Run…** lists runs from MongoDB and this computer, and downloads and verifies
 one whose files aren't here before showing its charts. Retry a failed upload
@@ -205,6 +211,117 @@ documents = wrangler.ticket_documents()          # one cleansed document per tic
 - **Training workers re-import `app.py`.** gensim's `LdaMulticore` starts worker processes, and on macOS each one re-runs `app.py` from the top. So every worker loads the spaCy model and builds a hidden copy of the window. Training still works, but it's slow and uses a lot of memory. The fix is to move the module-level `nlp`, `app` and `window` setup under `if __name__ == "__main__":`.
 - **Chart files aren't gitignored.** `coherence.png` and `lda_model.html` land in the directory you launch from and show up as untracked files. (`completed/` and `*.log` are already ignored.)
 
+## Normalizing tags
+
+The **Tag Normalizer** tab finds tags that mean the same thing and maps each
+to one tag, so "oil change", "tire_rotation" and "Car Maintenance" all become
+`car_maintenance`. It never writes to Zendesk; the result is a mapping you
+export, and **Save Run** keeps it (see [Saved runs and normalized tags](#saved-runs-and-normalized-tags)).
+
+1. Paste tags (comma- or newline-separated, or a JSON list), or **Load
+   File…**. A CSV such as a Zendesk tag export (`name,count`) uses its first
+   column; the count is ignored.
+2. Pick **Voyage AI** (the embedding Settings; sends only the tag names) or
+   **spaCy** (local and free, but misses looser synonyms), then **Find
+   Similar Tags**. Each tag is embedded once per session; re-runs only embed
+   new tags.
+3. Adjust **Merge at similarity ≥** to regroup instantly. Voyage scores short
+   tags high (unrelated pairs often reach 0.8), so its default is 0.90;
+   spaCy's is 0.80.
+4. Double-click a group's tag to rename it, untick any tag to keep it out of
+   its group, then **Export Mapping…** as CSV (`tag,canonical_tag,uses,similarity`)
+   or JSON.
+
+Before embedding, tags are cleaned: underscores, hyphens and camelCase become
+spaces and case is ignored, so `car_maintenance` and `Car Maintenance` are
+one tag. A group is named by its most central tag, in its most common
+spelling.
+
+Structured `facet__value` tags (`sentiment__positive`, `intent_confidence__low`,
+`intent__software__sync__issue`) come from a fixed taxonomy and share long
+prefixes, so opposite values embed as near-identical. Two of them are never
+grouped together; a free-form tag can still join one (`central_2fa_reset` →
+`intent__software__verification_code__2fa_reset`), and the structured tag
+names the group. Untick **Keep facet__value tags apart** to allow it.
+
+The same from the command line:
+
+```bash
+cd src && python -m tag_normalizer tags.csv --out tag_mapping.csv
+cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
+```
+
+### Saved runs and normalized tags
+
+**Save Run** keeps a run the way LDA and BERTopic runs are kept: its folder
+under `tag_normalizer_runs/` (`TAG_RUN_DIR`) holds the tags, their vectors and
+the mapping (CSV and JSON); with model storage set up it is uploaded with a
+signed manifest to `s3://<bucket>/<MODEL_PREFIX>tag_normalizer/<run_id>/`
+(retry a failed upload with `cd src && python -m model_storage upload --tags RUN_ID`);
+and it is recorded in MongoDB's `tag_normalization_run_log`
+(`TAG_RUNS_COLLECTION`) with its settings, your renames and unticked tags,
+and every tag it changed. **Previous Runs…** lists runs from MongoDB and
+this computer and reopens one exactly as saved (downloading and verifying it
+first if needed), without embedding anything again.
+
+Saving also records the run's decisions in `normalized_tags`
+(`NORMALIZED_TAGS_COLLECTION`), one document per successor tag:
+
+```json
+{
+  "tag": "password_reset",
+  "text": "password reset",
+  "replaces": [
+    {"tag": "pw_reset", "text": "pw reset", "run_id": "20261020T...", "replaced_at": "..."}
+  ],
+  "run_ids": ["20261020T..."],
+  "created_at": "...", "updated_at": "..."
+}
+```
+
+- A deprecated tag belongs to one successor (unique index on `replaces.tag`).
+- Successors never chain: merging successor A into B moves A and everything
+  A replaced to B, and A's document goes.
+- The latest run wins: a tag deprecated before but kept as itself (unticked)
+  or chosen as a successor now is taken off its old successor; a successor
+  left replacing nothing is removed.
+
+**Find Similar Tags** reads `normalized_tags` back. Every saved successor
+joins the grouping (embedded with your tags), so new synonyms join it and
+it keeps its name, shown as "(saved successor)" when it isn't in your input;
+two saved successors are never grouped together (rename a group to merge
+them). A tag already deprecated goes straight to its successor's group.
+Without `MONGO_URI` the tab works as before and Save Run keeps the folder
+(and upload) only.
+
+### Retagging tickets in Zendesk
+
+**Export Zendesk Scripts…** (or `--scripts FOLDER` on the command line)
+writes a folder for a person to run by hand; Lasso itself never calls
+Zendesk. It holds `tag_changes.csv` (`old_tag,new_tag`, only tags that
+change) and three standard-library Python scripts, run in order:
+
+1. `1_find_tickets.py` (read-only) searches for tickets with each old tag
+   (`GET /api/v2/search/export`, cursor-paginated) and writes
+   `tickets_to_retag.csv`.
+2. `2_remove_old_tags.py --apply` removes each old tag from those tickets.
+3. `3_add_new_tags.py --apply` adds the new tag to the same tickets.
+
+Steps 2 and 3 use `PUT /api/v2/tickets/update_many.json` (100 tickets per
+request, `remove_tags` / `additional_tags`, so other tags are untouched) and
+wait for each job to finish. They print a dry run unless given `--apply`,
+read the ticket list from step 1 rather than searching again, skip closed
+tickets (Zendesk won't update them) and log each ticket's result. They read
+`ZENDESK_SUBDOMAIN`, `ZENDESK_EMAIL` and `ZENDESK_API_TOKEN` from the
+environment. A new tag with spaces or capitals is written as a valid Zendesk
+tag (`Vehicle Care` → `vehicle_care`). Each update is a normal ticket update,
+so it can fire triggers that look at tags. The folder's `README.txt` has the
+full steps.
+
+```bash
+cd src && python -m tag_normalizer tags.csv --scripts ../zendesk_retag_run
+```
+
 ## Writing tickets to MongoDB
 
 `DataWrangler` can load the export into the `tickets` collection that the
@@ -268,9 +385,37 @@ or, from Python:
 
 ```python
 from decision_engine.persistence import run_review_batch, process_one_ticket
-run_review_batch()               # every ticket with awaiting_review: true
+run_review_batch()               # every ticket with awaiting_review: true, oldest first
 process_one_ticket("30882")      # a single ticket
 ```
+
+In the app, the **Decision Engine** tab's **Run Batch…** asks how many of the
+tickets awaiting review to classify (1 to all of them, oldest Zendesk ID
+first), then shows progress after each ticket:
+- **Progress:** how many are done of how many, and what happened to them
+  (classified, to manual triage, skipped, errored).
+- **Speed and time left:** the average seconds per ticket so far, and the
+  estimated time left at that speed.
+- **Recent Reviews:** each new review appears in the list as soon as it's
+  saved, and the review you're reading stays selected.
+
+**Stop After This Ticket** lets the ticket being reviewed finish and save, then
+stops; the rest stay awaiting review for the next batch.
+
+### Feedback and the weekly review
+
+On the Decision Engine tab, select a review and use **Mark Correct** or
+**Mark Misclassified…**. A misclassification is written to
+`misclassification_log` (`MISCLASSIFICATION_COLLECTION`) and marks the
+review's outcome "bad".
+
+**Weekly Review…** opens one week's log (Monday to Sunday, UTC). Enter your
+name as Reviewer, select entries and **Mark Selected Reviewed**. Only
+reviewed entries feed a summary: **Suggest from Reviewed** drafts one from
+them for you to edit, and **Save Draft** stores it, unapproved, in
+`lessons_learned` (`LESSONS_COLLECTION`) with the IDs of the entries it's
+built on. Select a draft and **Approve Selected** to record who approved it.
+Approved lessons aren't fed back into the prompt yet.
 
 ### Ticket embeddings (Voyage AI)
 
