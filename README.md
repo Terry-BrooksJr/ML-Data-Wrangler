@@ -221,7 +221,8 @@ result is a mapping you export.
 1. Paste tags (comma- or newline-separated, or a JSON list), or **Load
    File…**. A CSV such as a Zendesk tag export (`name,count`) uses its first
    column; the count is ignored.
-2. Pick **Voyage AI** (the embedding Settings; sends only the tag names) or
+2. Pick **Voyage AI** (the embedding Settings; sends only the tag names),
+   **Language model** (see below) or
    **spaCy** (local and free, but misses looser synonyms), then **Find
    Similar Tags**. Each tag is embedded once per session; re-runs only embed
    new tags.
@@ -249,6 +250,60 @@ The same from the command line:
 ```bash
 cd src && python -m tag_normalizer tags.csv --out tag_mapping.csv
 cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
+```
+
+### Normalizing with a language model
+
+The third option, **Language model**, sends the tags (with how often each was
+seen) to a model that follows
+[`src/tag_normalization_reference.md`](src/tag_normalization_reference.md).
+That file holds the rules R1-R11, the tag registry, known overlap clusters and
+the JSON output contract, and is sent as the model's instructions.
+[`src/tag_normalization_priorities.md`](src/tag_normalization_priorities.md)
+follows it and wins where they differ. The goal is discoverability: merge tags
+that name the same concept even when they share no words, coin a new tag when
+that names the concept best, and never rename a tag only to change its format.
+It also loosens two of the reference's rules: a specific tag merges into its
+general tag (`nvda_screenreader` into `screen_readers`), and a `uses_X` tag
+into `X` (`uses_data_api` into `data_api`), when that's where people would
+search. Different products, teams and facet values still stay apart. Edit
+either file to change how tags are normalized.
+
+**Tags starting with `intent` are Zendesk AI tags and are left alone**: they
+are never embedded or sent to the model, nothing may be merged into one (a
+reply that tries is reverted and flagged), and they appear unchanged in the
+mapping, so the retag scripts never touch them.
+
+Before asking the model, Voyage embeds the other tags and proposes candidate
+pairs: every pair at 0.87 similarity or more (two facet__value tags are never
+paired), closest first, up to 300. The model judges each pair, one tag
+against the other, and may also merge tags no pair holds. Without Voyage
+configured, the model runs without them and says so; `--no-candidates` skips
+them on the command line. The model maps every tag to a canonical tag,
+explains its non-trivial decisions (shown as tooltips) and raises flags for a
+person to decide (shown below the groups). Rename, untick and both exports
+work as for embeddings; the JSON export also holds the model's `decisions`,
+`flags`, `model`, the `candidates` it judged and the `ignored` intent tags.
+There is no threshold: the rules decide.
+
+The reply is checked before it's shown:
+- Every input tag must be mapped. A tag the model leaves out keeps its name
+  and is flagged.
+- Registry tags marked `automated: true` or `pending` are never renamed (R3),
+  whatever the model answers.
+- Merges the model rates below 0.8 confidence are kept apart and flagged.
+- A rename that only changes a tag's form (`sentiment__positive` →
+  `sentiment_positive`) to a name no other tag shares is undone.
+
+Requests use the Decision Engine's Cheaper Inference settings (key, https
+URL). The model is **Tag Normalizer model** (`TAG_NORMALIZER_MODEL`), or the
+primary model when that's blank. Only tag names and counts are sent. On the
+195-tag example export, one run takes one to two minutes and about 25k tokens. One
+request holds at most 1,000 tags; split longer lists, since splitting hides
+merges across the parts.
+
+```bash
+cd src && python -m tag_normalizer tags.csv --backend llm --out tag_mapping.json
 ```
 
 ### Retagging tickets in Zendesk
