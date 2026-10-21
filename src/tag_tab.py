@@ -3,7 +3,9 @@
 Takes pasted tags or a file of them, embeds each distinct tag once on a
 background thread, and shows the groups of tags that mean the same thing
 (see tag_normalizer). Changing the similarity threshold regroups at once
-from the stored vectors, with no new embedding call. Each group's tag can be
+from the stored vectors, with no new embedding call. The language-model
+option instead asks a model that follows the tag normalization reference
+(see tag_llm) and shows its flags for review. Each group's tag can be
 renamed, and any tag unticked to keep it out of its group, before the
 mapping is exported as CSV or JSON.
 
@@ -20,7 +22,9 @@ import pathlib
 from datetime import datetime
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
+import embeddings
 import numpy as np
+import tag_llm
 import tag_normalizer
 import tag_runs
 from loguru import logger
@@ -40,15 +44,30 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tag_normalizer import Group, Previous, SPACY, Tag, VOYAGE
+from tag_normalizer import Group, LLM, Previous, SPACY, Tag, VOYAGE
 from utility import ThreadWorker, worker_thread
-from widgets import Button, Card, CheckBox, ComboBox, hint, ProgressBar, use_si_scrollbars
+from widgets import (
+    Button,
+    Card,
+    CheckBox,
+    ComboBox,
+    hint,
+    ProgressBar,
+    use_si_scrollbars,
+)
 
 BACKEND_LABELS = {
     VOYAGE: "Voyage AI (best; sends the tags to Voyage)",
     SPACY: "spaCy (local and free; misses looser synonyms)",
+    LLM: "Language model (follows the tag reference; sends the tags to Cheaper Inference)",
 }
 COLUMNS = ["Tag", "Uses", "Similarity"]
+# The language model scores its own decisions instead of a similarity.
+MODEL_COLUMNS = ["Tag", "Uses", "Confidence"]
+SAVE_TOOLTIP = (
+    "Saves this run (here, to S3 when set up, and to tag_normalization_run_log) "
+    "and records its tag changes in normalized_tags for later runs."
+)
 # Item data role holding a member row's cleaned tag text.
 TAG_ROLE = QtCore.Qt.UserRole
 
@@ -85,6 +104,9 @@ class TagTab(QWidget):
             the run log, or None to work without them. Called on the worker thread.
         storage: Returns the model_storage.Config for uploads, or None.
         run_dir: Where runs are saved (default tag_runs.run_dir()).
+        model_normalizer: Normalizes tags with the language model, given
+            candidate pairs: called as model_normalizer(tags, candidates).
+            Defaults to tag_llm.normalize.
     """
 
     idle = pyqtSignal()
@@ -98,12 +120,16 @@ class TagTab(QWidget):
         database_factory: Callable[[], Any] = _default_database,
         storage: Callable[[], Any] = _default_storage,
         run_dir: Optional[pathlib.Path] = None,
+        model_normalizer: Callable[..., tag_llm.Result] = tag_llm.normalize,
     ) -> None:
         super().__init__(parent)
         self.embedder_factory = embedder_factory
         self.database_factory = database_factory
         self.storage = storage
         self.run_dir = run_dir
+        self.model_normalizer = model_normalizer
+        # The language model's last result (decisions, flags); None for embeddings.
+        self._model_result: Optional[tag_llm.Result] = None
         self._closing = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
@@ -198,15 +224,19 @@ class TagTab(QWidget):
         self.scripts_button.clicked.connect(self.export_scripts)
         self.scripts_button.setEnabled(False)
         self.runs_button = Button("Previous Runs…")
-        self.runs_button.setToolTip("Reopen a saved run, from MongoDB or this computer.")
+        self.runs_button.setToolTip(
+            "Reopen a saved run, from MongoDB or this computer."
+        )
         self.runs_button.clicked.connect(self.show_previous_runs)
         self.save_button = Button("Save Run", primary=True)
-        self.save_button.setToolTip(
-            "Saves this run (here, to S3 when set up, and to tag_normalization_run_log) "
-            "and records its tag changes in normalized_tags for later runs."
-        )
+        self.save_button.setToolTip(SAVE_TOOLTIP)
         self.save_button.clicked.connect(self.save_run)
         self.save_button.setEnabled(False)
+        # The model's flags: what it wants a person to decide.
+        self.flags_view = use_si_scrollbars(QPlainTextEdit())
+        self.flags_view.setReadOnly(True)
+        self.flags_view.setMaximumHeight(140)
+        self.flags_view.setVisible(False)
         export_row = QHBoxLayout()
         export_row.addWidget(self.runs_button)
         export_row.addStretch()
@@ -224,6 +254,7 @@ class TagTab(QWidget):
 
         groups_card = Card("Groups")
         groups_card.body.addWidget(self.tree, stretch=1)
+        groups_card.body.addWidget(self.flags_view)
         groups_card.body.addLayout(export_row)
 
         layout = QVBoxLayout(self)
@@ -236,8 +267,14 @@ class TagTab(QWidget):
         return self.backend_combo.currentData()
 
     def _backend_changed(self) -> None:
-        # Each backend's similarities sit on a different scale.
-        self.threshold.setValue(tag_normalizer.DEFAULT_THRESHOLDS[self.backend()])
+        # The model maps tags itself: no threshold, and the reference's rules
+        # (not this switch) keep structured tags apart.
+        uses_vectors = self.backend() != LLM
+        self.threshold.setEnabled(uses_vectors)
+        self.keep_structured_apart.setEnabled(uses_vectors)
+        if uses_vectors:
+            # Each backend's similarities sit on a different scale.
+            self.threshold.setValue(tag_normalizer.DEFAULT_THRESHOLDS[self.backend()])
 
     # --- input ------------------------------------------------------------------
 
@@ -273,6 +310,8 @@ class TagTab(QWidget):
             QMessageBox.information(self, "No tags", "Paste or load some tags first.")
             return False
         backend = self.backend()
+        if backend == LLM:
+            return self._start_model(tags)
         cached = {text for b, text in self._cache if b == backend}
 
         def task():
@@ -296,13 +335,58 @@ class TagTab(QWidget):
         self._run(task, f"Embedding tags with {engine}", done)
         return True
 
+    def _start_model(self, tags: List[Tag]) -> bool:
+        """Asks the language model, with candidate pairs from Voyage (see tag_llm).
+
+        Zendesk AI tags are never embedded or sent (tag_llm.split_ignored).
+        Earlier decisions (normalized_tags) are not applied to model runs.
+        """
+        to_embed, _ = tag_llm.split_ignored(tags)
+        missing = [t.text for t in to_embed if (VOYAGE, t.text) not in self._cache]
+        known = {
+            t.text: self._cache[(VOYAGE, t.text)]
+            for t in to_embed
+            if (VOYAGE, t.text) in self._cache
+        }
+
+        def task():
+            new, candidates, note = [], [], None
+            try:
+                if missing:
+                    new = self.embedder_factory(VOYAGE)(missing)
+                vectors = {**known, **dict(zip(missing, new))}
+                if len(to_embed) > 1:
+                    candidates = tag_llm.candidate_pairs(
+                        to_embed, np.stack([vectors[t.text] for t in to_embed])
+                    )
+            except (embeddings.EmbeddingNotConfigured, embeddings.ApiError) as e:
+                new, note = [], f"No candidate pairs from Voyage: {e}"
+            result = self.model_normalizer(tags, candidates=candidates)
+            if note:
+                result.warnings.append(note)
+            return result, new
+
+        def done(outcome):
+            result, new = outcome
+            for text, vector in zip(missing, new):
+                self._cache[(VOYAGE, text)] = np.asarray(vector)
+            self._previous = None
+            self.show_model_result(tags, result)
+
+        self._run(
+            task, f"Asking the language model to normalize {len(tags)} tag(s)", done
+        )
+        return True
+
     def _read_previous(self) -> Optional[Previous]:
         """normalized_tags' decisions, or None (logged) when Mongo is off or unreachable."""
         try:
             database = self.database_factory()
             if database is None:
                 return None
-            return tag_runs.previous_decisions(database[tag_runs.normalized_collection()])
+            return tag_runs.previous_decisions(
+                database[tag_runs.normalized_collection()]
+            )
         except Exception as e:
             logger.warning(
                 f"Tag Normalizer: could not read {tag_runs.normalized_collection()} ({e}); "
@@ -310,7 +394,9 @@ class TagTab(QWidget):
             )
             return None
 
-    def _run(self, task: Callable[[], Any], label: str, on_done: Callable[[Any], None]) -> None:
+    def _run(
+        self, task: Callable[[], Any], label: str, on_done: Callable[[Any], None]
+    ) -> None:
         """Runs task on the tab's worker thread, then on_done(result) on the GUI thread."""
         self._set_busy(True, f"{label}…")
         self._on_done = on_done
@@ -350,7 +436,31 @@ class TagTab(QWidget):
     def show_tags(self, tags: List[Tag], vectors: np.ndarray) -> None:
         """Groups tags (one vector each) at the current threshold and shows them."""
         self._tags, self._vectors = tags, vectors
+        self._show_model_notes(None)
         self.regroup()
+
+    def show_model_result(self, tags: List[Tag], result: tag_llm.Result) -> None:
+        """Shows the language model's checked groups, with its flags for review."""
+        self._tags, self._vectors = tags, None
+        self._groups = result.groups
+        for group in self._groups:
+            group.canonical = self._renamed.get(self._key(group), group.canonical)
+        self._show_model_notes(result)
+        self._populate()
+
+    def _show_model_notes(self, result: Optional[tag_llm.Result]) -> None:
+        self._model_result = result
+        self.tree.setHeaderLabels(MODEL_COLUMNS if result else COLUMNS)
+        notes = tag_llm.describe_flags(result) if result else ""
+        self.flags_view.setPlainText(
+            f"For review ({result.model}):\n{notes}" if notes else ""
+        )
+        self.flags_view.setVisible(bool(notes))
+        self.save_button.setToolTip(
+            "Language-model runs can't be saved yet: Export Mapping keeps the result."
+            if result
+            else SAVE_TOOLTIP
+        )
 
     def regroup(self) -> None:
         if self._vectors is None:
@@ -374,6 +484,11 @@ class TagTab(QWidget):
         self.tree.blockSignals(True)
         self.tree.clear()
         merged = 0
+        reasons = {
+            d.get("tag"): d.get("reason")
+            for d in (self._model_result.decisions if self._model_result else [])
+            if d.get("reason")
+        }
         for group in self._groups:
             is_merge = len(group.members) > 1 or len(group.members[0].spellings) > 1
             merged += is_merge
@@ -391,14 +506,21 @@ class TagTab(QWidget):
             for tag, similarity in zip(group.members, group.similarity):
                 if tag.anchor_only:
                     # Not in this input: shown for context, never mapped.
-                    child = QTreeWidgetItem([f"{tag.successor} (saved successor)", "–", ""])
+                    child = QTreeWidgetItem(
+                        [f"{tag.successor} (saved successor)", "–", ""]
+                    )
                     child.setData(0, TAG_ROLE, tag.text)
                     child.setFlags(child.flags() & ~QtCore.Qt.ItemIsUserCheckable)
                     top.addChild(child)
                     continue
                 spellings = ", ".join(s for s, uses in tag.spellings.items() if uses)
-                child = QTreeWidgetItem([spellings, str(tag.count), f"{similarity:.2f}"])
+                child = QTreeWidgetItem(
+                    [spellings, str(tag.count), f"{similarity:.2f}"]
+                )
                 child.setData(0, TAG_ROLE, tag.text)
+                reason = next((reasons[s] for s in tag.spellings if s in reasons), None)
+                if reason:
+                    child.setToolTip(0, str(reason))
                 child.setFlags(child.flags() | QtCore.Qt.ItemIsUserCheckable)
                 child.setCheckState(
                     0,
@@ -419,8 +541,9 @@ class TagTab(QWidget):
             f"{len(self._groups) - merged} with no match."
             + (f" {carried} saved successor(s) considered." if carried else "")
         )
-        for button in (self.export_button, self.scripts_button, self.save_button):
+        for button in (self.export_button, self.scripts_button):
             button.setEnabled(bool(self._groups) and self._thread is None)
+        self.save_button.setEnabled(self._can_save() and self._thread is None)
 
     def _group_for(self, item: QTreeWidgetItem) -> Optional[Group]:
         top = item if item.parent() is None else item.parent()
@@ -457,13 +580,18 @@ class TagTab(QWidget):
 
     # --- saved runs -------------------------------------------------------------
 
+    def _can_save(self) -> bool:
+        """Saved runs keep a vector per tag and regroup by embeddings when reopened,
+        so a language-model result (no vectors for every tag) can't be saved yet."""
+        return bool(self._groups) and self._model_result is None
+
     def save_run(self) -> bool:
         """Saves the run and its decisions on the worker thread (see tag_runs.save).
 
         Returns:
             False if there is nothing to save or a job is running.
         """
-        if self._closing or self._thread is not None or not self._groups:
+        if self._closing or self._thread is not None or not self._can_save():
             return False
         tags, vectors, groups = self._tags, self._vectors, self._groups
         mapped, previous, source = self.mapping(), self._previous, self._source
@@ -484,8 +612,16 @@ class TagTab(QWidget):
 
         def task():
             return tag_runs.save(
-                tags, vectors, groups, mapped, settings, edits, previous, source,
-                database=self.database_factory(), storage=self.storage,
+                tags,
+                vectors,
+                groups,
+                mapped,
+                settings,
+                edits,
+                previous,
+                source,
+                database=self.database_factory(),
+                storage=self.storage,
                 base_dir=self.run_dir,
             )
 
@@ -517,9 +653,13 @@ class TagTab(QWidget):
             try:
                 database = self.database_factory()
             except Exception as e:
-                logger.warning(f"Tag Normalizer: MongoDB unreachable ({e}); listing this computer's runs.")
+                logger.warning(
+                    f"Tag Normalizer: MongoDB unreachable ({e}); listing this computer's runs."
+                )
                 database = None
-            runs = database[tag_runs.runs_collection()] if database is not None else None
+            runs = (
+                database[tag_runs.runs_collection()] if database is not None else None
+            )
             return tag_runs.known_runs(runs, self.run_dir)
 
         self._run(task, "Listing saved runs", self._choose_run)
@@ -527,12 +667,17 @@ class TagTab(QWidget):
 
     def _choose_run(self, runs: List[dict]) -> None:
         if not runs:
-            QMessageBox.information(self, "Previous Runs", "No saved Tag Normalizer runs were found.")
+            QMessageBox.information(
+                self, "Previous Runs", "No saved Tag Normalizer runs were found."
+            )
             return
         labels = [
-            f"{tag_runs.describe_run(run)} · {tag_runs.where(run, self.run_dir)}" for run in runs
+            f"{tag_runs.describe_run(run)} · {tag_runs.where(run, self.run_dir)}"
+            for run in runs
         ]
-        label, ok = QInputDialog.getItem(self, "Previous Runs", "Run:", labels, 0, False)
+        label, ok = QInputDialog.getItem(
+            self, "Previous Runs", "Run:", labels, 0, False
+        )
         if not ok:
             return
         run = runs[labels.index(label)]
@@ -553,10 +698,16 @@ class TagTab(QWidget):
         index = self.backend_combo.findData(backend)
         if index >= 0:
             self.backend_combo.setCurrentIndex(index)
-        self.threshold.setValue(float(settings.get("threshold", self.threshold.value())))
-        self.keep_structured_apart.setChecked(not settings.get("merge_structured", False))
+        self.threshold.setValue(
+            float(settings.get("threshold", self.threshold.value()))
+        )
+        self.keep_structured_apart.setChecked(
+            not settings.get("merge_structured", False)
+        )
         for widget in (self.backend_combo, self.threshold, self.keep_structured_apart):
             widget.blockSignals(False)
+            # Saved runs are embedding runs; the model option turns these off.
+            widget.setEnabled(True)
         for tag, vector in zip(tags, vectors):
             self._cache[(backend, tag.text)] = np.asarray(vector)
         self.input.setPlainText(
@@ -579,8 +730,11 @@ class TagTab(QWidget):
             chosen.startswith("JSON") and not path.lower().endswith(".csv")
         )
         mapped = self.mapping()
-        output = (tag_normalizer.to_json if as_json else tag_normalizer.to_csv)(
-            self._groups, mapped
+        extra = self._model_result.extra() if self._model_result else None
+        output = (
+            tag_normalizer.to_json(self._groups, mapped, extra)
+            if as_json
+            else tag_normalizer.to_csv(self._groups, mapped)
         )
         try:
             with open(path, "w", encoding="utf-8", newline="") as f:
@@ -630,8 +784,9 @@ class TagTab(QWidget):
         ):
             widget.setEnabled(not busy)
         if not busy:
-            for button in (self.export_button, self.scripts_button, self.save_button):
+            for button in (self.export_button, self.scripts_button):
                 button.setEnabled(bool(self._groups))
+            self.save_button.setEnabled(self._can_save())
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
         if busy:

@@ -52,7 +52,10 @@ from scipy.cluster.hierarchy import fcluster, linkage
 
 VOYAGE = "voyage"
 SPACY = "spacy"
-BACKENDS = (VOYAGE, SPACY)
+# A language model that follows tag_normalization_reference.md (see tag_llm);
+# it maps tags directly, so it has no vectors or threshold.
+LLM = "llm"
+BACKENDS = (VOYAGE, SPACY, LLM)
 DEFAULT_THRESHOLDS = {VOYAGE: 0.90, SPACY: 0.80}
 # Separates facet from value in tags from a fixed taxonomy, which share long
 # prefixes ("intent_confidence__low", "intent_confidence__high") and so embed
@@ -450,8 +453,14 @@ def to_csv(groups: List[Group], mapped: Dict[str, str]) -> str:
     return out.getvalue()
 
 
-def to_json(groups: List[Group], mapped: Dict[str, str]) -> str:
-    """{"mapping": {tag: canonical}, "groups": [{canonical, tags}]} for merged groups."""
+def to_json(
+    groups: List[Group], mapped: Dict[str, str], extra: Optional[dict] = None
+) -> str:
+    """{"mapping": {tag: canonical}, "groups": [{canonical, tags}]} for merged groups.
+
+    Args:
+        extra: More top-level fields, such as tag_llm's decisions and flags.
+    """
     merged = {}
     for spelling, canonical in mapped.items():
         if spelling != canonical:
@@ -460,6 +469,7 @@ def to_json(groups: List[Group], mapped: Dict[str, str]) -> str:
         {
             "mapping": mapped,
             "groups": [{"canonical": c, "tags": tags} for c, tags in merged.items()],
+            **(extra or {}),
         },
         indent=2,
         ensure_ascii=False,
@@ -576,7 +586,8 @@ def _parser() -> argparse.ArgumentParser:
         "--backend",
         choices=BACKENDS,
         default=VOYAGE,
-        help="voyage (default; sends the tags to Voyage AI) or spacy (local, coarser)",
+        help="voyage (default; sends the tags to Voyage AI), spacy (local, coarser) or llm "
+        "(a language model following tag_normalization_reference.md; sends the tags to Cheaper Inference)",
     )
     parser.add_argument(
         "--threshold",
@@ -588,6 +599,11 @@ def _parser() -> argparse.ArgumentParser:
         "--merge-structured",
         action="store_true",
         help="Allow facet__value tags (sentiment__positive) to merge with each other",
+    )
+    parser.add_argument(
+        "--no-candidates",
+        action="store_true",
+        help="With --backend llm: don't ask Voyage for candidate pairs to send as hints",
     )
     parser.add_argument(
         "--out", help="Write the mapping here: .json for JSON, anything else for CSV"
@@ -602,7 +618,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: List[str]) -> int:
     args = _parser().parse_args(argv)
-    if args.backend == VOYAGE:
+    if args.backend in (VOYAGE, LLM):
         import settings
 
         settings.load()
@@ -615,18 +631,35 @@ def main(argv: List[str]) -> int:
     if not tags:
         print("No tags found.", file=sys.stderr)
         return 1
-    threshold = args.threshold or DEFAULT_THRESHOLDS[args.backend]
-    groups = group_tags(
-        tags,
-        embedder(args.backend)([tag.text for tag in tags]),
-        threshold,
-        args.merge_structured,
-    )
+    extra = None
+    if args.backend == LLM:
+        import tag_llm
+
+        candidates = []
+        if not args.no_candidates:
+            # Zendesk AI tags are never embedded or sent (tag_llm.split_ignored).
+            to_embed, _ = tag_llm.split_ignored(tags)
+            if len(to_embed) > 1:
+                candidates = tag_llm.candidate_pairs(
+                    to_embed, embedder(VOYAGE)([tag.text for tag in to_embed])
+                )
+        result = tag_llm.normalize(tags, candidates=candidates)
+        groups, extra = result.groups, result.extra()
+    else:
+        threshold = args.threshold or DEFAULT_THRESHOLDS[args.backend]
+        groups = group_tags(
+            tags,
+            embedder(args.backend)([tag.text for tag in tags]),
+            threshold,
+            args.merge_structured,
+        )
     mapped = mapping(groups)
     print(describe(groups))
+    if args.backend == LLM and (result.flags or result.warnings):
+        print(f"\nFor review ({result.model}):\n" + tag_llm.describe_flags(result))
     if args.out:
         output = (
-            to_json(groups, mapped)
+            to_json(groups, mapped, extra)
             if args.out.lower().endswith(".json")
             else to_csv(groups, mapped)
         )
