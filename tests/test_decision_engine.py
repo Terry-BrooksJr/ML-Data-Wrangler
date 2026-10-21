@@ -769,7 +769,8 @@ def three_awaiting(tickets):
         for c in ("flag_solve", "escalation_internal", "flag_reengage")
     ]
     tickets.insert_many(docs)
-    return [d["zendesk_id"] for d in docs]
+    # In the order a batch reviews them: oldest (lowest Zendesk ID) first.
+    return persistence.awaiting_ids(tickets)
 
 
 class SequenceClient:
@@ -1348,3 +1349,58 @@ def test_describe_value_never_includes_text():
         describe_value([SECRET]) == "a list of 1 item(s)"
         and describe_value({"a": SECRET}) == "an object"
     )
+
+
+def test_awaiting_ids_are_oldest_first(tickets):
+    tickets.insert_many(
+        [{"zendesk_id": z, "awaiting_review": True} for z in ("1000", "998", "90001", "abc")]
+        + [{"zendesk_id": "5", "awaiting_review": False}]
+    )
+    assert persistence.awaiting_ids(tickets) == ["998", "1000", "90001", "abc"]
+
+
+def test_batch_reports_progress_after_each_ticket(monkeypatch, tickets):
+    ids = three_awaiting(tickets)
+    client = SequenceClient(
+        [model_reply("flag_solve"), status_error(400), model_reply("flag_reengage")]
+    )
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    seen = []
+
+    persistence.run_review_batch(tickets, on_progress=seen.append)
+
+    assert [(p["zendesk_id"], p["outcome"], p["done"], p["total"]) for p in seen] == [
+        (ids[0], "classified", 1, 3),
+        (ids[1], "errored", 2, 3),
+        (ids[2], "classified", 3, 3),
+    ]
+    assert seen[0]["review"]["classification"] == "flag_solve" and seen[1]["review"] is None
+    assert seen[-1]["summary"]["classified"] == 2
+
+
+def test_cancel_finishes_the_current_ticket_then_stops(monkeypatch, tickets):
+    ids = three_awaiting(tickets)
+    client = SequenceClient([model_reply("flag_solve")] * 3)
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    stop = []
+
+    def on_progress(progress):
+        stop.append(True)  # "Stop" pressed while the first ticket was in flight
+
+    summary = persistence.run_review_batch(
+        tickets, should_stop=lambda: bool(stop), on_progress=on_progress
+    )
+    assert client.calls == 1 and summary["classified"] == 1 and summary["cancelled"] == 2
+    assert tickets.find_one({"zendesk_id": ids[0]})["awaiting_review"] is False
+    assert all(tickets.find_one({"zendesk_id": z})["awaiting_review"] for z in ids[1:])
+
+
+def test_a_failing_progress_callback_never_stops_the_batch(monkeypatch, tickets):
+    three_awaiting(tickets)
+    client = SequenceClient([model_reply("flag_solve")] * 3)
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+
+    def broken(progress):
+        raise RuntimeError("display gone")
+
+    assert persistence.run_review_batch(tickets, on_progress=broken)["classified"] == 3

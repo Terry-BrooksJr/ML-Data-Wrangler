@@ -342,9 +342,22 @@ or, from Python:
 
 ```python
 from decision_engine.persistence import run_review_batch, process_one_ticket
-run_review_batch()               # every ticket with awaiting_review: true
+run_review_batch()               # every ticket with awaiting_review: true, oldest first
 process_one_ticket("30882")      # a single ticket
 ```
+
+In the app, the **Decision Engine** tab's **Run Batch…** asks how many of the
+tickets awaiting review to classify (1 to all of them, oldest Zendesk ID
+first), then shows progress after each ticket:
+- **Progress:** how many are done of how many, and what happened to them
+  (classified, to manual triage, skipped, errored).
+- **Speed and time left:** the average seconds per ticket so far, and the
+  estimated time left at that speed.
+- **Recent Reviews:** each new review appears in the list as soon as it's
+  saved, and the review you're reading stays selected.
+
+**Stop After This Ticket** lets the ticket being reviewed finish and save, then
+stops; the rest stay awaiting review for the next batch.
 
 ### Feedback and the weekly review
 

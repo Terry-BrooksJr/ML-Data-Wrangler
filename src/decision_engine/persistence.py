@@ -258,12 +258,23 @@ def _add_usage(totals: dict, audit: Optional[dict]) -> None:
         totals[key] = totals.get(key, 0) + (value or 0)
 
 
+def _oldest_first(zendesk_id) -> tuple:
+    """Sort key: Zendesk IDs are sequential, so a lower number is an older ticket."""
+    text = str(zendesk_id)
+    return (0, int(text), "") if text.isdigit() else (1, 0, text)
+
+
+def awaiting_tickets(tickets: Collection) -> List[dict]:
+    """Every ticket awaiting review, oldest first, as {"zendesk_id", "subject"}."""
+    docs = tickets.find(
+        {"awaiting_review": True}, {"_id": 0, "zendesk_id": 1, "subject": 1}
+    )
+    return sorted(docs, key=lambda doc: _oldest_first(doc["zendesk_id"]))
+
+
 def awaiting_ids(tickets: Collection) -> List[str]:
-    """Zendesk IDs of every ticket currently awaiting review."""
-    return [
-        doc["zendesk_id"]
-        for doc in tickets.find({"awaiting_review": True}, {"zendesk_id": 1})
-    ]
+    """Zendesk IDs of every ticket currently awaiting review, oldest first."""
+    return [doc["zendesk_id"] for doc in awaiting_tickets(tickets)]
 
 
 def run_review_batch(
@@ -271,6 +282,7 @@ def run_review_batch(
     zendesk_ids: Optional[Iterable[str]] = None,
     worker: Optional[str] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Reviews awaiting tickets, continuing past per-ticket failures.
 
@@ -284,6 +296,12 @@ def run_review_batch(
             without approval. Any that are no longer awaiting review are
             skipped. Defaults to every ticket awaiting review now.
         should_stop: Checked before each ticket; True cancels the rest.
+        on_progress: Called after each ticket (on the batch's thread) with
+            {"zendesk_id", "outcome", "review", "done", "total", "summary"}:
+            outcome is classified, manual_fallback, skipped or errored;
+            review is the stored review (None unless one was stored); done
+            counts tickets finished so far, of total; summary is the running
+            counts. Not called for a fatal stop or a cancel.
 
     Returns:
         Counts: classified, manual_fallback (gave up after repeated engine
@@ -306,6 +324,23 @@ def run_review_batch(
     zendesk_ids = list(
         dict.fromkeys(zendesk_ids if zendesk_ids is not None else awaiting_ids(tickets))
     )
+    def report(zendesk_id: str, outcome: str, review: Optional[dict], done: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(
+                {
+                    "zendesk_id": zendesk_id,
+                    "outcome": outcome,
+                    "review": review,
+                    "done": done,
+                    "total": len(zendesk_ids),
+                    "summary": dict(summary),
+                }
+            )
+        except Exception as e:  # a display problem must never stop a paid batch
+            logger.warning(f"Batch progress callback failed: {e}")
+
     for index, zendesk_id in enumerate(zendesk_ids):
         if should_stop and should_stop():
             summary["cancelled"] = len(zendesk_ids) - index
@@ -324,20 +359,21 @@ def run_review_batch(
                 break
             summary["errored"] += 1
             logger.error(f"{zendesk_id}: engine error, left in the queue: {e}")
+            report(zendesk_id, "errored", None, index + 1)
             continue
         if result is None:
             summary["skipped"] += 1
             logger.info(f"{zendesk_id}: already reviewed or claimed elsewhere, skipped")
+            report(zendesk_id, "skipped", None, index + 1)
             continue
         _add_usage(summary["usage"], result.get("audit"))
         _add_usage(summary["usage"], (result.get("confirmation_of") or {}).get("audit"))
-        if result.get("engine_error"):
-            summary["manual_fallback"] += 1
-        else:
-            summary["classified"] += 1
+        outcome = "manual_fallback" if result.get("engine_error") else "classified"
+        summary[outcome] += 1
         logger.info(
             f"{zendesk_id}: {result['classification']} ({result['confidence']})"
         )
+        report(zendesk_id, outcome, result, index + 1)
 
     logger.info(
         f"Batch finished: {summary['classified']} classified, {summary['manual_fallback']} routed to manual "
