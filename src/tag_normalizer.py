@@ -19,6 +19,12 @@ Each group's canonical tag is a structured tag if it has one, else the one most 
 (ties: the more frequent, then the shorter), in its most common original
 spelling, so the result maps onto tags that already exist.
 
+Earlier decisions (tag_runs, the normalized_tags collection) carry over as a
+Previous: each saved successor tag joins the grouping as an anchor, so new
+synonyms join it and it keeps its name, and a tag already deprecated goes
+straight to its successor's group. Anchors not in the input are never
+mapped or exported.
+
 Short tags score high against each other with Voyage (unrelated pairs often
 reach 0.8), so its default threshold is 0.90; spaCy's averaged word vectors
 spread wider and miss looser synonyms ("oil change" ~ "car maintenance").
@@ -161,6 +167,9 @@ class Tag:
 
     text: str
     spellings: Counter = field(default_factory=Counter)
+    # As written in normalized_tags, when an earlier run saved this tag as a
+    # successor (see Previous); it then names the tag's group.
+    successor: Optional[str] = None
 
     @property
     def count(self) -> int:
@@ -170,6 +179,15 @@ class Tag:
     def spelling(self) -> str:
         """The most common original spelling (first seen wins a tie)."""
         return self.spellings.most_common(1)[0][0]
+
+    @property
+    def known(self) -> bool:
+        return self.successor is not None
+
+    @property
+    def anchor_only(self) -> bool:
+        """A saved successor that isn't in this run's input."""
+        return self.known and self.count == 0
 
     @property
     def structured(self) -> bool:
@@ -186,6 +204,38 @@ def collect(raw_tags: Iterable[str]) -> List[Tag]:
         if text:
             tags.setdefault(text, Tag(text)).spellings[raw.strip()] += 1
     return list(tags.values())
+
+
+@dataclass
+class Previous:
+    """What earlier runs decided (from tag_runs.previous_decisions).
+
+    successors: cleaned text -> the successor tag as written.
+    replaced: cleaned text of a deprecated tag -> its successor's cleaned text.
+    """
+
+    successors: Dict[str, str] = field(default_factory=dict)
+    replaced: Dict[str, str] = field(default_factory=dict)
+
+
+def with_successors(tags: List[Tag], previous: Optional[Previous]) -> List[Tag]:
+    """tags plus an anchor (no uses) for each saved successor not among them.
+
+    A tag that is a saved successor is marked known, and so is its anchor; a
+    deprecated tag's successor is always present to take it.
+    """
+    if not previous:
+        return list(tags)
+    by_text = {tag.text: tag for tag in tags}
+    out = list(tags)
+    for text, spelling in previous.successors.items():
+        tag = by_text.get(text)
+        if tag is None:
+            tag = Tag(text, Counter({spelling: 0}))
+            by_text[text] = tag
+            out.append(tag)
+        tag.successor = spelling
+    return out
 
 
 # --- embedding ----------------------------------------------------------------------
@@ -287,10 +337,12 @@ def _group(tags: List[Tag], unit: np.ndarray) -> Group:
     similarity = unit @ unit.T
     # Mean similarity to the group's other tags; the most central tag names it.
     centrality = (similarity.sum(axis=1) - np.diag(similarity)) / max(len(tags) - 1, 1)
-    # A taxonomy tag names the group over free-form ones, so tags map onto it.
+    # A saved successor keeps naming its group; then a taxonomy tag names the
+    # group over free-form ones, so tags map onto it.
     best = min(
         range(len(tags)),
         key=lambda i: (
+            not tags[i].known,
             not tags[i].structured,
             -round(float(centrality[i]), 6),
             -tags[i].count,
@@ -301,7 +353,7 @@ def _group(tags: List[Tag], unit: np.ndarray) -> Group:
         range(len(tags)), key=lambda i: (i != best, -similarity[best, i], tags[i].text)
     )
     return Group(
-        tags[best].spelling,
+        tags[best].successor or tags[best].spelling,
         [tags[i] for i in order],
         [float(similarity[best, i]) for i in order],
     )
@@ -312,6 +364,7 @@ def group_tags(
     vectors: np.ndarray,
     threshold: float,
     merge_structured: bool = False,
+    previous: Optional[Previous] = None,
 ) -> List[Group]:
     """Groups tags (one row of vectors each) whose meaning matches at threshold.
 
@@ -324,16 +377,39 @@ def group_tags(
             default: they come from a fixed taxonomy, where tags that differ
             only in value ("sentiment__positive", "sentiment__negative") embed
             as near-identical. A free-form tag can join a structured one either way.
+        previous: Earlier runs' decisions; tags should already include their
+            successors (with_successors). A deprecated tag joins its successor's
+            group whatever its similarity, and two saved successors are never
+            grouped together (each was kept apart on purpose; rename a group
+            to merge them). Groups of anchors alone are left out.
     """
     if len(tags) != len(vectors):
         raise ValueError(f"{len(tags)} tags but {len(vectors)} vectors")
     unit = unit_rows(vectors)
-    apart = None if merge_structured else np.array([tag.structured for tag in tags])
-    labels = _labels(unit, threshold, apart)
-    groups = []
-    for label in dict.fromkeys(labels):
-        rows = [i for i, value in enumerate(labels) if value == label]
-        groups.append(_group([tags[i] for i in rows], unit[rows]))
+    replaced = previous.replaced if previous else {}
+    present = {tag.text for tag in tags}
+    pinned = {
+        i
+        for i, tag in enumerate(tags)
+        if not tag.known and replaced.get(tag.text) in present
+    }
+    free = [i for i in range(len(tags)) if i not in pinned]
+    apart = np.array(
+        [(tags[i].structured and not merge_structured) or tags[i].known for i in free],
+        dtype=bool,
+    )
+    labels = _labels(unit[free], threshold, apart if apart.any() else None)
+    clusters: Dict[int, List[int]] = {}
+    for row, label in zip(free, labels):
+        clusters.setdefault(int(label), []).append(row)
+    home = {tags[row].text: label for label, rows in clusters.items() for row in rows}
+    for row in sorted(pinned):
+        clusters[home[replaced[tags[row].text]]].append(row)
+    groups = [
+        _group([tags[i] for i in rows], unit[rows])
+        for rows in clusters.values()
+        if not all(tags[i].anchor_only for i in rows)
+    ]
     return sorted(
         groups, key=lambda g: (-len(g.members), -g.count, g.canonical.lower())
     )
@@ -351,8 +427,9 @@ def mapping(groups: List[Group], excluded: Iterable[str] = ()) -> Dict[str, str]
     for group in groups:
         for tag in group.members:
             target = tag.spelling if tag.text in excluded else group.canonical
-            for spelling in tag.spellings:
-                result[spelling] = target
+            for spelling, uses in tag.spellings.items():
+                if uses:  # an anchor's own spelling isn't in this run's input
+                    result[spelling] = target
     return result
 
 
@@ -367,6 +444,8 @@ def to_csv(groups: List[Group], mapped: Dict[str, str]) -> str:
     for group in groups:
         for tag, similarity in zip(group.members, group.similarity):
             for spelling, uses in tag.spellings.items():
+                if spelling not in mapped:
+                    continue
                 writer.writerow([spelling, mapped[spelling], uses, f"{similarity:.3f}"])
     return out.getvalue()
 

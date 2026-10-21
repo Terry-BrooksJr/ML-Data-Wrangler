@@ -205,6 +205,21 @@ SETTINGS: List[Setting] = [
         restart=True,
     ),
     Setting(
+        "TAG_RUNS_COLLECTION",
+        "Tag Normalizer runs collection",
+        "Storage",
+        default="tag_normalization_run_log",
+        restart=True,
+    ),
+    Setting(
+        "NORMALIZED_TAGS_COLLECTION",
+        "Normalized tags collection",
+        "Storage",
+        default="normalized_tags",
+        help="One document per successor tag, listing the tags it replaces.",
+        restart=True,
+    ),
+    Setting(
         "MISCLASSIFICATION_COLLECTION",
         "Misclassification collection",
         "Storage",
