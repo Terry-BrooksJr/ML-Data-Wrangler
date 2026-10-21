@@ -17,11 +17,11 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QLabel,
     QMessageBox,
-    QPushButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+from widgets import Button, heading, hint, use_si_scrollbars
 
 PLOT_WIDTH = 560
 
@@ -60,10 +60,10 @@ class ResultsDialog(QDialog):
         self.setWindowTitle("LDA Results")
         self.resize(700, 750)
 
-        heading = QLabel(f"<b>Topics ({best_num_topics}, the most coherent model)</b>")
+        title = heading(f"Topics ({best_num_topics}, the most coherent model)")
 
         # Plain text: topic words come from customer tickets.
-        self.topic_text = QTextEdit()
+        self.topic_text = use_si_scrollbars(QTextEdit())
         self.topic_text.setReadOnly(True)
         self.topic_text.setPlainText(format_topics(topics))
 
@@ -81,7 +81,7 @@ class ResultsDialog(QDialog):
                 )
             )
 
-        self.chart_button = QPushButton("Open Interactive Topic Chart")
+        self.chart_button = Button("Open Interactive Topic Chart", primary=True)
         self.chart_button.clicked.connect(self.open_chart)
         if not chart_path:
             self.chart_button.setEnabled(False)
@@ -93,9 +93,11 @@ class ResultsDialog(QDialog):
         buttons.rejected.connect(self.close)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(heading)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.addWidget(title)
         layout.addWidget(self.topic_text, stretch=1)
-        layout.addWidget(QLabel("Coherence by number of topics:"))
+        layout.addWidget(hint("Coherence by number of topics:"))
         layout.addWidget(self.plot_label)
         layout.addWidget(self.chart_button)
         layout.addWidget(buttons)

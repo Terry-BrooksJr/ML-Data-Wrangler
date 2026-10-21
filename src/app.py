@@ -25,15 +25,13 @@ from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
-    QFormLayout,
+    QFrame,
+    QHBoxLayout,
     QInputDialog,
-    QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QProgressDialog,
-    QPushButton,
+    QScrollArea,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -62,6 +60,7 @@ from settings_dialog import SettingsDialog
 from tag_tab import TagTab
 from triage_tab import TriageTab
 from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
+from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 from wrangler import DataWrangler, process_progress
 
 nlp = en_core_web_lg.load()
@@ -90,15 +89,17 @@ class MainWindow(QMainWindow, QDialog):
         allocator (LatentDirichletAllocator): An instance of the LatentDirichletAllocator for topic modeling.
         main_layout (QVBoxLayout): The main layout of the application.
         instruction_layout (QVBoxLayout): Layout for displaying instructions and warnings.
-        data_entry_layout (QVBoxLayout): Layout for data entry components.
-        ticket_file_button (QPushButton): Button for selecting the ticket file.
-        comments_dir_button (QPushButton): Button for selecting the comments directory.
-        process_button (QPushButton): Button for processing the data.
-        train_model_button (QPushButton): Button for training the model.
-        num_topics_input (QLineEdit): Input field for the number of topics.
-        iterations_input (QLineEdit): Input field for the number of iterations.
-        passes_input (QLineEdit): Input field for the number of passes.
+        data_entry_layout (QVBoxLayout): The Topic Modeling tab's cards.
+        ticket_file_button (Button): Button for selecting the ticket file.
+        comments_dir_button (Button): Button for selecting the comments directory.
+        process_button (Button): Button for processing the data.
+        train_model_button (Button): Button for training the model.
+        num_topics_input (LineEdit): Input field for the number of topics.
+        iterations_input (LineEdit): Input field for the number of iterations.
+        passes_input (LineEdit): Input field for the number of passes.
         log_output (QTextEdit): Text area for displaying log output.
+
+    Buttons, line edits and progress bars are PyQt-SiliconUI widgets (see widgets.py).
     """
 
     def __init__(self, windowName: str) -> None:
@@ -133,7 +134,7 @@ class MainWindow(QMainWindow, QDialog):
 
         # Setting up the main application window
         self.setWindowTitle(windowName)
-        self.setGeometry(100, 100, 900, 750)
+        self.setGeometry(100, 100, 1000, 860)
 
         # Main layout
         self.main_layout = QVBoxLayout()
@@ -166,36 +167,37 @@ class MainWindow(QMainWindow, QDialog):
             None
         """
         # Instructions and warnings
-        instruction_label = QLabel(
-            "Welcome to Lasso. \n\n"
-            "Identify two file locations.\n"
-            "1. The Ticket File Path from the ZenDesk Tickets API.\n"
-            "2. The path to the comments directory with JSON comments for each ticket.\n\n"
-            "Write Tickets to MongoDB loads them into the decision engine's tickets collection (needs Mongo URI in Settings; Preferences on macOS)."
+        instruction_label = hint(
+            "Choose the ticket file from the Zendesk Tickets API and the directory of "
+            "JSON comments for each ticket, then Process Data. Write Tickets to MongoDB "
+            "loads them into the decision engine's tickets collection (needs Mongo URI "
+            "in Settings; Preferences on macOS)."
         )
-        warning_label = QLabel("NOTE: Ticket and comment files must be in JSON format.")
-        warning_label.setStyleSheet("color: red;")
+        warning_label = hint(
+            "Ticket and comment files must be in JSON format.", role="warning"
+        )
 
         self.instruction_layout.addWidget(instruction_label)
         self.instruction_layout.addWidget(warning_label)
 
         # Buttons
-        self.wrangling_input_form = QFormLayout()
-        self.ticket_file_button = QPushButton("Select Path to Ticket File")
-        self.ticket_file = QLineEdit()
+        self.ticket_file_button = Button("Select Path to Ticket File")
+        self.ticket_file = LineEdit("Ticket file")
+        self.ticket_file.setPlaceholderText("Not chosen yet")
 
-        self.comments_dir_button = QPushButton("Select Path to Comments Directory")
-        self.comments_dir = QLineEdit()
+        self.comments_dir_button = Button("Select Path to Comments Directory")
+        self.comments_dir = LineEdit("Comments")
+        self.comments_dir.setPlaceholderText("Not chosen yet")
 
-        self.process_button = QPushButton("Process Data")
-        self.mongo_button = QPushButton("Write Tickets to MongoDB")
-        self.train_model_button = QPushButton("Train Model")
+        self.process_button = Button("Process Data", primary=True)
+        self.mongo_button = Button("Write Tickets to MongoDB")
+        self.train_model_button = Button("Train Model", primary=True)
         # Saved runs survive a restart, so these work without processing data.
-        self.previous_runs_button = QPushButton("Show Previous Run…")
-        self.assign_topics_button = QPushButton("Assign Topics from Saved Run…")
+        self.previous_runs_button = Button("Show Previous Run…")
+        self.assign_topics_button = Button("Assign Topics from Saved Run…")
         # BERTopic reads tickets and their embeddings from Mongo, not the files above.
-        self.bertopic_button = QPushButton("Train BERTopic Model…")
-        self.bertopic_runs_button = QPushButton("Show Previous BERTopic Run…")
+        self.bertopic_button = Button("Train BERTopic Model…", primary=True)
+        self.bertopic_runs_button = Button("Show Previous BERTopic Run…")
 
         self.comments_dir.setReadOnly(True)
         self.ticket_file.setReadOnly(True)
@@ -211,11 +213,11 @@ class MainWindow(QMainWindow, QDialog):
         self.bertopic_runs_button.clicked.connect(self.show_previous_bertopic_run)
         self.train_model_button.setEnabled(False)
 
-        # Form layout for inputs
-        self.form_layout = QFormLayout()
-        self.num_topics_input = QLineEdit()
-        self.iterations_input = QLineEdit()
-        self.passes_input = QLineEdit()
+        # The training inputs, side by side
+        self.form_layout = QHBoxLayout()
+        self.num_topics_input = LineEdit("Number of Topics")
+        self.iterations_input = LineEdit("Iterations")
+        self.passes_input = LineEdit("Passes")
 
         for input_field in [
             self.num_topics_input,
@@ -224,20 +226,15 @@ class MainWindow(QMainWindow, QDialog):
         ]:
             input_field.setClearButtonEnabled(True)
             input_field.setEnabled(False)
+            self.form_layout.addWidget(input_field)
 
-        disabled_notice = QLabel(
+        disabled_notice = hint(
             "The next three inputs are disabled until data is processed."
         )
-        self.form_layout.addRow(disabled_notice)
-        self.form_layout.addRow("Number of Topics:", self.num_topics_input)
-        self.form_layout.addRow("Iterations:", self.iterations_input)
-        self.form_layout.addRow("Passes:", self.passes_input)
 
         # Log output display
-        self.log_output = QTextEdit()
-        self.log_output.setObjectName(
-            theme.LOG_PANE
-        )  # styled as a dark console in every theme
+        self.log_output = use_si_scrollbars(QTextEdit())
+        self.log_output.setObjectName(theme.LOG_PANE)  # styled as a console
         self.log_output.setReadOnly(True)
         self.highlighter = LogHighlighter(self.log_output)
         sys.stdout = QTextEditStream(self.log_output)
@@ -245,28 +242,51 @@ class MainWindow(QMainWindow, QDialog):
         self.log_output.setPlainText(
             f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Lasso on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
         )
-        # Arrange layout
-        self.data_entry_layout.addWidget(self.ticket_file_button)
-        self.data_entry_layout.addWidget(self.comments_dir_button)
-        self.data_entry_layout.addWidget(self.process_button)
-        self.data_entry_layout.addWidget(self.mongo_button)
-        self.data_entry_layout.addLayout(self.form_layout)
-        self.data_entry_layout.addWidget(self.train_model_button)
-        self.data_entry_layout.addWidget(self.previous_runs_button)
-        self.data_entry_layout.addWidget(self.assign_topics_button)
-        self.data_entry_layout.addWidget(
-            QLabel("Embedding topics (BERTopic, on tickets in MongoDB):")
+        # Arrange layout: one card per step, ticket data first.
+        data_card = Card("Ticket Data")
+        data_card.body.addLayout(self.instruction_layout)
+        for field, button in [
+            (self.ticket_file, self.ticket_file_button),
+            (self.comments_dir, self.comments_dir_button),
+        ]:
+            row = QHBoxLayout()
+            row.addWidget(field, stretch=1)
+            row.addWidget(button)
+            data_card.body.addLayout(row)
+        data_card.body.addLayout(button_row(self.process_button, self.mongo_button))
+
+        lda_card = Card("LDA Topic Model")
+        lda_card.body.addWidget(disabled_notice)
+        lda_card.body.addLayout(self.form_layout)
+        lda_card.body.addLayout(
+            button_row(
+                self.train_model_button,
+                self.previous_runs_button,
+                self.assign_topics_button,
+            )
         )
-        self.data_entry_layout.addWidget(self.bertopic_button)
-        self.data_entry_layout.addWidget(self.bertopic_runs_button)
+
+        bertopic_card = Card("Embedding Topics (BERTopic)")
+        bertopic_card.body.addWidget(hint("Trains on the tickets in MongoDB."))
+        bertopic_card.body.addLayout(
+            button_row(self.bertopic_button, self.bertopic_runs_button)
+        )
+
+        self.data_entry_layout.setSpacing(12)
+        self.data_entry_layout.addWidget(data_card)
+        self.data_entry_layout.addWidget(lda_card)
+        self.data_entry_layout.addWidget(bertopic_card)
         self.data_entry_layout.addStretch()
 
         # Topic modeling and the decision engine each get a tab; the log pane
-        # sits below both so either tab's output stays visible.
-        topic_tab = QWidget()
-        topic_layout = QVBoxLayout(topic_tab)
-        topic_layout.addLayout(self.instruction_layout)
-        topic_layout.addLayout(self.data_entry_layout)
+        # sits below both so either tab's output stays visible. The topic tab
+        # scrolls when the window is too short for its three cards.
+        topic_page = QWidget()
+        topic_page.setLayout(self.data_entry_layout)
+        topic_tab = use_si_scrollbars(QScrollArea())
+        topic_tab.setFrameShape(QFrame.NoFrame)
+        topic_tab.setWidgetResizable(True)
+        topic_tab.setWidget(topic_page)
 
         self.triage_tab = TriageTab()
         self.triage_tab.idle.connect(self._finish_pending_close)
@@ -282,13 +302,19 @@ class MainWindow(QMainWindow, QDialog):
         self.tag_tab.idle.connect(self._finish_pending_close)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.tabs.addTab(topic_tab, "Topic Modeling")
         self.tabs.addTab(self.triage_tab, "Decision Engine")
         self.tabs.addTab(self.tag_tab, "Tag Normalizer")
 
+        log_card = Card("Log")
+        log_card.body.addWidget(self.log_output)
+
         # Main layout arrangement
+        self.main_layout.setContentsMargins(16, 8, 16, 16)
+        self.main_layout.setSpacing(12)
         self.main_layout.addWidget(self.tabs, stretch=3)
-        self.main_layout.addWidget(self.log_output, stretch=1)
+        self.main_layout.addWidget(log_card, stretch=1)
 
     def init_menu(self) -> None:
         """Adds the Settings… action (the app menu's Preferences… on macOS)."""
@@ -305,7 +331,6 @@ class MainWindow(QMainWindow, QDialog):
         """Shows the settings dialog; saved values apply to the next action."""
         if SettingsDialog(self).exec_() != QDialog.Accepted:
             return
-        theme.apply(QApplication.instance())
         # The Mongo and model clients are cached; rebuild them from the new values.
         reset_clients()
         if self.triage_tab._loaded and not self.triage_tab.is_busy():
@@ -366,7 +391,7 @@ class MainWindow(QMainWindow, QDialog):
         self.pdialog.setAutoClose(False)  # Keep it open until we close it manually
 
         # Create the progress bar and add it to the dialog
-        self.pbar = QProgressBar(self)
+        self.pbar = ProgressBar(self)
         self.pbar.setMaximum(100)
         self.pdialog.setBar(self.pbar)
 

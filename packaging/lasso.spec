@@ -23,9 +23,10 @@ datas.append((str(ROOT / "src" / "zendesk_retag"), "zendesk_retag"))
 # en_core_web_lg is loaded by import and ships its weights as package data.
 # spacy_legacy / spacy_loggers register functions through entry points, which
 # spaCy resolves from package metadata at runtime. pyLDAvis ships JS and
-# templates its saved HTML charts need. qdarkstyle reads its .qss files and
-# imports its compiled icon resources by name.
-for package in ("en_core_web_lg", "spacy_legacy", "spacy_loggers", "pyLDAvis", "qdarkstyle"):
+# templates its saved HTML charts need. siui (PyQt-SiliconUI) reads its icon
+# packs (siui/gui/icons/packages/*.icons) from beside its modules, and its
+# combo boxes and spin boxes draw those icons.
+for package in ("en_core_web_lg", "spacy_legacy", "spacy_loggers", "pyLDAvis", "siui"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
