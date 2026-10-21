@@ -1,0 +1,81 @@
+# Builds Lasso.app and its .pkg installer, installs it on the runner and checks
+# the installed app starts. PyInstaller doesn't cross-compile and the installer
+# is Apple Silicon only, so this runs on an arm64 macOS runner.
+#
+# Pull requests build only when something that goes into the app changed; the
+# build takes a while and the .pkg is ~800 MB.
+name: Installer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos-pkg:
+    name: Build and install the macOS .pkg
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build Lasso.app
+        run: packaging/build.sh
+
+      - name: Build the installer
+        run: packaging/build_pkg.sh
+
+      # The runner is throwaway, so install for real: this exercises the
+      # installer's architecture and macOS version checks and the
+      # /Applications install location, not just that productbuild ran.
+      - name: Install the .pkg
+        run: sudo installer -pkg dist/Lasso-*.pkg -target / -verboseR
+
+      # A missing hidden import or data file only shows up when the bundle
+      # runs. The app has no exit-after-start mode, so: launch it offscreen and
+      # fail if it exits within 45 seconds.
+      - name: Launch the installed app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          /Applications/Lasso.app/Contents/MacOS/Lasso >launch.log 2>&1 &
+          pid=$!
+          for _ in $(seq 45); do
+            sleep 1
+            if ! kill -0 "$pid" 2>/dev/null; then
+              wait "$pid" && code=0 || code=$?
+              echo "::error::Lasso exited after starting (exit code $code)"
+              cat launch.log
+              exit 1
+            fi
+          done
+          kill "$pid"
+          echo "Lasso was still running after 45s"
+          cat launch.log
+
+      - name: Upload the installer
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lasso-macos-pkg
+          path: dist/Lasso-*.pkg
+          retention-days: 14
+          compression-level: 0
