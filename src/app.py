@@ -4,7 +4,7 @@ import pathlib
 import sys
 import time
 from datetime import datetime
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import settings
 from loguru import logger
@@ -38,8 +38,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# Before the local imports: topic_store and decision_engine read env vars at
-# import time. See settings.load() for which source wins.
+# Before the local imports, so everything sees the saved settings from the
+# start. See settings.load() for which source wins.
 settings.load()
 settings.use_workspace()
 
@@ -678,7 +678,7 @@ class MainWindow(QMainWindow, QDialog):
         )
         try:
             database = get_database()
-            topic_store.record_run(database[topic_store.RUNS_COLLECTION], run)
+            topic_store.record_run(database[topic_store.runs_collection()], run)
             run["assignment"] = topic_store.assign_trained_topics(
                 database[os.environ.get("MONGO_COLLECTION", "tickets")],
                 run,
@@ -986,11 +986,11 @@ class MainWindow(QMainWindow, QDialog):
         self.results_dialog.show()
         self.results_dialog.open_chart()
 
-    def _runs_collection(self, name: str = topic_store.RUNS_COLLECTION):
+    def _runs_collection(self, name: Optional[str] = None):
         """A runs collection (LDA by default), or None to read runs from disk."""
         if not os.getenv("MONGO_URI"):
             return None
-        return get_database()[name]
+        return get_database()[name or topic_store.runs_collection()]
 
     def _choose_run(self, title: str):
         """Asks the user to pick a previous run; returns it, or None."""
@@ -1142,7 +1142,7 @@ class MainWindow(QMainWindow, QDialog):
                 stop_words,
                 options,
                 status=self.bertopic_status.message.emit,
-                runs=self._runs_collection(bertopic_runs.RUNS_COLLECTION),
+                runs=self._runs_collection(bertopic_runs.runs_collection()),
                 storage=model_storage.config,
             ),
             "Training the BERTopic model",
@@ -1175,7 +1175,7 @@ class MainWindow(QMainWindow, QDialog):
         """BERTopic runs from Mongo and disk; disk only if Mongo can't be reached."""
         try:
             return bertopic_runs.known_runs(
-                self._runs_collection(bertopic_runs.RUNS_COLLECTION)
+                self._runs_collection(bertopic_runs.runs_collection())
             )
         except Exception as e:
             logger.warning(

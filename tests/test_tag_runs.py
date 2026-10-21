@@ -24,7 +24,7 @@ def db():
 
 @pytest.fixture
 def normalized(db):
-    return db[tag_runs.NORMALIZED_COLLECTION]
+    return db[tag_runs.normalized_collection()]
 
 
 def doc(normalized, text):
@@ -140,7 +140,7 @@ def test_save_writes_files_run_log_and_decisions(db, tmp_path):
         assert (folder / name).is_file()
     # A tied pair: the shorter tag names it.
     assert run["changes"] == {"car_maintenance": "oil_change"} and run["warnings"] == []
-    logged = db[tag_runs.RUNS_COLLECTION].find_one({"run_id": run["run_id"]})
+    logged = db[tag_runs.runs_collection()].find_one({"run_id": run["run_id"]})
     assert logged["method"] == tag_runs.METHOD and logged["source"] == "tags.csv"
     assert logged["normalized"]["deprecated"] == 1
     assert json.loads((folder / "run.json").read_text())["normalized"]["deprecated"] == 1
@@ -148,7 +148,7 @@ def test_save_writes_files_run_log_and_decisions(db, tmp_path):
     reopened_tags, reopened_vectors = tag_runs.load_tags(run, tmp_path)
     assert [t.text for t in reopened_tags] == [t.text for t in tags]
     assert np.allclose(reopened_vectors, vectors)
-    assert [r["run_id"] for r in tag_runs.known_runs(db[tag_runs.RUNS_COLLECTION], tmp_path)] == [run["run_id"]]
+    assert [r["run_id"] for r in tag_runs.known_runs(db[tag_runs.runs_collection()], tmp_path)] == [run["run_id"]]
 
 
 def test_save_without_mongo_keeps_the_run_and_warns(tmp_path):
@@ -212,7 +212,7 @@ def test_tab_saves_then_next_find_uses_the_decisions(qapp, db, tmp_path, monkeyp
     assert tab.save_button.isEnabled() and tab.save_run()
     wait_until_idle(qapp, tab)
     assert "Saved run" in shown[-1]
-    assert replaced(db[tag_runs.NORMALIZED_COLLECTION], "vehicle care") == ["car_maintenance", "oil_change"]
+    assert replaced(db[tag_runs.normalized_collection()], "vehicle care") == ["car_maintenance", "oil_change"]
 
     calls = []
     later = make_tab(db, tmp_path, calls)
@@ -268,7 +268,7 @@ def test_upload_then_download_on_another_computer(s3, db, tmp_path):
     # Another computer: only the run log's record, no files.
     shutil.rmtree(here)
     elsewhere = tmp_path / "elsewhere"
-    [record] = tag_runs.known_runs(db[tag_runs.RUNS_COLLECTION], elsewhere)
+    [record] = tag_runs.known_runs(db[tag_runs.runs_collection()], elsewhere)
     tag_runs.ensure_local(record, elsewhere, model_storage.config)
     reopened, reopened_vectors = tag_runs.load_tags(record, elsewhere)
     assert [t.text for t in reopened] == [t.text for t in tags]

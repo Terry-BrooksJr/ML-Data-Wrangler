@@ -30,9 +30,8 @@ on macOS). They're saved to
 `settings.json` in your user config folder (`~/Library/Application
 Support/Lasso/` on macOS, `%APPDATA%\Lasso\` on
 Windows), readable only by you, and override `.env` and the shell. On launch
-the app offers to open Settings if any required value is missing. Most
-changes apply immediately; the collection names and `DECISION_ENGINE_MODEL`
-need a restart. Blanking a field makes the code's default apply, even if
+the app offers to open Settings if any required value is missing. Every
+change applies as soon as you save; nothing needs a restart. Blanking a field makes the code's default apply, even if
 `.env` or the shell sets it. If the file can't be read, the app renames it to
 `settings.json.corrupt-<date>` and asks you to re-enter your settings.
 
