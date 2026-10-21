@@ -41,7 +41,7 @@ import os
 import pathlib
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 import tag_normalizer
@@ -51,14 +51,21 @@ from pymongo.collection import Collection
 from tag_normalizer import Group, Previous, Tag
 
 METHOD = "tag_normalizer"
-RUNS_COLLECTION = os.environ.get("TAG_RUNS_COLLECTION", "tag_normalization_run_log")
-NORMALIZED_COLLECTION = os.environ.get("NORMALIZED_TAGS_COLLECTION", "normalized_tags")
 # Under MODEL_PREFIX in the bucket, apart from the topic-model runs.
 STORAGE_SUBFOLDER = "tag_normalizer/"
 TAGS_FILE = "tags.json"
 VECTORS_FILE = "vectors.npy"
 MAPPING_CSV = "mapping.csv"
 MAPPING_JSON = "mapping.json"
+
+
+# Collection names are read when used, so a saved setting applies at once.
+def runs_collection() -> str:
+    return os.environ.get("TAG_RUNS_COLLECTION", "tag_normalization_run_log")
+
+
+def normalized_collection() -> str:
+    return os.environ.get("NORMALIZED_TAGS_COLLECTION", "normalized_tags")
 
 
 def run_dir() -> pathlib.Path:
@@ -349,15 +356,15 @@ def save(
         return run
     try:
         run["normalized"] = record_decisions(
-            database[NORMALIZED_COLLECTION], mapped, run["run_id"]
+            database[normalized_collection()], mapped, run["run_id"]
         )
     except Exception as e:
-        logger.exception(f"Could not update {NORMALIZED_COLLECTION}: {e}")
-        run["warnings"].append(f"Saved, but {NORMALIZED_COLLECTION} could not be updated: {e}")
+        logger.exception(f"Could not update {normalized_collection()}: {e}")
+        run["warnings"].append(f"Saved, but {normalized_collection()} could not be updated: {e}")
     else:
         topic_store.write_run_file(run)
     try:
-        record_run(database[RUNS_COLLECTION], run)
+        record_run(database[runs_collection()], run)
     except Exception as e:
         logger.exception(f"Could not record Tag Normalizer run {run['run_id']}: {e}")
         run["warnings"].append(f"Saved locally, but MongoDB could not be updated: {e}")

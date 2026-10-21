@@ -210,7 +210,7 @@ def test_lda_run_list_skips_bertopic_runs(saved):
     assert [r["run_id"] for r in topic_store.list_runs(base_dir=mixed)] == [LDA_RUN]
     assert [r["run_id"] for r in bertopic_runs.lda_runs(mixed)] == [LDA_RUN]
 
-    runs = mongomock.MongoClient().support_db[topic_store.RUNS_COLLECTION]
+    runs = mongomock.MongoClient().support_db[topic_store.runs_collection()]
     runs.insert_many(
         [
             {"run_id": "old", "ran_at": 1},

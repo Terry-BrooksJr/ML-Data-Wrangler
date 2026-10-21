@@ -25,7 +25,7 @@ CHEAPER_INFERENCE_BASE_URL = (
 
 # TODO(#15): confirm the model ID Cheaper Inference expects. The brief specifies
 # "claude-opus-4.8"; Anthropic's own ID for that model is "claude-opus-4-8".
-MODEL_VERSION = os.environ.get("DECISION_ENGINE_MODEL", "claude-opus-4.8")
+DEFAULT_MODEL = "claude-opus-4.8"
 # Reasoning, an internal note and a drafted message must all fit; a reply cut
 # off at this limit is an engine error, not an abstention.
 MAX_TOKENS = 4096
@@ -50,7 +50,11 @@ class EngineError(Exception):
 
 
 def primary_model() -> str:
-    return os.environ.get("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME") or MODEL_VERSION
+    return (
+        os.environ.get("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME")
+        or os.environ.get("DECISION_ENGINE_MODEL")
+        or DEFAULT_MODEL
+    )
 
 
 # Secondary and confirmation have no default: when unset, that step is

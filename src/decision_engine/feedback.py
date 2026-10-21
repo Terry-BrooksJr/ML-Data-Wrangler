@@ -17,10 +17,6 @@ from .guards import CLASSIFICATIONS
 
 OUTCOMES = ("good", "bad", "pending")
 DETECTION_METHODS = ("automatic", "manual")
-MISCLASSIFICATION_COLLECTION = os.environ.get(
-    "MISCLASSIFICATION_COLLECTION", "misclassification_log"
-)
-LESSONS_COLLECTION = os.environ.get("LESSONS_COLLECTION", "lessons_learned")
 
 
 def week_of(moment: datetime) -> datetime:
@@ -320,8 +316,14 @@ def format_accuracy_report(
 
 
 def get_feedback_collections(database) -> tuple:
-    """(misclassification_log, lessons_learned) in the given database."""
-    return database[MISCLASSIFICATION_COLLECTION], database[LESSONS_COLLECTION]
+    """(misclassification_log, lessons_learned) in the given database.
+
+    The names are read here, not at import, so a saved setting applies at once.
+    """
+    return (
+        database[os.environ.get("MISCLASSIFICATION_COLLECTION", "misclassification_log")],
+        database[os.environ.get("LESSONS_COLLECTION", "lessons_learned")],
+    )
 
 
 def recent_misclassifications(

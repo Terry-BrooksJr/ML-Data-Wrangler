@@ -19,6 +19,9 @@ ICON = str(ROOT / "packaging" / ("icon.icns" if sys.platform == "darwin" else "i
 datas, binaries, hiddenimports = [(str(ROOT / "packaging" / "icon.png"), "assets")], [], []
 # The Tag Normalizer copies these scripts out for a person to run against Zendesk.
 datas.append((str(ROOT / "src" / "zendesk_retag"), "zendesk_retag"))
+# tag_llm sends these to the model as its instructions.
+datas.append((str(ROOT / "src" / "tag_normalization_reference.md"), "."))
+datas.append((str(ROOT / "src" / "tag_normalization_priorities.md"), "."))
 
 # en_core_web_lg is loaded by import and ships its weights as package data.
 # spacy_legacy / spacy_loggers register functions through entry points, which

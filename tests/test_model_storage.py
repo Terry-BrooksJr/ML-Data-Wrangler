@@ -464,13 +464,13 @@ def test_cli_uploads_runs_not_yet_uploaded_and_records_them(
 ):
     monkeypatch.setattr("settings.load", lambda: None)
     env.setenv("MONGO_URI", "mongodb://test")
-    runs = mongomock.MongoClient().db[topic_store.RUNS_COLLECTION]
+    runs = mongomock.MongoClient().db[topic_store.runs_collection()]
     import decision_engine.persistence
 
     monkeypatch.setattr(
         decision_engine.persistence,
         "get_database",
-        lambda: {topic_store.RUNS_COLLECTION: runs},
+        lambda: {topic_store.runs_collection(): runs},
     )
     _run(tmp_path, "20261001T000000Z-old111", storage={"url": "s3://elsewhere/"})
     new = _run(tmp_path, "20261014T000000Z-new222")
