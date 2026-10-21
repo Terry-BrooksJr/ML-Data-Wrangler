@@ -92,6 +92,12 @@ SETTINGS: List[Setting] = [
         help="Re-checks manual-triage and low-confidence results. Leave blank to skip.",
     ),
     Setting(
+        "TAG_NORMALIZER_MODEL",
+        "Tag Normalizer model",
+        "Decision Engine (Cheaper Inference)",
+        help="Used by the Tag Normalizer's language-model option. Leave blank to use the primary model.",
+    ),
+    Setting(
         "DECISION_ENGINE_MODEL",
         "Default model",
         "Decision Engine (Cheaper Inference)",
