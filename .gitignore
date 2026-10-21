@@ -179,3 +179,6 @@ eval_sets/
 
 # Cached vectors from decision_engine.embedding_eval (derived from customer text)
 embedding_cache/
+
+# Task (Taskfile.yaml) checksums for sources/generates
+.task/

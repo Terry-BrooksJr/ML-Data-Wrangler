@@ -15,6 +15,7 @@ Content-Security-Policy that:
 The chart's bytes are read when it is registered, so swapping the file
 afterwards changes nothing.
 """
+
 import http.server
 import secrets
 import threading
@@ -25,24 +26,30 @@ from loguru import logger
 
 # The scripts and stylesheet pyLDAvis 3.4 charts load (pyLDAvis.urls).
 D3_URL = "https://d3js.org/d3.v5.js"
-LDAVIS_URL = "https://cdn.jsdelivr.net/gh/bmabey/pyLDAvis@3.4.0/pyLDAvis/js/ldavis.v3.0.0.js"
-LDAVIS_CSS_URL = "https://cdn.jsdelivr.net/gh/bmabey/pyLDAvis@3.4.0/pyLDAvis/js/ldavis.v1.0.0.css"
+LDAVIS_URL = (
+    "https://cdn.jsdelivr.net/gh/bmabey/pyLDAvis@3.4.0/pyLDAvis/js/ldavis.v3.0.0.js"
+)
+LDAVIS_CSS_URL = (
+    "https://cdn.jsdelivr.net/gh/bmabey/pyLDAvis@3.4.0/pyLDAvis/js/ldavis.v1.0.0.css"
+)
 MAX_CHART_BYTES = 50 * 1024 * 1024
 
-CSP = "; ".join([
-    "sandbox allow-scripts",
-    "default-src 'none'",
-    f"script-src 'unsafe-inline' {D3_URL} {LDAVIS_URL}",
-    f"style-src 'unsafe-inline' {LDAVIS_CSS_URL}",
-    "img-src data:",
-    "connect-src 'none'",
-    "font-src 'none'",
-    "frame-src 'none'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-ancestors 'none'",
-])
+CSP = "; ".join(
+    [
+        "sandbox allow-scripts",
+        "default-src 'none'",
+        f"script-src 'unsafe-inline' {D3_URL} {LDAVIS_URL}",
+        f"style-src 'unsafe-inline' {LDAVIS_CSS_URL}",
+        "img-src data:",
+        "connect-src 'none'",
+        "font-src 'none'",
+        "frame-src 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ]
+)
 HEADERS = {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Security-Policy": CSP,
@@ -58,7 +65,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
         host = (self.headers.get("Host") or "").split(":")[0]
-        body = self.server.charts.get(self.path) if host in ("127.0.0.1", "localhost") else None
+        body = (
+            self.server.charts.get(self.path)
+            if host in ("127.0.0.1", "localhost")
+            else None
+        )
         if body is None:
             self.send_error(404)
             return
@@ -69,7 +80,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args) -> None:  # quiet: no request lines in the app log
+    def log_message(
+        self, format, *args
+    ) -> None:  # quiet: no request lines in the app log
         pass
 
 
@@ -90,7 +103,9 @@ def _ensure_server() -> _ChartServer:
     with _lock:
         if _server is None:
             _server = _ChartServer()
-            threading.Thread(target=_server.serve_forever, name="chart-viewer", daemon=True).start()
+            threading.Thread(
+                target=_server.serve_forever, name="chart-viewer", daemon=True
+            ).start()
         return _server
 
 
@@ -103,7 +118,9 @@ def register(chart_path: str) -> str:
     with open(chart_path, "rb") as f:
         body = f.read(MAX_CHART_BYTES + 1)
     if len(body) > MAX_CHART_BYTES:
-        raise OSError(f"{chart_path} is over {MAX_CHART_BYTES // (1024 * 1024)} MB; not opening it.")
+        raise OSError(
+            f"{chart_path} is over {MAX_CHART_BYTES // (1024 * 1024)} MB; not opening it."
+        )
     server = _ensure_server()
     path = f"/{secrets.token_urlsafe(24)}/chart.html"
     server.charts[path] = body

@@ -10,6 +10,7 @@ queries it yet.
     python -m decision_engine.search ensure [--wait]
     python -m decision_engine.search query "import fails" [--status open]
 """
+
 import argparse
 import re
 import sys
@@ -70,14 +71,22 @@ def vector_index_definition(dimensions: int) -> dict:
     """Cosine similarity over `embedding`, filterable by status."""
     return {
         "fields": [
-            {"type": "vector", "path": VECTOR_PATH, "numDimensions": dimensions, "similarity": "cosine"},
+            {
+                "type": "vector",
+                "path": VECTOR_PATH,
+                "numDimensions": dimensions,
+                "similarity": "cosine",
+            },
             {"type": "filter", "path": "status"},
         ]
     }
 
 
 def _is_unsupported(error: OperationFailure) -> bool:
-    return error.code in _UNSUPPORTED_CODES or (error.details or {}).get("codeName") == "SearchNotEnabled"
+    return (
+        error.code in _UNSUPPORTED_CODES
+        or (error.details or {}).get("codeName") == "SearchNotEnabled"
+    )
 
 
 def _search_indexes(tickets: Collection) -> dict:
@@ -91,7 +100,9 @@ def _search_indexes(tickets: Collection) -> dict:
         raise
 
 
-def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: float = 300.0) -> List[str]:
+def ensure_search_indexes(
+    tickets: Collection, wait: bool = False, timeout: float = 300.0
+) -> List[str]:
     """Creates the full-text index if it doesn't exist yet. Safe to call repeatedly.
 
     An existing index is left as it is, even if its definition differs: change
@@ -113,13 +124,17 @@ def ensure_search_indexes(tickets: Collection, wait: bool = False, timeout: floa
     if TEXT_INDEX not in _search_indexes(tickets):
         try:
             tickets.create_search_index(
-                SearchIndexModel(name=TEXT_INDEX, type="search", definition=TEXT_INDEX_DEFINITION)
+                SearchIndexModel(
+                    name=TEXT_INDEX, type="search", definition=TEXT_INDEX_DEFINITION
+                )
             )
             created.append(TEXT_INDEX)
         except OperationFailure as e:
             if _is_unsupported(e):
                 raise SearchUnavailable(UNSUPPORTED_HINT) from e
-            already_exists = e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            already_exists = (
+                e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            )
             if not (already_exists and TEXT_INDEX in _search_indexes(tickets)):
                 raise
     if wait:
@@ -135,17 +150,31 @@ def _vector_index_problems(index: dict, dimensions: int) -> List[str]:
     definition = index.get("latestDefinition") or index.get("definition") or {}
     actual = definition.get("fields") or []
     for expected in vector_index_definition(dimensions)["fields"]:
-        match = next((f for f in actual if f.get("path") == expected["path"] and f.get("type") == expected["type"]), None)
+        match = next(
+            (
+                f
+                for f in actual
+                if f.get("path") == expected["path"]
+                and f.get("type") == expected["type"]
+            ),
+            None,
+        )
         if match is None:
             problems.append(f"no {expected['type']} field on {expected['path']!r}")
             continue
         for key, value in expected.items():
             if match.get(key) != value:
-                problems.append(f"{expected['path']}.{key} is {match.get(key)!r}, expected {value!r}")
-    expected_keys = {(f["type"], f["path"]) for f in vector_index_definition(dimensions)["fields"]}
+                problems.append(
+                    f"{expected['path']}.{key} is {match.get(key)!r}, expected {value!r}"
+                )
+    expected_keys = {
+        (f["type"], f["path"]) for f in vector_index_definition(dimensions)["fields"]
+    }
     for extra in actual:
         if (extra.get("type"), extra.get("path")) not in expected_keys:
-            problems.append(f"unexpected {extra.get('type')} field on {extra.get('path')!r}")
+            problems.append(
+                f"unexpected {extra.get('type')} field on {extra.get('path')!r}"
+            )
     return problems
 
 
@@ -172,7 +201,9 @@ def check_vector_index(tickets: Collection, dimensions: int) -> str:
     return "ok"
 
 
-def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False, timeout: float = 300.0) -> bool:
+def ensure_vector_index(
+    tickets: Collection, dimensions: int, wait: bool = False, timeout: float = 300.0
+) -> bool:
     """Creates the vector index if it doesn't exist yet. Safe to call repeatedly.
 
     Returns:
@@ -187,13 +218,19 @@ def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False
     if check_vector_index(tickets, dimensions) == "missing":
         try:
             tickets.create_search_index(
-                SearchIndexModel(name=VECTOR_INDEX, type="vectorSearch", definition=vector_index_definition(dimensions))
+                SearchIndexModel(
+                    name=VECTOR_INDEX,
+                    type="vectorSearch",
+                    definition=vector_index_definition(dimensions),
+                )
             )
             created = True
         except OperationFailure as e:
             if _is_unsupported(e):
                 raise SearchUnavailable(UNSUPPORTED_HINT) from e
-            already_exists = e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            already_exists = (
+                e.code in _INDEX_EXISTS_CODES or "already exists" in str(e).lower()
+            )
             if not (already_exists and VECTOR_INDEX in _search_indexes(tickets)):
                 raise
     if wait:
@@ -202,7 +239,10 @@ def ensure_vector_index(tickets: Collection, dimensions: int, wait: bool = False
 
 
 def wait_until_queryable(
-    tickets: Collection, name: str = TEXT_INDEX, timeout: float = 300.0, poll_seconds: float = 5.0
+    tickets: Collection,
+    name: str = TEXT_INDEX,
+    timeout: float = 300.0,
+    poll_seconds: float = 5.0,
 ) -> None:
     """Polls until the named search index reports queryable.
 
@@ -222,17 +262,23 @@ def wait_until_queryable(
                 index = _search_indexes(tickets).get(name)
         except PyMongoError as e:
             if getattr(e, "timeout", False):
-                raise TimeoutError(f"Search index {name}: listing indexes timed out after {timeout:.0f}s") from e
+                raise TimeoutError(
+                    f"Search index {name}: listing indexes timed out after {timeout:.0f}s"
+                ) from e
             raise
         if index and index.get("queryable"):
             return
         if time.monotonic() >= deadline:
             status = index.get("status") if index else "missing"
-            raise TimeoutError(f"Search index {name} not queryable after {timeout:.0f}s (status: {status})")
+            raise TimeoutError(
+                f"Search index {name} not queryable after {timeout:.0f}s (status: {status})"
+            )
         time.sleep(min(poll_seconds, max(deadline - time.monotonic(), 0)))
 
 
-def build_search_pipeline(query: str, status: Optional[str] = None, limit: int = 20) -> List[dict]:
+def build_search_pipeline(
+    query: str, status: Optional[str] = None, limit: int = 20
+) -> List[dict]:
     """The aggregation pipeline for a full-text ticket search.
 
     Exact matches are boosted above fuzzy ones. Fuzzy matching (one edit)
@@ -242,9 +288,20 @@ def build_search_pipeline(query: str, status: Optional[str] = None, limit: int =
     """
     compound = {
         "should": [
-            {"text": {"query": query, "path": SEARCH_PATHS, "score": {"boost": {"value": EXACT_BOOST}}}},
-            {"text": {"query": query, "path": SEARCH_PATHS,
-                      "fuzzy": {"maxEdits": 1, "prefixLength": FUZZY_PREFIX_LENGTH}}},
+            {
+                "text": {
+                    "query": query,
+                    "path": SEARCH_PATHS,
+                    "score": {"boost": {"value": EXACT_BOOST}},
+                }
+            },
+            {
+                "text": {
+                    "query": query,
+                    "path": SEARCH_PATHS,
+                    "fuzzy": {"maxEdits": 1, "prefixLength": FUZZY_PREFIX_LENGTH},
+                }
+            },
         ],
         "minimumShouldMatch": 1,
     }
@@ -254,7 +311,13 @@ def build_search_pipeline(query: str, status: Optional[str] = None, limit: int =
         compound["filter"] = [{"equals": {"path": "status", "value": status}}]
     return [
         # $search must be the first stage.
-        {"$search": {"index": TEXT_INDEX, "compound": compound, "highlight": {"path": SEARCH_PATHS}}},
+        {
+            "$search": {
+                "index": TEXT_INDEX,
+                "compound": compound,
+                "highlight": {"path": SEARCH_PATHS},
+            }
+        },
         {"$limit": limit},
         {
             "$project": {
@@ -269,7 +332,9 @@ def build_search_pipeline(query: str, status: Optional[str] = None, limit: int =
     ]
 
 
-def search_tickets(tickets: Collection, query: str, status: Optional[str] = None, limit: int = 20) -> List[dict]:
+def search_tickets(
+    tickets: Collection, query: str, status: Optional[str] = None, limit: int = 20
+) -> List[dict]:
     """Full-text search over ticket subjects and comment bodies, best match first.
 
     Raises:
@@ -279,7 +344,9 @@ def search_tickets(tickets: Collection, query: str, status: Optional[str] = None
     if not query or not query.strip():
         raise ValueError("Search query is empty.")
     try:
-        return list(tickets.aggregate(build_search_pipeline(query.strip(), status, limit)))
+        return list(
+            tickets.aggregate(build_search_pipeline(query.strip(), status, limit))
+        )
     except OperationFailure as e:
         if _is_unsupported(e):
             raise SearchUnavailable(UNSUPPORTED_HINT) from e
@@ -291,7 +358,10 @@ def highlight_text(result: dict) -> str:
     passages = []
     for highlight in result.get("highlights") or []:
         passages.append(
-            "".join(f"[{t['value']}]" if t.get("type") == "hit" else t.get("value", "") for t in highlight.get("texts", []))
+            "".join(
+                f"[{t['value']}]" if t.get("type") == "hit" else t.get("value", "")
+                for t in highlight.get("texts", [])
+            )
         )
     return " … ".join(passages)
 
@@ -309,15 +379,26 @@ def terminal_safe(text) -> str:
     being sent to the terminal.
     """
     text = str(text if text is not None else "").replace("\n", " ").replace("\t", " ")
-    return _TERMINAL_UNSAFE.sub(lambda m: m.group().encode("unicode_escape").decode("ascii"), text)
+    return _TERMINAL_UNSAFE.sub(
+        lambda m: m.group().encode("unicode_escape").decode("ascii"), text
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m decision_engine.search", description="Atlas full-text ticket search.")
+    parser = argparse.ArgumentParser(
+        prog="python -m decision_engine.search",
+        description="Atlas full-text ticket search.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
-    ensure = commands.add_parser("ensure", help=f"create the {TEXT_INDEX} index if missing")
-    ensure.add_argument("--wait", action="store_true", help="wait until the index is queryable")
-    ensure.add_argument("--timeout", type=float, default=300.0, help="seconds to wait (default 300)")
+    ensure = commands.add_parser(
+        "ensure", help=f"create the {TEXT_INDEX} index if missing"
+    )
+    ensure.add_argument(
+        "--wait", action="store_true", help="wait until the index is queryable"
+    )
+    ensure.add_argument(
+        "--timeout", type=float, default=300.0, help="seconds to wait (default 300)"
+    )
     query = commands.add_parser("query", help="search ticket subjects and comments")
     query.add_argument("text")
     query.add_argument("--status", help="only tickets with this exact status")
@@ -330,17 +411,27 @@ def main(argv: List[str]) -> int:
 
     args = _parser().parse_args(argv)  # exits with usage on bad arguments
     if args.command == "ensure":
-        created = ensure_search_indexes(get_tickets_collection(), wait=args.wait, timeout=args.timeout)
-        print(f"Created: {', '.join(created)}" if created else f"{TEXT_INDEX} already exists.")
+        created = ensure_search_indexes(
+            get_tickets_collection(), wait=args.wait, timeout=args.timeout
+        )
+        print(
+            f"Created: {', '.join(created)}"
+            if created
+            else f"{TEXT_INDEX} already exists."
+        )
         return 0
     try:
-        results = search_tickets(get_tickets_collection(), args.text, args.status, args.limit)
+        results = search_tickets(
+            get_tickets_collection(), args.text, args.status, args.limit
+        )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     for result in results:
-        print(f"{result['score']:.2f}  {terminal_safe(result['zendesk_id'])}  [{terminal_safe(result.get('status'))}]  "
-              f"{terminal_safe(result.get('subject'))}")
+        print(
+            f"{result['score']:.2f}  {terminal_safe(result['zendesk_id'])}  [{terminal_safe(result.get('status'))}]  "
+            f"{terminal_safe(result.get('subject'))}"
+        )
         if result.get("highlights"):
             print(f"        {terminal_safe(highlight_text(result))[:200]}")
     return 0

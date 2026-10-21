@@ -1,9 +1,13 @@
 """Settings dialog: edit the environment variables in settings.SETTINGS."""
 
 from itertools import groupby
-from urllib.parse import urlsplit
 from typing import Dict
+from urllib.parse import urlsplit
 
+import settings
+import theme
+from decision_engine.classify import api_url_problem, is_loopback_url
+from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 from loguru import logger
 from PyQt5.QtWidgets import (
     QAction,
@@ -18,11 +22,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import settings
-from decision_engine.classify import api_url_problem, is_loopback_url
-import theme
-from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 
 
 class SettingsDialog(QDialog):
@@ -87,9 +86,13 @@ class SettingsDialog(QDialog):
         toggle = QAction("Show", field)
         toggle.setCheckable(True)
         toggle.setToolTip("Show / hide")
-        toggle.setIcon(field.style().standardIcon(field.style().SP_FileDialogContentsView))
+        toggle.setIcon(
+            field.style().standardIcon(field.style().SP_FileDialogContentsView)
+        )
         toggle.toggled.connect(
-            lambda shown: field.setEchoMode(QLineEdit.Normal if shown else QLineEdit.Password)
+            lambda shown: field.setEchoMode(
+                QLineEdit.Normal if shown else QLineEdit.Password
+            )
         )
         field.addAction(toggle, QLineEdit.TrailingPosition)
 
@@ -129,7 +132,8 @@ class SettingsDialog(QDialog):
         value = self.fields["EMBEDDING_DIMENSIONS"].text().strip()
         if value and parse_dimensions(value) is None:
             QMessageBox.critical(
-                self, "Invalid Dimensions",
+                self,
+                "Invalid Dimensions",
                 f"Dimensions must be one of {', '.join(map(str, ALLOWED_DIMENSIONS))}, or blank for 1024.",
             )
             return False
@@ -139,36 +143,55 @@ class SettingsDialog(QDialog):
         """Refuses a theme name the app doesn't have."""
         value = self.fields["LASSO_THEME"].text()
         if theme.theme_name(value) is None:
-            QMessageBox.critical(self, "Unknown Theme",
-                                 f"Theme must be one of {', '.join(theme.THEMES)}, or blank for {theme.DEFAULT_THEME}.")
+            QMessageBox.critical(
+                self,
+                "Unknown Theme",
+                f"Theme must be one of {', '.join(theme.THEMES)}, or blank for {theme.DEFAULT_THEME}.",
+            )
             return False
         return True
 
     def _storage_endpoint_ok(self) -> bool:
         """Refuses an unencrypted storage endpoint: the secret key signs requests to it."""
         url = self.fields["B2_ENDPOINT_URL"].text().strip()
-        if not url or url.startswith("https://") or (url.startswith("http://") and is_loopback_url(url)):
+        if (
+            not url
+            or url.startswith("https://")
+            or (url.startswith("http://") and is_loopback_url(url))
+        ):
             return True
-        QMessageBox.critical(self, "Insecure Storage Endpoint",
-                             f"{url} must start with https:// (http:// is allowed only for localhost).")
+        QMessageBox.critical(
+            self,
+            "Insecure Storage Endpoint",
+            f"{url} must start with https:// (http:// is allowed only for localhost).",
+        )
         return False
 
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
 
-        if not (self._api_urls_ok() and self._dimensions_ok() and self._storage_endpoint_ok()
-                and self._theme_ok()):
+        if not (
+            self._api_urls_ok()
+            and self._dimensions_ok()
+            and self._storage_endpoint_ok()
+            and self._theme_ok()
+        ):
             return
         try:
             restart_needed = settings.save(self.values())
         except OSError as e:
-            QMessageBox.critical(self, "Settings Not Saved", f"Could not write {settings.settings_path()}:\n{e}")
+            QMessageBox.critical(
+                self,
+                "Settings Not Saved",
+                f"Could not write {settings.settings_path()}:\n{e}",
+            )
             return
         logger.info(f"Settings saved to {settings.settings_path()}.")
         if restart_needed:
             QMessageBox.information(
                 self,
                 "Restart Needed",
-                "These changes take effect after you restart the app:\n" + "\n".join(restart_needed),
+                "These changes take effect after you restart the app:\n"
+                + "\n".join(restart_needed),
             )
         self.accept()

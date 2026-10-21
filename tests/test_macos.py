@@ -3,9 +3,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
-
 import macos
+import pytest
 
 
 def test_does_nothing_off_macos(monkeypatch):
@@ -27,6 +26,12 @@ def test_sets_the_bundle_name_macos_shows():
         print(ctypes.string_at(send(ctypes.c_void_p)(value, sel(b"UTF8String"))).decode())
     """)
     src = Path(__file__).resolve().parents[1] / "src"
-    result = subprocess.run([sys.executable, "-c", script], cwd=src, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=src,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.strip() == "Lasso"

@@ -139,8 +139,8 @@ distance map in the browser.
 
 Runs are saved under `bertopic_models/` (`BERTOPIC_MODEL_DIR`), apart from the
 LDA runs in `topic_models/`, and kept the same way LDA runs are: recorded in
-MongoDB's `topic_model_runs` (marked `"method": "bertopic"`, so the LDA lists
-skip them) and, with model storage set up, uploaded with a signed manifest to
+MongoDB's `bertopic_run_log` (`BERTOPIC_RUNS_COLLECTION`; LDA runs go to
+`topic_modeling_run_log`, `TOPIC_RUNS_COLLECTION`) and, with model storage set up, uploaded with a signed manifest to
 `s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
 Run…** lists runs from MongoDB and this computer, and downloads and verifies
 one whose files aren't here before showing its charts. Retry a failed upload
@@ -204,6 +204,74 @@ documents = wrangler.ticket_documents()          # one cleansed document per tic
 
 - **Training workers re-import `app.py`.** gensim's `LdaMulticore` starts worker processes, and on macOS each one re-runs `app.py` from the top. So every worker loads the spaCy model and builds a hidden copy of the window. Training still works, but it's slow and uses a lot of memory. The fix is to move the module-level `nlp`, `app` and `window` setup under `if __name__ == "__main__":`.
 - **Chart files aren't gitignored.** `coherence.png` and `lda_model.html` land in the directory you launch from and show up as untracked files. (`completed/` and `*.log` are already ignored.)
+
+## Normalizing tags
+
+The **Tag Normalizer** tab finds tags that mean the same thing and maps each
+to one tag, so "oil change", "tire_rotation" and "Car Maintenance" all become
+`car_maintenance`. It reads and writes nothing in MongoDB or Zendesk; the
+result is a mapping you export.
+
+1. Paste tags (comma- or newline-separated, or a JSON list), or **Load
+   File…**. A CSV such as a Zendesk tag export (`name,count`) uses its first
+   column; the count is ignored.
+2. Pick **Voyage AI** (the embedding Settings; sends only the tag names) or
+   **spaCy** (local and free, but misses looser synonyms), then **Find
+   Similar Tags**. Each tag is embedded once per session; re-runs only embed
+   new tags.
+3. Adjust **Merge at similarity ≥** to regroup instantly. Voyage scores short
+   tags high (unrelated pairs often reach 0.8), so its default is 0.90;
+   spaCy's is 0.80.
+4. Double-click a group's tag to rename it, untick any tag to keep it out of
+   its group, then **Export Mapping…** as CSV (`tag,canonical_tag,uses,similarity`)
+   or JSON.
+
+Before embedding, tags are cleaned: underscores, hyphens and camelCase become
+spaces and case is ignored, so `car_maintenance` and `Car Maintenance` are
+one tag. A group is named by its most central tag, in its most common
+spelling.
+
+Structured `facet__value` tags (`sentiment__positive`, `intent_confidence__low`,
+`intent__software__sync__issue`) come from a fixed taxonomy and share long
+prefixes, so opposite values embed as near-identical. Two of them are never
+grouped together; a free-form tag can still join one (`central_2fa_reset` →
+`intent__software__verification_code__2fa_reset`), and the structured tag
+names the group. Untick **Keep facet__value tags apart** to allow it.
+
+The same from the command line:
+
+```bash
+cd src && python -m tag_normalizer tags.csv --out tag_mapping.csv
+cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
+```
+
+### Retagging tickets in Zendesk
+
+**Export Zendesk Scripts…** (or `--scripts FOLDER` on the command line)
+writes a folder for a person to run by hand; Lasso itself never calls
+Zendesk. It holds `tag_changes.csv` (`old_tag,new_tag`, only tags that
+change) and three standard-library Python scripts, run in order:
+
+1. `1_find_tickets.py` (read-only) searches for tickets with each old tag
+   (`GET /api/v2/search/export`, cursor-paginated) and writes
+   `tickets_to_retag.csv`.
+2. `2_remove_old_tags.py --apply` removes each old tag from those tickets.
+3. `3_add_new_tags.py --apply` adds the new tag to the same tickets.
+
+Steps 2 and 3 use `PUT /api/v2/tickets/update_many.json` (100 tickets per
+request, `remove_tags` / `additional_tags`, so other tags are untouched) and
+wait for each job to finish. They print a dry run unless given `--apply`,
+read the ticket list from step 1 rather than searching again, skip closed
+tickets (Zendesk won't update them) and log each ticket's result. They read
+`ZENDESK_SUBDOMAIN`, `ZENDESK_EMAIL` and `ZENDESK_API_TOKEN` from the
+environment. A new tag with spaces or capitals is written as a valid Zendesk
+tag (`Vehicle Care` → `vehicle_care`). Each update is a normal ticket update,
+so it can fire triggers that look at tags. The folder's `README.txt` has the
+full steps.
+
+```bash
+cd src && python -m tag_normalizer tags.csv --scripts ../zendesk_retag_run
+```
 
 ## Writing tickets to MongoDB
 
@@ -271,6 +339,21 @@ from decision_engine.persistence import run_review_batch, process_one_ticket
 run_review_batch()               # every ticket with awaiting_review: true
 process_one_ticket("30882")      # a single ticket
 ```
+
+### Feedback and the weekly review
+
+On the Decision Engine tab, select a review and use **Mark Correct** or
+**Mark Misclassified…**. A misclassification is written to
+`misclassification_log` (`MISCLASSIFICATION_COLLECTION`) and marks the
+review's outcome "bad".
+
+**Weekly Review…** opens one week's log (Monday to Sunday, UTC). Enter your
+name as Reviewer, select entries and **Mark Selected Reviewed**. Only
+reviewed entries feed a summary: **Suggest from Reviewed** drafts one from
+them for you to edit, and **Save Draft** stores it, unapproved, in
+`lessons_learned` (`LESSONS_COLLECTION`) with the IDs of the entries it's
+built on. Select a draft and **Approve Selected** to record who approved it.
+Approved lessons aren't fed back into the prompt yet.
 
 ### Ticket embeddings (Voyage AI)
 

@@ -17,6 +17,8 @@ ICON = str(ROOT / "packaging" / ("icon.icns" if sys.platform == "darwin" else "i
 
 # app.py sets icon.png as the window icon (taskbar on Windows/Linux).
 datas, binaries, hiddenimports = [(str(ROOT / "packaging" / "icon.png"), "assets")], [], []
+# The Tag Normalizer copies these scripts out for a person to run against Zendesk.
+datas.append((str(ROOT / "src" / "zendesk_retag"), "zendesk_retag"))
 
 # en_core_web_lg is loaded by import and ships its weights as package data.
 # spacy_legacy / spacy_loggers register functions through entry points, which

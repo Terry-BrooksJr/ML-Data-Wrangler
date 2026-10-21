@@ -10,11 +10,15 @@ import os
 import threading
 from typing import Any, Callable, List, Optional
 
+import embeddings
+from decision_engine import feedback, persistence, search
+from decision_engine.guards import CLASSIFICATIONS
+from lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5 import QtCore
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -32,10 +36,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-import embeddings
-from decision_engine import feedback, persistence, search
-from decision_engine.guards import CLASSIFICATIONS
 from utility import ThreadWorker, worker_thread
 
 # Reading reviews only touches Mongo; classifying also needs the primary
@@ -43,7 +43,8 @@ from utility import ThreadWorker, worker_thread
 # engine skips that step.
 READ_ENV = ("MONGO_URI",)
 REVIEW_ENV = READ_ENV + (
-    "CHEAPER_INFERENCE_API_KEY", "CHEAPER_INFERENCE_API_URL",
+    "CHEAPER_INFERENCE_API_KEY",
+    "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
 )
 # Embedding tickets reads and writes Mongo and calls Voyage AI.
@@ -54,7 +55,14 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
-COLUMNS = ["Ticket", "Subject", "Classification", "Confidence", "Reviewed (UTC)", "Model"]
+COLUMNS = [
+    "Ticket",
+    "Subject",
+    "Classification",
+    "Confidence",
+    "Reviewed (UTC)",
+    "Model",
+]
 CONNECTION_HINT = (
     "Could not reach MongoDB. Check that you are on the VPN, that its exit IP "
     "is on the Atlas IP access list, and that the cluster is not paused."
@@ -84,7 +92,9 @@ def optional_models_note() -> str:
         One line per unset model, or "" when both are set.
     """
     return "\n".join(
-        f"{name} is not set: {effect}." for name, effect in OPTIONAL_MODEL_ENV.items() if not os.getenv(name)
+        f"{name} is not set: {effect}."
+        for name, effect in OPTIONAL_MODEL_ENV.items()
+        if not os.getenv(name)
     )
 
 
@@ -111,7 +121,15 @@ def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> Lis
         {"$unwind": "$agent_reviews"},
         {"$sort": {"agent_reviews.reviewed_at": -1}},
         {"$limit": limit},
-        {"$project": {"_id": 0, "zendesk_id": 1, "subject": 1, "outcomes": 1, "review": "$agent_reviews"}},
+        {
+            "$project": {
+                "_id": 0,
+                "zendesk_id": 1,
+                "subject": 1,
+                "outcomes": 1,
+                "review": "$agent_reviews",
+            }
+        },
     ]
     return list(tickets.aggregate(pipeline))
 
@@ -124,9 +142,11 @@ def format_review(row: dict) -> str:
     lines = [
         f"Ticket {row.get('zendesk_id')}: {row.get('subject') or '(no subject)'}",
         f"Classification: {review.get('classification')} (confidence {review.get('confidence')})",
-        f"Reviewed: {reviewed_at:%Y-%m-%d %H:%M} UTC · Model: {review.get('model_version')}"
-        if reviewed_at
-        else f"Model: {review.get('model_version')}",
+        (
+            f"Reviewed: {reviewed_at:%Y-%m-%d %H:%M} UTC · Model: {review.get('model_version')}"
+            if reviewed_at
+            else f"Model: {review.get('model_version')}"
+        ),
         "",
         "Signals matched:",
         *[f"  - {signal}" for signal in review.get("signals_matched") or ["(none)"]],
@@ -149,12 +169,22 @@ def format_review(row: dict) -> str:
     if review.get("leadership_recipient"):
         lines += ["", f"Leadership recipient: {review['leadership_recipient']}"]
     if review.get("guard_overrides"):
-        lines += ["", "Overridden by code checks:", *[f"  - {o}" for o in review["guard_overrides"]]]
+        lines += [
+            "",
+            "Overridden by code checks:",
+            *[f"  - {o}" for o in review["guard_overrides"]],
+        ]
     if review.get("engine_error"):
-        lines += ["", f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}"]
+        lines += [
+            "",
+            f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
+        ]
     if outcome := latest_outcome(row):
-        lines += ["", f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
-                  + (f": {outcome['detail']}" if outcome.get("detail") else "")]
+        lines += [
+            "",
+            f"Outcome: {outcome.get('outcome')} ({outcome.get('detection_method')})"
+            + (f": {outcome['detail']}" if outcome.get("detail") else ""),
+        ]
     if audit := review.get("audit") or {}:
         usage = audit.get("usage") or {}
         lines += [
@@ -199,9 +229,13 @@ class TriageTab(QWidget):
 
     def __init__(
         self,
-        collection_factory: Callable[[], Collection] = persistence.get_tickets_collection,
+        collection_factory: Callable[
+            [], Collection
+        ] = persistence.get_tickets_collection,
         review_batch: Optional[Callable[[Collection, List[str]], Any]] = None,
-        review_one: Callable[[str, Collection], Optional[dict]] = persistence.process_one_ticket,
+        review_one: Callable[
+            [str, Collection], Optional[dict]
+        ] = persistence.process_one_ticket,
         parent: Optional[QWidget] = None,
     ) -> None:
         """Stores the injected callables, initializes job and table state, and builds the UI.
@@ -225,6 +259,8 @@ class TriageTab(QWidget):
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
         self._on_done: Optional[Callable[[Any], None]] = None
+        self._on_error: Optional[Callable[[str], None]] = None
+        self.weekly_review_dialog = None
         self._rows: List[dict] = []
         self._loaded = False
         self._build_ui()
@@ -284,7 +320,9 @@ class TriageTab(QWidget):
 
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
-        self.detail.setPlaceholderText("Select a review to see its reasoning, note and draft message.")
+        self.detail.setPlaceholderText(
+            "Select a review to see its reasoning, note and draft message."
+        )
 
         self.mark_good_button = QPushButton("Mark Correct")
         self.mark_good_button.clicked.connect(self.mark_selected_correct)
@@ -292,10 +330,16 @@ class TriageTab(QWidget):
         self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
         self.accuracy_button = QPushButton("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        self.weekly_review_button = QPushButton("Weekly Review…")
+        self.weekly_review_button.setToolTip(
+            "Review the week's misclassifications and write the lessons learned from them."
+        )
+        self.weekly_review_button.clicked.connect(self.open_weekly_review)
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.weekly_review_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
@@ -413,7 +457,7 @@ class TriageTab(QWidget):
         self._thread.wait()
         self._thread = None
         self._worker = None
-        self._on_done = None
+        self._on_done = self._on_error = None
 
     def _set_busy(self, busy: bool, label: str = "") -> None:
         """Switches the tab between busy and idle states.
@@ -426,8 +470,14 @@ class TriageTab(QWidget):
             label: Text for the busy bar and, when busy, the status label.
         """
 
-        for button in (self.refresh_button, self.review_all_button, self.review_one_button, self.accuracy_button,
-                       self.embed_button):
+        for button in (
+            self.refresh_button,
+            self.review_all_button,
+            self.review_one_button,
+            self.accuracy_button,
+            self.embed_button,
+            self.weekly_review_button,
+        ):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
@@ -438,9 +488,20 @@ class TriageTab(QWidget):
         if busy and label:
             self.status_label.setText(label)
 
-    def _run(self, task: Callable[[], Any], description: str, on_done: Callable[[Any], None]) -> None:
-        if self._closing:
-            return
+    def _run(
+        self,
+        task: Callable[[], Any],
+        description: str,
+        on_done: Callable[[Any], None],
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """Runs `task` on a worker thread, then `on_done(result)` (or `on_error(message)`) here.
+
+        Returns:
+            False, without running anything, while another job runs or the tab is closing.
+        """
+        if self._closing or self._thread is not None:
+            return False
 
         def with_connection_hint():
             try:
@@ -450,6 +511,7 @@ class TriageTab(QWidget):
 
         self._set_busy(True, f"{description}…")
         self._on_done = on_done
+        self._on_error = on_error
         self._thread = worker_thread(self)
         self._worker = ThreadWorker(with_connection_hint, description)
         self._worker.moveToThread(self._thread)
@@ -457,6 +519,7 @@ class TriageTab(QWidget):
         self._worker.error.connect(self._job_failed)
         self._thread.started.connect(self._worker.run)
         self._thread.start()
+        return True
 
     def _stop_thread(self) -> None:
         """Shuts down the current worker thread and returns to the idle state.
@@ -473,7 +536,7 @@ class TriageTab(QWidget):
 
     def _job_finished(self, result: Any) -> None:
         """Handles a successful job.
-             
+
         Stops the thread first, then invokes the stored `on_done` callback with
         the result. The order matters: the callback may start the next job.
         Completion is reported by each callback, not here, so refreshes and
@@ -483,7 +546,7 @@ class TriageTab(QWidget):
             result: The value returned by the task.
         """
         self._stop_thread()
-        on_done, self._on_done = self._on_done, None
+        on_done, self._on_done, self._on_error = self._on_done, None, None
         if self._closing:
             # Don't start follow-up jobs or show dialogs while closing.
             self.idle.emit()
@@ -500,13 +563,15 @@ class TriageTab(QWidget):
             message: The error text from the worker, shown to the user.
         """
         self._stop_thread()
-        self._on_done = None
+        on_error, self._on_done, self._on_error = self._on_error, None, None
         if self._closing:
             logger.error(f"Decision Engine job failed while closing: {message}")
             self.idle.emit()
             return
         self.status_label.setText("Last action failed; see the log.")
         QMessageBox.critical(self, "Decision Engine Error", message)
+        if on_error is not None:
+            on_error(message)
 
     # --- actions ---------------------------------------------------------------
 
@@ -563,7 +628,9 @@ class TriageTab(QWidget):
         awaiting = len(zendesk_ids)
         self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
         if awaiting == 0:
-            QMessageBox.information(self, "Nothing to Review", "No tickets are awaiting review.")
+            QMessageBox.information(
+                self, "Nothing to Review", "No tickets are awaiting review."
+            )
             return
         note = optional_models_note()
         answer = QMessageBox.question(
@@ -604,8 +671,11 @@ class TriageTab(QWidget):
             status = embeddings.index_status(tickets, cfg)  # raises VectorIndexMismatch
             return embeddings.plan_backfill(tickets, cfg), status
 
-        self._run(prepare, "Finding tickets that need embeddings",
-                  lambda prepared: self._confirm_embed(cfg, *prepared))
+        self._run(
+            prepare,
+            "Finding tickets that need embeddings",
+            lambda prepared: self._confirm_embed(cfg, *prepared),
+        )
 
     def _confirm_embed(self, cfg, plan, status: str) -> None:
         """Asks before the paid calls, then embeds exactly the approved tickets."""
@@ -613,7 +683,8 @@ class TriageTab(QWidget):
             answer = QMessageBox.question(
                 self,
                 "Embed Tickets",
-                embeddings.describe_plan(plan, cfg) + " Tickets with a current embedding are skipped.\n\nContinue?",
+                embeddings.describe_plan(plan, cfg)
+                + " Tickets with a current embedding are skipped.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )
@@ -622,7 +693,9 @@ class TriageTab(QWidget):
 
         def embed_and_index():
             tickets = self.collection_factory()
-            summary = embeddings.run_backfill(tickets, cfg, plan, should_stop=self._cancel.is_set)
+            summary = embeddings.run_backfill(
+                tickets, cfg, plan, should_stop=self._cancel.is_set
+            )
             # A VectorIndexMismatch here (the index changed in Atlas during the
             # run) propagates and is shown as an error, not a warning.
             try:
@@ -631,7 +704,9 @@ class TriageTab(QWidget):
                 summary["index"] = f"skipped: {e}"
             return summary
 
-        self._run(embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done)
+        self._run(
+            embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done
+        )
 
     def _embed_done(self, summary: dict) -> None:
         message = embeddings.format_summary(summary)
@@ -663,7 +738,9 @@ class TriageTab(QWidget):
 
         zendesk_id = self.ticket_id_input.text().strip()
         if not zendesk_id:
-            QMessageBox.warning(self, "No Ticket ID", "Enter a Zendesk ticket ID to classify.")
+            QMessageBox.warning(
+                self, "No Ticket ID", "Enter a Zendesk ticket ID to classify."
+            )
             return
         if not self._configured(REVIEW_ENV, notify=True):
             return
@@ -695,7 +772,11 @@ class TriageTab(QWidget):
             message += f"\n\nThe engine failed repeatedly, so the ticket was routed to manual triage: {result['engine_error']}"
         logger.success(message)
         note = optional_models_note()
-        QMessageBox.information(self, "Ticket Classified", message + (f"\n\nWarning:\n{note}" if note else ""))
+        QMessageBox.information(
+            self,
+            "Ticket Classified",
+            message + (f"\n\nWarning:\n{note}" if note else ""),
+        )
         self.ticket_id_input.clear()
         self.refresh()
 
@@ -728,7 +809,10 @@ class TriageTab(QWidget):
             for column, value in enumerate(values):
                 item = QTableWidgetItem()
                 # DisplayRole with the raw value so numbers sort numerically.
-                item.setData(QtCore.Qt.DisplayRole, value if isinstance(value, (int, float)) else str(value or ""))
+                item.setData(
+                    QtCore.Qt.DisplayRole,
+                    value if isinstance(value, (int, float)) else str(value or ""),
+                )
                 if column == 0:
                     item.setData(QtCore.Qt.UserRole, row_index)
                 self.table.setItem(row_index, column, item)
@@ -760,7 +844,9 @@ class TriageTab(QWidget):
         selected = self.table.selectedItems() if hasattr(self, "table") else []
         if not selected:
             return None
-        return self._rows[self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)]
+        return self._rows[
+            self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)
+        ]
 
     # --- feedback ----------------------------------------------------------------
 
@@ -771,9 +857,13 @@ class TriageTab(QWidget):
             return
         zendesk_id, review_id = row["zendesk_id"], row["review"]["review_id"]
         self._run(
-            lambda: feedback.record_outcome(self.collection_factory(), zendesk_id, review_id, "good"),
+            lambda: feedback.record_outcome(
+                self.collection_factory(), zendesk_id, review_id, "good"
+            ),
             f"Recording outcome for ticket {zendesk_id}",
-            lambda _: self._feedback_done(f"Ticket {zendesk_id}: review marked correct."),
+            lambda _: self._feedback_done(
+                f"Ticket {zendesk_id}: review marked correct."
+            ),
         )
 
     def mark_selected_misclassified(self) -> None:
@@ -784,24 +874,35 @@ class TriageTab(QWidget):
         zendesk_id, review = row["zendesk_id"], row["review"]
         choices = [c for c in CLASSIFICATIONS if c != review.get("classification")]
         correct, ok = QInputDialog.getItem(
-            self, "Mark Misclassified", f"Ticket {zendesk_id} was classified {review.get('classification')}. "
-            "What should it have been?", choices, 0, False,
+            self,
+            "Mark Misclassified",
+            f"Ticket {zendesk_id} was classified {review.get('classification')}. "
+            "What should it have been?",
+            choices,
+            0,
+            False,
         )
         if not ok:
             return
-        misread, ok = QInputDialog.getText(self, "Mark Misclassified", "Which signal was misread? (optional)")
+        misread, ok = QInputDialog.getText(
+            self, "Mark Misclassified", "Which signal was misread? (optional)"
+        )
         if not ok:
             return
 
         def log_it():
             tickets = self.collection_factory()
             log, _ = feedback.get_feedback_collections(tickets.database)
-            return feedback.log_misclassification(tickets, log, zendesk_id, review["review_id"], correct, misread.strip())
+            return feedback.log_misclassification(
+                tickets, log, zendesk_id, review["review_id"], correct, misread.strip()
+            )
 
         self._run(
             log_it,
             f"Logging misclassification for ticket {zendesk_id}",
-            lambda _: self._feedback_done(f"Ticket {zendesk_id}: logged as misclassified (should be {correct})."),
+            lambda _: self._feedback_done(
+                f"Ticket {zendesk_id}: logged as misclassified (should be {correct})."
+            ),
         )
 
     def _feedback_done(self, message: str) -> None:
@@ -817,7 +918,26 @@ class TriageTab(QWidget):
             lambda: feedback.accuracy_report(self.collection_factory()),
             "Building accuracy report",
             lambda report: QMessageBox.information(
-                self, "Accuracy Report",
-                feedback.format_accuracy_report(report) if report else "No reviews yet.",
+                self,
+                "Accuracy Report",
+                (
+                    feedback.format_accuracy_report(report)
+                    if report
+                    else "No reviews yet."
+                ),
             ),
         )
+
+    def open_weekly_review(self) -> None:
+        """Opens the weekly review of misclassification_log and lessons_learned."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.weekly_review_dialog = WeeklyReviewDialog(
+            self._run,
+            lambda: feedback.get_feedback_collections(
+                self.collection_factory().database
+            ),
+            self,
+        )
+        self.weekly_review_dialog.show()

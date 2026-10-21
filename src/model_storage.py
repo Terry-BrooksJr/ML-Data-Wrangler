@@ -23,6 +23,7 @@ optional MODEL_PREFIX and MODEL_STORAGE_REGION.
     cd src && python -m model_storage upload --bertopic [RUN_ID ...]   # BERTopic runs (bertopic_runs)
     cd src && python -m model_storage new-key               # prints a new MODEL_SIGNING_KEY
 """
+
 import argparse
 import dataclasses
 import hashlib
@@ -40,9 +41,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from loguru import logger
-
 from decision_engine.classify import is_loopback_url
+from loguru import logger
 
 DEFAULT_PREFIX = "topic-models/"
 RUN_FILE = "run.json"  # same as topic_store.RUN_FILE
@@ -50,7 +50,7 @@ MANIFEST_FILE = "manifest.json"  # uploaded last: its presence marks a complete 
 MANIFEST_VERSION = 1
 # A run is a model, a dictionary, a few gensim sidecar files and two charts.
 MAX_RUN_FILES = 200
-MAX_RUN_BYTES = 2 * 1024 ** 3
+MAX_RUN_BYTES = 2 * 1024**3
 MAX_MANIFEST_BYTES = 1024 * 1024
 MIN_SIGNING_KEY_CHARS = 32
 CHUNK_BYTES = 1024 * 1024
@@ -117,7 +117,9 @@ def config() -> Optional[Config]:
     key_id = os.environ.get("B2_KEY_ID", "").strip()
     secret = os.environ.get("B2_APPLICATION_KEY", "").strip()
     if not key_id or not secret:
-        raise StorageNotConfigured("MODEL_BUCKET is set, but the storage key ID and secret aren't. Add them in Settings.")
+        raise StorageNotConfigured(
+            "MODEL_BUCKET is set, but the storage key ID and secret aren't. Add them in Settings."
+        )
     signing_key = os.environ.get("MODEL_SIGNING_KEY", "").strip()
     if len(signing_key) < MIN_SIGNING_KEY_CHARS:
         raise StorageNotConfigured(
@@ -126,13 +128,22 @@ def config() -> Optional[Config]:
         )
     endpoint = os.environ.get("B2_ENDPOINT_URL", "").strip() or None
     if not _endpoint_ok(endpoint):
-        raise StorageNotConfigured(f"B2_ENDPOINT_URL must be https:// (http:// only for localhost), got {endpoint}.")
+        raise StorageNotConfigured(
+            f"B2_ENDPOINT_URL must be https:// (http:// only for localhost), got {endpoint}."
+        )
     region = os.environ.get("MODEL_STORAGE_REGION", "").strip() or _region_for(endpoint)
     prefix = os.environ.get("MODEL_PREFIX", DEFAULT_PREFIX).strip().lstrip("/")
     if prefix and not prefix.endswith("/"):
         prefix += "/"
-    return Config(bucket=bucket, prefix=prefix, key_id=key_id, secret=secret, endpoint_url=endpoint, region=region,
-                  signing_key=signing_key.encode("utf-8"))
+    return Config(
+        bucket=bucket,
+        prefix=prefix,
+        key_id=key_id,
+        secret=secret,
+        endpoint_url=endpoint,
+        region=region,
+        signing_key=signing_key.encode("utf-8"),
+    )
 
 
 def make_client(cfg: Config):
@@ -162,7 +173,11 @@ def sign(manifest: dict, key: bytes) -> str:
 
 def _check_relative(relative) -> None:
     parts = relative.split("/") if isinstance(relative, str) else []
-    if not parts or relative.startswith("/") or any(p in ("", ".", "..") or "\\" in p for p in parts):
+    if (
+        not parts
+        or relative.startswith("/")
+        or any(p in ("", ".", "..") or "\\" in p for p in parts)
+    ):
         raise UntrustedRun(f"its manifest names an unsafe path {relative!r}")
 
 
@@ -176,22 +191,33 @@ def verify(document: dict, run_id: str, key: bytes) -> dict:
     if not isinstance(manifest, dict) or not isinstance(signature, str):
         raise UntrustedRun("the upload has no signed manifest")
     if not hmac.compare_digest(sign(manifest, key), signature):
-        raise UntrustedRun("its manifest signature doesn't match MODEL_SIGNING_KEY (a different key, or tampered with)")
+        raise UntrustedRun(
+            "its manifest signature doesn't match MODEL_SIGNING_KEY (a different key, or tampered with)"
+        )
     if manifest.get("version") != MANIFEST_VERSION or manifest.get("run_id") != run_id:
         raise UntrustedRun("its manifest is for a different run")
     files = manifest.get("files")
     if not isinstance(files, dict) or not files or len(files) > MAX_RUN_FILES:
-        raise UntrustedRun(f"its manifest lists {len(files) if isinstance(files, dict) else 0} files "
-                           f"(1-{MAX_RUN_FILES} allowed)")
+        raise UntrustedRun(
+            f"its manifest lists {len(files) if isinstance(files, dict) else 0} files "
+            f"(1-{MAX_RUN_FILES} allowed)"
+        )
     total = 0
     for relative, entry in files.items():
         _check_relative(relative)
         size = entry.get("bytes") if isinstance(entry, dict) else None
-        if not isinstance(size, int) or isinstance(size, bool) or size < 0 or not isinstance(entry.get("sha256"), str):
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(entry.get("sha256"), str)
+        ):
             raise UntrustedRun(f"its manifest entry for {relative!r} is malformed")
         total += size
     if total > MAX_RUN_BYTES:
-        raise UntrustedRun(f"it is {total / 1e9:.1f} GB (limit {MAX_RUN_BYTES / 1e9:.0f} GB)")
+        raise UntrustedRun(
+            f"it is {total / 1e9:.1f} GB (limit {MAX_RUN_BYTES / 1e9:.0f} GB)"
+        )
     return manifest
 
 
@@ -209,7 +235,9 @@ def run_files(run_dir: pathlib.Path) -> List[pathlib.Path]:
     files = []
     for path in sorted(run_dir.rglob("*")):
         relative = path.relative_to(run_dir)
-        if any((run_dir / p).is_symlink() for p in [relative, *list(relative.parents)[:-1]]):
+        if any(
+            (run_dir / p).is_symlink() for p in [relative, *list(relative.parents)[:-1]]
+        ):
             logger.warning(f"Not uploading {path}: it is or is under a symlink.")
             continue
         if not path.is_file() or path.name == MANIFEST_FILE:
@@ -218,7 +246,9 @@ def run_files(run_dir: pathlib.Path) -> List[pathlib.Path]:
             logger.warning(f"Not uploading {path}: it is outside {root}.")
             continue
         files.append(path)
-    return [p for p in files if p.name != RUN_FILE] + [p for p in files if p.name == RUN_FILE]
+    return [p for p in files if p.name != RUN_FILE] + [
+        p for p in files if p.name == RUN_FILE
+    ]
 
 
 def upload_run(run: dict, cfg: Config, client=None) -> dict:
@@ -244,9 +274,14 @@ def upload_run(run: dict, cfg: Config, client=None) -> dict:
         relative = path.relative_to(run_dir).as_posix()
         data = path.read_bytes()
         client.upload_fileobj(io.BytesIO(data), cfg.bucket, prefix + relative)
-        files[relative] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        files[relative] = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+        }
     manifest = {"version": MANIFEST_VERSION, "run_id": run_id, "files": files}
-    document = json.dumps({"manifest": manifest, "hmac": sign(manifest, cfg.signing_key)}).encode("utf-8")
+    document = json.dumps(
+        {"manifest": manifest, "hmac": sign(manifest, cfg.signing_key)}
+    ).encode("utf-8")
     client.upload_fileobj(io.BytesIO(document), cfg.bucket, prefix + MANIFEST_FILE)
     total = sum(entry["bytes"] for entry in files.values())
     location = {
@@ -259,7 +294,9 @@ def upload_run(run: dict, cfg: Config, client=None) -> dict:
         "bytes": total,
         "uploaded_at": datetime.now(timezone.utc),
     }
-    logger.success(f"Uploaded run {run_id} ({len(files)} files, {total / 1e6:.1f} MB) to {location['url']}")
+    logger.success(
+        f"Uploaded run {run_id} ({len(files)} files, {total / 1e6:.1f} MB) to {location['url']}"
+    )
     return location
 
 
@@ -302,10 +339,14 @@ def _fetch(client, bucket: str, key: str, target: pathlib.Path, expected: dict) 
                 break
             written += len(chunk)
             if written > expected["bytes"]:
-                raise UntrustedRun(f"s3://{bucket}/{key} is larger than its manifest says")
+                raise UntrustedRun(
+                    f"s3://{bucket}/{key} is larger than its manifest says"
+                )
             digest.update(chunk)
             f.write(chunk)
-    if written != expected["bytes"] or not hmac.compare_digest(digest.hexdigest(), expected["sha256"]):
+    if written != expected["bytes"] or not hmac.compare_digest(
+        digest.hexdigest(), expected["sha256"]
+    ):
         raise UntrustedRun(f"s3://{bucket}/{key} doesn't match its manifest")
 
 
@@ -319,7 +360,11 @@ def _is_complete(folder: pathlib.Path, manifest: dict) -> bool:
         if relative == RUN_FILE:
             continue
         path = folder / relative
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != entry["bytes"]:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != entry["bytes"]
+        ):
             return False
         if hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]:
             return False
@@ -328,18 +373,30 @@ def _is_complete(folder: pathlib.Path, manifest: dict) -> bool:
 
 def _read_manifest(client, bucket: str, prefix: str) -> bytes:
     try:
-        body = client.get_object(Bucket=bucket, Key=prefix + MANIFEST_FILE)["Body"].read(MAX_MANIFEST_BYTES + 1)
+        body = client.get_object(Bucket=bucket, Key=prefix + MANIFEST_FILE)[
+            "Body"
+        ].read(MAX_MANIFEST_BYTES + 1)
     except Exception as e:
-        code = getattr(e, "response", {}).get("Error", {}).get("Code") if hasattr(e, "response") else None
+        code = (
+            getattr(e, "response", {}).get("Error", {}).get("Code")
+            if hasattr(e, "response")
+            else None
+        )
         if code in ("NoSuchKey", "404"):
-            raise FileNotFoundError(f"s3://{bucket}/{prefix} has no {MANIFEST_FILE}; the upload didn't finish.") from None
+            raise FileNotFoundError(
+                f"s3://{bucket}/{prefix} has no {MANIFEST_FILE}; the upload didn't finish."
+            ) from None
         raise
     if len(body) > MAX_MANIFEST_BYTES:
-        raise UntrustedRun(f"its {MANIFEST_FILE} is over {MAX_MANIFEST_BYTES // 1024} KB")
+        raise UntrustedRun(
+            f"its {MANIFEST_FILE} is over {MAX_MANIFEST_BYTES // 1024} KB"
+        )
     return body
 
 
-def download_run(run: dict, cfg: Config, dest: pathlib.Path, client=None) -> pathlib.Path:
+def download_run(
+    run: dict, cfg: Config, dest: pathlib.Path, client=None
+) -> pathlib.Path:
     """Downloads and verifies an uploaded run into dest.
 
     The run's recorded prefix must end with its run ID. Its manifest must be
@@ -361,13 +418,17 @@ def download_run(run: dict, cfg: Config, dest: pathlib.Path, client=None) -> pat
     if not bucket or not isinstance(prefix, str):
         raise FileNotFoundError(f"Run {run_id} was never uploaded.")
     if not prefix.endswith(f"{run_id}/") or ".." in prefix.split("/"):
-        raise UntrustedRun(f"its recorded location s3://{bucket}/{prefix} isn't this run's folder")
+        raise UntrustedRun(
+            f"its recorded location s3://{bucket}/{prefix} isn't this run's folder"
+        )
     client = client or _client_for(storage, cfg)
     try:
         document = json.loads(_read_manifest(client, bucket, prefix))
     except ValueError:
         raise UntrustedRun(f"its {MANIFEST_FILE} isn't valid JSON") from None
-    manifest = verify(document if isinstance(document, dict) else {}, run_id, cfg.signing_key)
+    manifest = verify(
+        document if isinstance(document, dict) else {}, run_id, cfg.signing_key
+    )
 
     if dest.exists() and _is_complete(dest, manifest):
         return dest
@@ -377,21 +438,27 @@ def download_run(run: dict, cfg: Config, dest: pathlib.Path, client=None) -> pat
         for relative, entry in manifest["files"].items():
             target = (staging / relative).resolve()
             if staging.resolve() not in target.parents:
-                raise UntrustedRun(f"its manifest names a path outside the run's folder: {relative!r}")
+                raise UntrustedRun(
+                    f"its manifest names a path outside the run's folder: {relative!r}"
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             _fetch(client, bucket, prefix + relative, target, entry)
         _install(staging, dest, manifest)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    logger.success(f"Downloaded and verified run {run_id} from s3://{bucket}/{prefix} to {dest}")
+    logger.success(
+        f"Downloaded and verified run {run_id} from s3://{bucket}/{prefix} to {dest}"
+    )
     return dest
 
 
 def _install(staging: pathlib.Path, dest: pathlib.Path, manifest: dict) -> None:
     """Moves a verified staging folder to dest."""
     if dest.exists() and not _is_complete(dest, manifest):
-        aside = dest.with_name(f".{dest.name}.incomplete-{datetime.now():%Y%m%d-%H%M%S}")
+        aside = dest.with_name(
+            f".{dest.name}.incomplete-{datetime.now():%Y%m%d-%H%M%S}"
+        )
         dest.rename(aside)
         logger.warning(f"Moved the incomplete {dest} aside to {aside}.")
     try:
@@ -410,17 +477,27 @@ def _install(staging: pathlib.Path, dest: pathlib.Path, manifest: dict) -> None:
 def record_storage(runs_collection, run: dict, storage: dict) -> None:
     """Adds the upload to the run's Mongo record, creating the record if it has none."""
     details = {k: v for k, v in run.items() if k not in ("_id", "storage")}
-    runs_collection.update_one({"run_id": run["run_id"]},
-                               {"$set": {"storage": storage}, "$setOnInsert": details}, upsert=True)
+    runs_collection.update_one(
+        {"run_id": run["run_id"]},
+        {"$set": {"storage": storage}, "$setOnInsert": details},
+        upsert=True,
+    )
 
 
 def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m model_storage", description="Upload topic-model runs to S3.")
+    parser = argparse.ArgumentParser(
+        prog="python -m model_storage", description="Upload topic-model runs to S3."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
-    upload = commands.add_parser("upload", help="upload saved runs (default: local runs not uploaded yet)")
+    upload = commands.add_parser(
+        "upload", help="upload saved runs (default: local runs not uploaded yet)"
+    )
     upload.add_argument("run_ids", nargs="*")
-    upload.add_argument("--bertopic", action="store_true",
-                        help="upload BERTopic runs (BERTOPIC_MODEL_DIR) instead of LDA runs")
+    upload.add_argument(
+        "--bertopic",
+        action="store_true",
+        help="upload BERTopic runs (BERTOPIC_MODEL_DIR) instead of LDA runs",
+    )
     commands.add_parser("new-key", help="print a new random MODEL_SIGNING_KEY")
     args = parser.parse_args(argv)
     if args.command == "new-key":
@@ -438,20 +515,32 @@ def main(argv: List[str]) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     if cfg is None:
-        print("error: MODEL_BUCKET is not set. Set the bucket in Settings.", file=sys.stderr)
+        print(
+            "error: MODEL_BUCKET is not set. Set the bucket in Settings.",
+            file=sys.stderr,
+        )
         return 2
     if args.bertopic:
         import bertopic_model
         import bertopic_runs
 
-        runs, run_dir, cfg = bertopic_runs.list_runs(), bertopic_model.model_dir(), bertopic_runs.storage_config(cfg)
+        runs, run_dir, cfg = (
+            bertopic_runs.list_runs(),
+            bertopic_model.model_dir(),
+            bertopic_runs.storage_config(cfg),
+        )
+        collection_name = bertopic_runs.RUNS_COLLECTION
     else:
         runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
+        collection_name = topic_store.RUNS_COLLECTION
     if args.run_ids:
         by_id = {run["run_id"]: run for run in runs}
         missing = [r for r in args.run_ids if r not in by_id]
         if missing:
-            print(f"error: no local run {', '.join(missing)} under {run_dir}", file=sys.stderr)
+            print(
+                f"error: no local run {', '.join(missing)} under {run_dir}",
+                file=sys.stderr,
+            )
             return 2
         chosen = [by_id[r] for r in args.run_ids]
     else:
@@ -464,7 +553,7 @@ def main(argv: List[str]) -> int:
     if os.environ.get("MONGO_URI"):
         from decision_engine.persistence import get_database
 
-        runs_collection = get_database()[topic_store.RUNS_COLLECTION]
+        runs_collection = get_database()[collection_name]
     for run in chosen:
         storage = upload_and_record(run, cfg, client)
         if runs_collection is not None:

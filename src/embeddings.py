@@ -25,6 +25,7 @@ billed, and the client's requests session refuses redirects.
 Lives outside decision_engine on purpose: that package must not import an
 HTTP client (see test_engine_never_references_zendesk_endpoints).
 """
+
 import argparse
 import hashlib
 import json
@@ -48,12 +49,10 @@ import numpy as np
 import requests
 import voyageai
 import voyageai.error as voyage_error
+from decision_engine.classify import api_url_problem
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
-
-from decision_engine.classify import api_url_problem
-
 
 
 def default_url() -> str:
@@ -110,7 +109,9 @@ class ApiError(RuntimeError):
     the CLI, the app's log and its error dialog.
     """
 
-    def __init__(self, message: str, status: Optional[int] = None, token_limit: bool = False):
+    def __init__(
+        self, message: str, status: Optional[int] = None, token_limit: bool = False
+    ):
         super().__init__(message)
         self.status = status
         # True for a 400 whose body said the batch had too many tokens: the
@@ -152,14 +153,20 @@ def config() -> Config:
     """
     api_key = os.environ.get("EMBEDDING_API_KEY", "").strip()
     if not api_key:
-        raise EmbeddingNotConfigured("EMBEDDING_API_KEY is not set. Add your Voyage API key in Settings.")
+        raise EmbeddingNotConfigured(
+            "EMBEDDING_API_KEY is not set. Add your Voyage API key in Settings."
+        )
     url = (os.environ.get("EMBEDDING_API_URL") or default_url()).strip()
     problem = api_url_problem(url)
     if problem:
         raise EmbeddingNotConfigured(f"EMBEDDING_API_URL: {problem}")
     if not url.rstrip("/").endswith(ENDPOINT_PATH):
-        raise EmbeddingNotConfigured(f"EMBEDDING_API_URL must end in {ENDPOINT_PATH}, got {url!r}.")
-    raw_dimensions = (os.environ.get("EMBEDDING_DIMENSIONS") or str(DEFAULT_DIMENSIONS)).strip()
+        raise EmbeddingNotConfigured(
+            f"EMBEDDING_API_URL must end in {ENDPOINT_PATH}, got {url!r}."
+        )
+    raw_dimensions = (
+        os.environ.get("EMBEDDING_DIMENSIONS") or str(DEFAULT_DIMENSIONS)
+    ).strip()
     dimensions = parse_dimensions(raw_dimensions)
     if dimensions is None:
         raise EmbeddingNotConfigured(
@@ -168,7 +175,9 @@ def config() -> Config:
     model = (os.environ.get("EMBEDDING_MODEL") or DEFAULT_MODEL).strip()
     tpm = _positive_setting("EMBEDDING_TPM", DEFAULT_TPM)
     rpm = _positive_setting("EMBEDDING_RPM", DEFAULT_RPM)
-    return Config(url=url, model=model, dimensions=dimensions, api_key=api_key, tpm=tpm, rpm=rpm)
+    return Config(
+        url=url, model=model, dimensions=dimensions, api_key=api_key, tpm=tpm, rpm=rpm
+    )
 
 
 def _positive_setting(name: str, default: int) -> int:
@@ -178,7 +187,9 @@ def _positive_setting(name: str, default: int) -> int:
     except ValueError:
         value = 0
     if value < 1:
-        raise EmbeddingNotConfigured(f"{name} must be a whole number of at least 1, got {raw!r}.")
+        raise EmbeddingNotConfigured(
+            f"{name} must be a whole number of at least 1, got {raw!r}."
+        )
     return value
 
 
@@ -195,7 +206,11 @@ def parse_dimensions(value: str) -> Optional[int]:
 
 
 def _public_comments(ticket: dict) -> List[dict]:
-    return [c for c in ticket.get("transcript") or [] if not c.get("is_internal_note") and (c.get("body") or "").strip()]
+    return [
+        c
+        for c in ticket.get("transcript") or []
+        if not c.get("is_internal_note") and (c.get("body") or "").strip()
+    ]
 
 
 def opening_text(ticket: dict) -> str:
@@ -205,18 +220,30 @@ def opening_text(ticket: dict) -> str:
     requester is unknown), the subject alone is used rather than risk
     embedding an agent's reply as the request.
     """
-    first = next((c for c in _public_comments(ticket) if c.get("role") in ("requester", "customer")), None)
+    first = next(
+        (
+            c
+            for c in _public_comments(ticket)
+            if c.get("role") in ("requester", "customer")
+        ),
+        None,
+    )
     parts = [ticket.get("subject") or "", (first or {}).get("body") or ""]
     return "\n\n".join(p.strip() for p in parts if p.strip())[:MAX_CHARS]
 
 
 def full_text(ticket: dict) -> str:
     """Subject plus every public comment, cut to MAX_CHARS. Internal notes are left out."""
-    parts = [ticket.get("subject") or ""] + [c["body"] for c in _public_comments(ticket)]
+    parts = [ticket.get("subject") or ""] + [
+        c["body"] for c in _public_comments(ticket)
+    ]
     return "\n\n".join(p.strip() for p in parts if p.strip())[:MAX_CHARS]
 
 
-TEXT_VIEWS: Dict[str, Callable[[dict], str]] = {"opening": opening_text, "full": full_text}
+TEXT_VIEWS: Dict[str, Callable[[dict], str]] = {
+    "opening": opening_text,
+    "full": full_text,
+}
 # What the backfill stores. Changing it changes every text hash, so the next
 # backfill re-embeds everything.
 TICKET_TEXT = opening_text
@@ -279,7 +306,10 @@ def post_json(url: str, api_key: str, body: dict) -> dict:
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -288,18 +318,27 @@ def post_json(url: str, api_key: str, body: dict) -> dict:
                 return json.load(response)
         except urllib.error.HTTPError as e:
             if 300 <= e.code < 400:
-                raise ApiError(f"{url} redirected to {e.headers.get('Location')!r} (HTTP {e.code}); not following, "
-                               "since that would resend the API key and ticket text.", e.code) from None
+                raise ApiError(
+                    f"{url} redirected to {e.headers.get('Location')!r} (HTTP {e.code}); not following, "
+                    "since that would resend the API key and ticket text.",
+                    e.code,
+                ) from None
             if e.code not in RETRYABLE_STATUSES or attempt == MAX_ATTEMPTS:
                 token_limit = e.code == 400 and _mentions_token_limit(e)
                 reason = " (too many tokens in the batch)" if token_limit else ""
-                raise ApiError(f"{url}: HTTP {e.code} {_status_text(e.code)}{reason}", e.code, token_limit) from None
+                raise ApiError(
+                    f"{url}: HTTP {e.code} {_status_text(e.code)}{reason}",
+                    e.code,
+                    token_limit,
+                ) from None
         except urllib.error.URLError as e:
             if not _not_sent(e) or attempt == MAX_ATTEMPTS:
                 raise ApiError(f"{url}: {e.reason}") from None
         except (TimeoutError, ConnectionError) as e:
-            raise ApiError(f"{url}: {e} (not retried: the request may already have been processed)") from None
-        time.sleep(min(2 ** attempt, 30))
+            raise ApiError(
+                f"{url}: {e} (not retried: the request may already have been processed)"
+            ) from None
+        time.sleep(min(2**attempt, 30))
     raise AssertionError("unreachable")
 
 
@@ -322,8 +361,12 @@ def voyage_client(cfg: Config) -> voyageai.Client:
     """A client for cfg's endpoint. Its own retries are off (max_retries=0):
     it would retry timeouts, which may already have been billed."""
     voyageai.requestssession = _no_redirect_session
-    return voyageai.Client(api_key=cfg.api_key, max_retries=0, timeout=REQUEST_TIMEOUT_SECONDS,
-                           base_url=cfg.base_url)
+    return voyageai.Client(
+        api_key=cfg.api_key,
+        max_retries=0,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        base_url=cfg.base_url,
+    )
 
 
 def _causes(e: BaseException) -> Iterator[BaseException]:
@@ -332,18 +375,28 @@ def _causes(e: BaseException) -> Iterator[BaseException]:
     while e is not None and id(e) not in seen:
         seen.add(id(e))
         yield e
-        e = getattr(e, "reason", None) if isinstance(getattr(e, "reason", None), BaseException) else (
-            e.__cause__ or e.__context__)
+        e = (
+            getattr(e, "reason", None)
+            if isinstance(getattr(e, "reason", None), BaseException)
+            else (e.__cause__ or e.__context__)
+        )
 
 
 def _redirect(e: voyage_error.VoyageError) -> Optional[requests.TooManyRedirects]:
-    return next((c for c in _causes(e) if isinstance(c, requests.TooManyRedirects)), None)
+    return next(
+        (c for c in _causes(e) if isinstance(c, requests.TooManyRedirects)), None
+    )
 
 
 def _voyage_not_sent(e: voyage_error.VoyageError) -> bool:
     """True if the connection failed before the request could reach the server."""
-    return isinstance(e, voyage_error.APIConnectionError) and not _redirect(e) and any(
-        isinstance(c, (ConnectionRefusedError, socket.gaierror)) for c in _causes(e))
+    return (
+        isinstance(e, voyage_error.APIConnectionError)
+        and not _redirect(e)
+        and any(
+            isinstance(c, (ConnectionRefusedError, socket.gaierror)) for c in _causes(e)
+        )
+    )
 
 
 def _voyage_api_error(url: str, e: voyage_error.VoyageError) -> ApiError:
@@ -353,10 +406,15 @@ def _voyage_api_error(url: str, e: voyage_error.VoyageError) -> ApiError:
         response = redirect.response
         code = response.status_code if response is not None else None
         location = response.headers.get("Location") if response is not None else None
-        return ApiError(f"{url} redirected to {location!r} (HTTP {code}); not following, "
-                        "since that would resend the API key and ticket text.", code)
+        return ApiError(
+            f"{url} redirected to {location!r} (HTTP {code}); not following, "
+            "since that would resend the API key and ticket text.",
+            code,
+        )
     if isinstance(e, voyage_error.Timeout):
-        return ApiError(f"{url}: timed out (not retried: the request may already have been processed)")
+        return ApiError(
+            f"{url}: timed out (not retried: the request may already have been processed)"
+        )
     if isinstance(e, voyage_error.APIConnectionError):
         root = list(_causes(e))[-1]
         return ApiError(f"{url}: could not connect ({type(root).__name__})")
@@ -365,7 +423,9 @@ def _voyage_api_error(url: str, e: voyage_error.VoyageError) -> ApiError:
         return ApiError(f"{url}: {type(e).__name__}")
     token_limit = code == 400 and "token" in str(e.user_message or "").lower()
     reason = " (too many tokens in the batch)" if token_limit else ""
-    return ApiError(f"{url}: HTTP {code} {_status_text(code)}{reason}", code, token_limit)
+    return ApiError(
+        f"{url}: HTTP {code} {_status_text(code)}{reason}", code, token_limit
+    )
 
 
 def _now() -> float:
@@ -391,7 +451,9 @@ class RateLimiter:
         return self.chars / self.tokens if self.tokens else CHARS_PER_TOKEN_GUESS
 
     def estimate(self, texts: List[str]) -> int:
-        return max(1, int(sum(len(t) for t in texts) / self.chars_per_token() * 1.1) + 1)
+        return max(
+            1, int(sum(len(t) for t in texts) / self.chars_per_token() * 1.1) + 1
+        )
 
     def _used(self, now: float) -> int:
         while self.recent and now - self.recent[0][0] >= RATE_WINDOW_SECONDS:
@@ -409,13 +471,17 @@ class RateLimiter:
         while True:
             now = _now()
             used = self._used(now)
-            if len(self.recent) < self.rpm and (used + tokens <= self.tpm_budget or not self.recent):
+            if len(self.recent) < self.rpm and (
+                used + tokens <= self.tpm_budget or not self.recent
+            ):
                 entry = [now, tokens]
                 self.recent.append(entry)
                 return entry
             delay = self.recent[0][0] + RATE_WINDOW_SECONDS - now + 0.5
-            logger.info(f"Waiting {delay:.0f}s to stay under the Voyage rate limit "
-                        f"({self.rpm} requests, {self.tpm_budget:,} tokens a minute).")
+            logger.info(
+                f"Waiting {delay:.0f}s to stay under the Voyage rate limit "
+                f"({self.rpm} requests, {self.tpm_budget:,} tokens a minute)."
+            )
             time.sleep(delay)
 
     def billed(self, entry: list, texts: List[str], tokens: int) -> None:
@@ -438,7 +504,12 @@ _limiters_lock = threading.Lock()
 
 def rate_limiter(cfg: Config) -> RateLimiter:
     """The limiter shared by every request with cfg's key, endpoint and limits."""
-    key = (cfg.url, hashlib.sha256(cfg.api_key.encode()).hexdigest(), cfg.token_budget, cfg.rpm)
+    key = (
+        cfg.url,
+        hashlib.sha256(cfg.api_key.encode()).hexdigest(),
+        cfg.token_budget,
+        cfg.rpm,
+    )
     with _limiters_lock:
         return _limiters.setdefault(key, RateLimiter(cfg.token_budget, cfg.rpm))
 
@@ -476,26 +547,37 @@ def voyage_embed(texts: List[str], cfg: Config, input_type: str):
         while True:
             entry = limiter.wait_for(limiter.estimate(texts))
             try:
-                reply = client.embed(texts, model=cfg.model, input_type=input_type, truncation=True,
-                                     output_dimension=cfg.dimensions)
+                reply = client.embed(
+                    texts,
+                    model=cfg.model,
+                    input_type=input_type,
+                    truncation=True,
+                    output_dimension=cfg.dimensions,
+                )
             except voyage_error.RateLimitError as e:
                 rate_limited += 1
                 if rate_limited >= MAX_RATE_LIMIT_ATTEMPTS:
                     raise _voyage_api_error(cfg.url, e) from None
                 delay = _retry_after(e)
-                delay = (RATE_WINDOW_SECONDS if delay is None else delay) + random.uniform(0, 3)
-                logger.warning(f"Voyage rate limit (HTTP 429); waiting {delay:.0f}s, then retrying "
-                               f"({rate_limited}/{MAX_RATE_LIMIT_ATTEMPTS - 1}).")
+                delay = (
+                    RATE_WINDOW_SECONDS if delay is None else delay
+                ) + random.uniform(0, 3)
+                logger.warning(
+                    f"Voyage rate limit (HTTP 429); waiting {delay:.0f}s, then retrying "
+                    f"({rate_limited}/{MAX_RATE_LIMIT_ATTEMPTS - 1})."
+                )
                 limiter.unsent(entry)
                 time.sleep(delay)
                 continue
             except voyage_error.VoyageError as e:
                 attempts += 1
-                retryable = isinstance(e, voyage_error.ServiceUnavailableError) or _voyage_not_sent(e)
+                retryable = isinstance(
+                    e, voyage_error.ServiceUnavailableError
+                ) or _voyage_not_sent(e)
                 if not retryable or attempts >= MAX_ATTEMPTS:
                     raise _voyage_api_error(cfg.url, e) from None
                 limiter.unsent(entry)
-                time.sleep(min(2 ** attempts, 30) + random.uniform(0, 1))
+                time.sleep(min(2**attempts, 30) + random.uniform(0, 1))
                 continue
             limiter.billed(entry, texts, reply.total_tokens or 0)
             return reply
@@ -509,12 +591,16 @@ def batch_chars(cfg: Optional[Config] = None) -> int:
     return min(MAX_BATCH_CHARS, int(cfg.token_budget * CHARS_PER_TOKEN_GUESS))
 
 
-def _batches(texts: List[str], max_chars: Optional[int] = None) -> List[Tuple[int, int]]:
+def _batches(
+    texts: List[str], max_chars: Optional[int] = None
+) -> List[Tuple[int, int]]:
     """(start, end) slices of texts under MAX_BATCH_TEXTS and max_chars (default MAX_BATCH_CHARS)."""
     max_chars = max_chars or MAX_BATCH_CHARS
     batches, start, chars = [], 0, 0
     for i, text in enumerate(texts):
-        if i > start and (i - start >= MAX_BATCH_TEXTS or chars + len(text) > max_chars):
+        if i > start and (
+            i - start >= MAX_BATCH_TEXTS or chars + len(text) > max_chars
+        ):
             batches.append((start, i))
             start, chars = i, 0
         chars += len(text)
@@ -527,7 +613,9 @@ def _too_many_tokens(error: ApiError) -> bool:
     return error.status == 400 and error.token_limit
 
 
-def _embed_request(texts: List[str], cfg: Config, input_type: str) -> Tuple[List[list], int]:
+def _embed_request(
+    texts: List[str], cfg: Config, input_type: str
+) -> Tuple[List[list], int]:
     """One request; a batch rejected as over the token limit is split in half and retried."""
     try:
         reply = voyage_embed(texts, cfg, input_type)
@@ -540,11 +628,15 @@ def _embed_request(texts: List[str], cfg: Config, input_type: str) -> Tuple[List
         second, second_tokens = _embed_request(texts[middle:], cfg, input_type)
         return first + second, first_tokens + second_tokens
     if len(reply.embeddings) != len(texts):
-        raise ApiError(f"{cfg.url} returned {len(reply.embeddings)} embeddings for {len(texts)} texts")
+        raise ApiError(
+            f"{cfg.url} returned {len(reply.embeddings)} embeddings for {len(texts)} texts"
+        )
     return [list(row) for row in reply.embeddings], reply.total_tokens or 0
 
 
-def embed(texts: List[str], cfg: Config, input_type: str = "document") -> Tuple[np.ndarray, int]:
+def embed(
+    texts: List[str], cfg: Config, input_type: str = "document"
+) -> Tuple[np.ndarray, int]:
     """Embeds texts with Voyage.
 
     Args:
@@ -560,7 +652,9 @@ def embed(texts: List[str], cfg: Config, input_type: str = "document") -> Tuple[
         tokens += batch_tokens
     vectors = np.asarray(rows, dtype=np.float32).reshape(len(rows), -1)
     if len(rows) and vectors.shape[1] != cfg.dimensions:
-        raise ApiError(f"{cfg.model} returned {vectors.shape[1]}-dimension vectors, expected {cfg.dimensions}")
+        raise ApiError(
+            f"{cfg.model} returned {vectors.shape[1]}-dimension vectors, expected {cfg.dimensions}"
+        )
     return vectors, tokens
 
 
@@ -570,7 +664,12 @@ _META_KEYS = ("endpoint", "model", "dimensions", "text_sha256")
 
 
 def _meta(cfg: Config, digest: str) -> dict:
-    return {"endpoint": cfg.url, "model": cfg.model, "dimensions": cfg.dimensions, "text_sha256": digest}
+    return {
+        "endpoint": cfg.url,
+        "model": cfg.model,
+        "dimensions": cfg.dimensions,
+        "text_sha256": digest,
+    }
 
 
 @dataclass
@@ -586,6 +685,7 @@ class StaleTicket:
 @dataclass
 class Plan:
     """What a backfill will do, computed before asking the user."""
+
     embed: List[StaleTicket] = field(default_factory=list)
     # Tickets with an embedding whose text is now empty: their vectors are removed.
     clear: List[Any] = field(default_factory=list)
@@ -594,7 +694,9 @@ class Plan:
 def plan_backfill(tickets: Collection, cfg: Config) -> Plan:
     """Tickets whose embedding is missing or out of date, and ones to clear."""
     plan = Plan()
-    for doc in tickets.find({}, {"zendesk_id": 1, "subject": 1, "transcript": 1, "embedding_meta": 1}):
+    for doc in tickets.find(
+        {}, {"zendesk_id": 1, "subject": 1, "transcript": 1, "embedding_meta": 1}
+    ):
         text = TICKET_TEXT(doc)
         if not text:
             if doc.get("embedding_meta") is not None:
@@ -603,8 +705,18 @@ def plan_backfill(tickets: Collection, cfg: Config) -> Plan:
         digest = text_hash(text)
         meta = doc.get("embedding_meta") or {}
         if {k: meta.get(k) for k in _META_KEYS} != _meta(cfg, digest):
-            plan.embed.append(StaleTicket(doc["_id"], doc.get("zendesk_id"), text, digest,
-                                          {"subject": doc.get("subject"), "transcript": doc.get("transcript")}))
+            plan.embed.append(
+                StaleTicket(
+                    doc["_id"],
+                    doc.get("zendesk_id"),
+                    text,
+                    digest,
+                    {
+                        "subject": doc.get("subject"),
+                        "transcript": doc.get("transcript"),
+                    },
+                )
+            )
     return plan
 
 
@@ -625,7 +737,10 @@ def backfill_lock(tickets: Collection) -> Iterator[Callable[[], None]]:
         now = datetime.now(timezone.utc)
         try:
             locks.find_one_and_update(
-                {"_id": LOCK_ID, "$or": [{"holder": holder}, {"expires_at": {"$lt": now}}]},
+                {
+                    "_id": LOCK_ID,
+                    "$or": [{"holder": holder}, {"expires_at": {"$lt": now}}],
+                },
                 {"$set": {"holder": holder, "expires_at": now + LOCK_TTL}},
                 upsert=True,
             )
@@ -666,16 +781,27 @@ def run_backfill(
         BackfillRunning: another backfill is running.
     """
     embed_fn = embed_fn or embed
-    summary = {"embedded": 0, "changed": 0, "cleared": 0, "tokens": 0, "cancelled": 0, "complete": False}
+    summary = {
+        "embedded": 0,
+        "changed": 0,
+        "cleared": 0,
+        "tokens": 0,
+        "cancelled": 0,
+        "complete": False,
+    }
     with backfill_lock(tickets) as renew:
         for doc_id in plan.clear:
-            result = tickets.update_one({"_id": doc_id}, {"$unset": {"embedding": "", "embedding_meta": ""}})
+            result = tickets.update_one(
+                {"_id": doc_id}, {"$unset": {"embedding": "", "embedding_meta": ""}}
+            )
             summary["cleared"] += result.modified_count
         texts = [item.text for item in plan.embed]
         for start, end in _batches(texts, batch_chars(cfg)):
             if should_stop and should_stop():
                 summary["cancelled"] = len(texts) - start
-                logger.warning(f"Embedding cancelled; {summary['cancelled']} ticket(s) not started.")
+                logger.warning(
+                    f"Embedding cancelled; {summary['cancelled']} ticket(s) not started."
+                )
                 return summary
             renew()
             vectors, tokens = embed_fn(texts[start:end], cfg)
@@ -684,7 +810,12 @@ def run_backfill(
             for item, vector in zip(plan.embed[start:end], vectors):
                 result = tickets.update_one(
                     {"_id": item.doc_id, **item.source},
-                    {"$set": {"embedding": vector.tolist(), "embedding_meta": {**_meta(cfg, item.digest), "at": now}}},
+                    {
+                        "$set": {
+                            "embedding": vector.tolist(),
+                            "embedding_meta": {**_meta(cfg, item.digest), "at": now},
+                        }
+                    },
                 )
                 summary["embedded" if result.matched_count else "changed"] += 1
             logger.info(f"Embedded {summary['embedded']}/{len(texts)} ticket(s).")
@@ -695,9 +826,13 @@ def run_backfill(
 def format_summary(summary: dict) -> str:
     lines = [f"Embedded: {summary['embedded']}", f"Tokens billed: {summary['tokens']}"]
     if summary.get("changed"):
-        lines.append(f"Edited while embedding (left for the next run): {summary['changed']}")
+        lines.append(
+            f"Edited while embedding (left for the next run): {summary['changed']}"
+        )
     if summary.get("cleared"):
-        lines.append(f"Embeddings removed (ticket has no text now): {summary['cleared']}")
+        lines.append(
+            f"Embeddings removed (ticket has no text now): {summary['cleared']}"
+        )
     if summary.get("cancelled"):
         lines.append(f"Not started (cancelled): {summary['cancelled']}")
     if summary.get("index"):
@@ -731,21 +866,29 @@ def finish_index(tickets: Collection, cfg: Config, summary: dict, status: str) -
     if status == "unavailable":
         summary["index"] = "skipped: this MongoDB deployment has no Atlas Search"
     elif not summary.get("complete") or summary.get("changed"):
-        summary["index"] = "not created yet: some tickets still need embedding; run again"
+        summary["index"] = (
+            "not created yet: some tickets still need embedding; run again"
+        )
     else:
         created = search.ensure_vector_index(tickets, cfg.dimensions)
-        summary["index"] = f"{search.VECTOR_INDEX} {'created' if created else 'already exists'}"
+        summary["index"] = (
+            f"{search.VECTOR_INDEX} {'created' if created else 'already exists'}"
+        )
 
 
 def describe_plan(plan: Plan, cfg: Config) -> str:
-    message = (f"{len(plan.embed)} ticket(s) need embeddings. Each one's subject and first requester comment "
-               f"will be sent to {cfg.url} ({cfg.model}, {cfg.dimensions} dimensions); these are paid calls.")
+    message = (
+        f"{len(plan.embed)} ticket(s) need embeddings. Each one's subject and first requester comment "
+        f"will be sent to {cfg.url} ({cfg.model}, {cfg.dimensions} dimensions); these are paid calls."
+    )
     chars = sum(len(item.text) for item in plan.embed)
     # ~4 characters per token for English; the rate limit sets the pace.
     minutes = chars / 4 / cfg.token_budget
     if minutes >= 1:
-        message += (f" At {cfg.tpm:,} tokens a minute (EMBEDDING_TPM) this takes about "
-                    f"{max(1, round(minutes))} minute(s).")
+        message += (
+            f" At {cfg.tpm:,} tokens a minute (EMBEDDING_TPM) this takes about "
+            f"{max(1, round(minutes))} minute(s)."
+        )
     if plan.clear:
         message += f" {len(plan.clear)} ticket(s) with no text left will have their embedding removed."
     return message
@@ -755,11 +898,20 @@ def describe_plan(plan: Plan, cfg: Config) -> str:
 
 
 def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m embeddings", description="Voyage AI ticket embeddings.")
+    parser = argparse.ArgumentParser(
+        prog="python -m embeddings", description="Voyage AI ticket embeddings."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check", help="embed one short test string (no ticket text)")
-    backfill = commands.add_parser("backfill", help="embed tickets that are new or changed, then ensure the vector index")
-    backfill.add_argument("--yes", action="store_true", help="don't ask before sending ticket text to Voyage")
+    backfill = commands.add_parser(
+        "backfill",
+        help="embed tickets that are new or changed, then ensure the vector index",
+    )
+    backfill.add_argument(
+        "--yes",
+        action="store_true",
+        help="don't ask before sending ticket text to Voyage",
+    )
     args = parser.parse_args(argv)
 
     import settings
@@ -772,7 +924,9 @@ def main(argv: List[str]) -> int:
         return 2
     if args.command == "check":
         vectors, tokens = embed(["connection check"], cfg, input_type="query")
-        print(f"OK: {cfg.model} at {cfg.url} returned a {vectors.shape[1]}-dimension vector ({tokens} tokens).")
+        print(
+            f"OK: {cfg.model} at {cfg.url} returned a {vectors.shape[1]}-dimension vector ({tokens} tokens)."
+        )
         return 0
 
     from decision_engine import search
@@ -810,8 +964,11 @@ def main(argv: List[str]) -> int:
         print(format_summary(summary))
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(format_summary(summary) if plan.embed or plan.clear else
-          "Every ticket's embedding is up to date.\n" + format_summary(summary))
+    print(
+        format_summary(summary)
+        if plan.embed or plan.clear
+        else "Every ticket's embedding is up to date.\n" + format_summary(summary)
+    )
     return 0 if summary.get("complete") else 1
 
 

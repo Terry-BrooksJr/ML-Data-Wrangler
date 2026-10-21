@@ -3,9 +3,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt5.QtWidgets import QApplication, QMessageBox
-
 import theme
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 
 @pytest.fixture(scope="module")
@@ -19,10 +18,17 @@ def restore_style(qapp):
     qapp.setStyleSheet("")
 
 
-@pytest.mark.parametrize("value, expected", [
-    ("dark", "dark"), (" Light ", "light"), ("NATIVE", "native"), ("", theme.DEFAULT_THEME),
-    (None, theme.DEFAULT_THEME), ("solarized", None),
-])
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("dark", "dark"),
+        (" Light ", "light"),
+        ("NATIVE", "native"),
+        ("", theme.DEFAULT_THEME),
+        (None, theme.DEFAULT_THEME),
+        ("solarized", None),
+    ],
+)
 def test_theme_name(value, expected):
     assert theme.theme_name(value) == expected
 

@@ -47,60 +47,184 @@ class Setting:
 
 
 SETTINGS: List[Setting] = [
-    Setting("MONGO_URI", "Mongo URI", "MongoDB", secret=True, required=True,
-            help="Atlas (or mongodb-atlas-local) connection string; full-text search needs Atlas."),
+    Setting(
+        "MONGO_URI",
+        "Mongo URI",
+        "MongoDB",
+        secret=True,
+        required=True,
+        help="Atlas (or mongodb-atlas-local) connection string; full-text search needs Atlas.",
+    ),
     Setting("MONGO_DB", "Database", "MongoDB", default="support_db"),
     Setting("MONGO_COLLECTION", "Tickets collection", "MongoDB", default="tickets"),
-    Setting("CHEAPER_INFERENCE_API_KEY", "API key", "Decision Engine (Cheaper Inference)", secret=True, required=True),
-    Setting("CHEAPER_INFERENCE_API_URL", "API URL", "Decision Engine (Cheaper Inference)", required=True,
-            default="https://api.cheaperinference.com",
-            help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
-    Setting("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "Primary model", "Decision Engine (Cheaper Inference)", required=True,
-            help="Classifies each ticket."),
-    Setting("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME", "Secondary model", "Decision Engine (Cheaper Inference)",
-            help="Fallback if the primary call errors. Leave blank to skip."),
-    Setting("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "Confirmation model", "Decision Engine (Cheaper Inference)",
-            help="Re-checks manual-triage and low-confidence results. Leave blank to skip."),
-    Setting("DECISION_ENGINE_MODEL", "Default model", "Decision Engine (Cheaper Inference)", default="claude-opus-4.8",
-            help="Used when no primary model is set.", restart=True),
-    Setting("MODEL_BUCKET", "Bucket", "Model storage (S3 / Backblaze B2)",
-            help="Trained topic models are uploaded here after each run. Leave blank to keep them on this computer only."),
-    Setting("B2_KEY_ID", "Key ID", "Model storage (S3 / Backblaze B2)",
-            help="Backblaze application key ID, or an AWS access key ID."),
-    Setting("B2_APPLICATION_KEY", "Secret key", "Model storage (S3 / Backblaze B2)", secret=True,
-            help="Backblaze application key, or an AWS secret access key."),
-    Setting("MODEL_SIGNING_KEY", "Signing key", "Model storage (S3 / Backblaze B2)", secret=True,
-            help="Needed with a bucket. Signs uploaded models and verifies downloaded ones, which are only "
-                 "opened if the signature matches. Use the same key on every computer that shares models; "
-                 "generate one with: python -m model_storage new-key"),
-    Setting("B2_ENDPOINT_URL", "Endpoint URL", "Model storage (S3 / Backblaze B2)",
-            help="e.g. https://s3.us-west-004.backblazeb2.com. Leave blank for AWS S3. Must be https://."),
-    Setting("MODEL_STORAGE_REGION", "Region", "Model storage (S3 / Backblaze B2)",
-            help="Optional. Worked out from a Backblaze endpoint; for AWS, the bucket's region (e.g. us-east-1)."),
-    Setting("MODEL_PREFIX", "Folder in bucket", "Model storage (S3 / Backblaze B2)", default="topic-models/"),
-    Setting("EMBEDDING_API_KEY", "Voyage API key", "Embeddings (Voyage AI)", secret=True,
-            help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below."),
-  
-    Setting("EMBEDDING_API_URL", "Endpoint", "Embeddings (Voyage AI)",
-            default="https://ai.mongodb.com/v1/embeddings",
-            help="Ends in /embeddings. Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here."),
+    Setting(
+        "CHEAPER_INFERENCE_API_KEY",
+        "API key",
+        "Decision Engine (Cheaper Inference)",
+        secret=True,
+        required=True,
+    ),
+    Setting(
+        "CHEAPER_INFERENCE_API_URL",
+        "API URL",
+        "Decision Engine (Cheaper Inference)",
+        required=True,
+        default="https://api.cheaperinference.com",
+        help="Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here.",
+    ),
+    Setting(
+        "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
+        "Primary model",
+        "Decision Engine (Cheaper Inference)",
+        required=True,
+        help="Classifies each ticket.",
+    ),
+    Setting(
+        "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME",
+        "Secondary model",
+        "Decision Engine (Cheaper Inference)",
+        help="Fallback if the primary call errors. Leave blank to skip.",
+    ),
+    Setting(
+        "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME",
+        "Confirmation model",
+        "Decision Engine (Cheaper Inference)",
+        help="Re-checks manual-triage and low-confidence results. Leave blank to skip.",
+    ),
+    Setting(
+        "DECISION_ENGINE_MODEL",
+        "Default model",
+        "Decision Engine (Cheaper Inference)",
+        default="claude-opus-4.8",
+        help="Used when no primary model is set.",
+        restart=True,
+    ),
+    Setting(
+        "MODEL_BUCKET",
+        "Bucket",
+        "Model storage (S3 / Backblaze B2)",
+        help="Trained topic models are uploaded here after each run. Leave blank to keep them on this computer only.",
+    ),
+    Setting(
+        "B2_KEY_ID",
+        "Key ID",
+        "Model storage (S3 / Backblaze B2)",
+        help="Backblaze application key ID, or an AWS access key ID.",
+    ),
+    Setting(
+        "B2_APPLICATION_KEY",
+        "Secret key",
+        "Model storage (S3 / Backblaze B2)",
+        secret=True,
+        help="Backblaze application key, or an AWS secret access key.",
+    ),
+    Setting(
+        "MODEL_SIGNING_KEY",
+        "Signing key",
+        "Model storage (S3 / Backblaze B2)",
+        secret=True,
+        help="Needed with a bucket. Signs uploaded models and verifies downloaded ones, which are only "
+        "opened if the signature matches. Use the same key on every computer that shares models; "
+        "generate one with: python -m model_storage new-key",
+    ),
+    Setting(
+        "B2_ENDPOINT_URL",
+        "Endpoint URL",
+        "Model storage (S3 / Backblaze B2)",
+        help="e.g. https://s3.us-west-004.backblazeb2.com. Leave blank for AWS S3. Must be https://.",
+    ),
+    Setting(
+        "MODEL_STORAGE_REGION",
+        "Region",
+        "Model storage (S3 / Backblaze B2)",
+        help="Optional. Worked out from a Backblaze endpoint; for AWS, the bucket's region (e.g. us-east-1).",
+    ),
+    Setting(
+        "MODEL_PREFIX",
+        "Folder in bucket",
+        "Model storage (S3 / Backblaze B2)",
+        default="topic-models/",
+    ),
+    Setting(
+        "EMBEDDING_API_KEY",
+        "Voyage API key",
+        "Embeddings (Voyage AI)",
+        secret=True,
+        help="Needed for Embed Tickets. Sent as a Bearer token to the endpoint below.",
+    ),
+    Setting(
+        "EMBEDDING_API_URL",
+        "Endpoint",
+        "Embeddings (Voyage AI)",
+        default="https://ai.mongodb.com/v1/embeddings",
+        help="Ends in /embeddings. Must be https:// (plain http:// is allowed only for localhost): the API key and ticket text are sent here.",
+    ),
     Setting("EMBEDDING_MODEL", "Model", "Embeddings (Voyage AI)", default="voyage-3.5"),
-    Setting("EMBEDDING_TPM", "Tokens per minute", "Embeddings (Voyage AI)", default="10000",
-            help="Your key's Voyage rate limit; requests are paced to stay under it. "
-                 "10,000 without billing on Atlas; raise it once your limit is higher."),
-    Setting("EMBEDDING_RPM", "Requests per minute", "Embeddings (Voyage AI)", default="3",
-            help="Your key's Voyage request limit (3 without billing on Atlas)."),
-    Setting("EMBEDDING_DIMENSIONS", "Dimensions", "Embeddings (Voyage AI)", default="1024",
-            help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
-                 "tickets_vector index dropped and recreated."),
-    Setting("LASSO_THEME", "Theme", "Appearance", default="dark",
-            help="dark, light or native (the operating system's own look)."),
-    Setting("TOPIC_MODEL_DIR", "Topic model folder", "Storage", default="topic_models",
-            help="Where saved topic-model runs go. Relative paths are under the working folder."),
-    Setting("TOPIC_RUNS_COLLECTION", "Topic runs collection", "Storage", default="topic_model_runs", restart=True),
-    Setting("MISCLASSIFICATION_COLLECTION", "Misclassification collection", "Storage",
-            default="misclassification_log", restart=True),
-    Setting("LESSONS_COLLECTION", "Lessons collection", "Storage", default="lessons_learned", restart=True),
+    Setting(
+        "EMBEDDING_TPM",
+        "Tokens per minute",
+        "Embeddings (Voyage AI)",
+        default="10000",
+        help="Your key's Voyage rate limit; requests are paced to stay under it. "
+        "10,000 without billing on Atlas; raise it once your limit is higher.",
+    ),
+    Setting(
+        "EMBEDDING_RPM",
+        "Requests per minute",
+        "Embeddings (Voyage AI)",
+        default="3",
+        help="Your key's Voyage request limit (3 without billing on Atlas).",
+    ),
+    Setting(
+        "EMBEDDING_DIMENSIONS",
+        "Dimensions",
+        "Embeddings (Voyage AI)",
+        default="1024",
+        help="256, 512, 1024 or 2048. Changing it re-embeds every ticket and needs the "
+        "tickets_vector index dropped and recreated.",
+    ),
+    Setting(
+        "LASSO_THEME",
+        "Theme",
+        "Appearance",
+        default="dark",
+        help="dark, light or native (the operating system's own look).",
+    ),
+    Setting(
+        "TOPIC_MODEL_DIR",
+        "Topic model folder",
+        "Storage",
+        default="topic_models",
+        help="Where saved topic-model runs go. Relative paths are under the working folder.",
+    ),
+    Setting(
+        "TOPIC_RUNS_COLLECTION",
+        "LDA runs collection",
+        "Storage",
+        default="topic_modeling_run_log",
+        restart=True,
+    ),
+    Setting(
+        "BERTOPIC_RUNS_COLLECTION",
+        "BERTopic runs collection",
+        "Storage",
+        default="bertopic_run_log",
+        restart=True,
+    ),
+    Setting(
+        "MISCLASSIFICATION_COLLECTION",
+        "Misclassification collection",
+        "Storage",
+        default="misclassification_log",
+        restart=True,
+    ),
+    Setting(
+        "LESSONS_COLLECTION",
+        "Lessons collection",
+        "Storage",
+        default="lessons_learned",
+        restart=True,
+    ),
 ]
 
 
@@ -114,9 +238,13 @@ def config_dir() -> pathlib.Path:
     if sys.platform == "darwin":
         base = pathlib.Path.home() / "Library" / "Application Support"
     elif sys.platform == "win32":
-        base = pathlib.Path(os.environ.get("APPDATA") or pathlib.Path.home() / "AppData" / "Roaming")
+        base = pathlib.Path(
+            os.environ.get("APPDATA") or pathlib.Path.home() / "AppData" / "Roaming"
+        )
     else:
-        base = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config")
+        base = pathlib.Path(
+            os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config"
+        )
     return base / APP_NAME
 
 
@@ -187,7 +315,9 @@ _active_at_start: Optional[Dict[str, str]] = None
 def _snapshot_restart_values() -> Dict[str, str]:
     global _active_at_start
     if _active_at_start is None:
-        _active_at_start = {s.name: os.environ.get(s.name, "") for s in SETTINGS if s.restart}
+        _active_at_start = {
+            s.name: os.environ.get(s.name, "") for s in SETTINGS if s.restart
+        }
     return _active_at_start
 
 
@@ -284,8 +414,16 @@ def _restrict_to_owner(path: pathlib.Path) -> None:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
-    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    advapi32.SetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     dacl_security_information = 0x00000004
     protected_dacl_security_information = 0x80000000
@@ -297,7 +435,9 @@ def _restrict_to_owner(path: pathlib.Path) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
         if not advapi32.SetFileSecurityW(
-            str(path), dacl_security_information | protected_dacl_security_information, descriptor
+            str(path),
+            dacl_security_information | protected_dacl_security_information,
+            descriptor,
         ):
             raise ctypes.WinError(ctypes.get_last_error())
     finally:
@@ -362,7 +502,9 @@ def save(values: Dict[str, str]) -> List[str]:
             restart_needed.append(setting.name)
         if value:
             saved[setting.name] = value
-        elif os.environ.get(setting.name) or (setting.name in previous and previous[setting.name] is None):
+        elif os.environ.get(setting.name) or (
+            setting.name in previous and previous[setting.name] is None
+        ):
             saved[setting.name] = None
     _write_atomically(settings_path(), json.dumps(saved, indent=2))
     for setting in SETTINGS:

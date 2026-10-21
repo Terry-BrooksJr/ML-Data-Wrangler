@@ -3,11 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import results_dialog
 from PyQt5.QtGui import QColor, QImage
 from PyQt5.QtWidgets import QApplication
-
-import results_dialog
-from results_dialog import ResultsDialog, format_topics
+from results_dialog import format_topics, ResultsDialog
 
 TOPICS = [(3, 0.6, ["import", "fails"]), (0, 0.4, ["login", "sso"])]
 
@@ -27,7 +26,10 @@ def plot(tmp_path):
 
 
 def test_format_topics_ranks_by_share():
-    assert format_topics(TOPICS) == "1. 60% of tickets: import, fails\n2. 40% of tickets: login, sso"
+    assert (
+        format_topics(TOPICS)
+        == "1. 60% of tickets: import, fails\n2. 40% of tickets: login, sso"
+    )
 
 
 def test_format_topics_empty():
@@ -49,7 +51,9 @@ def test_dialog_handles_missing_outputs(qapp):
     assert not dialog.chart_button.isEnabled()
 
 
-def test_open_chart_uses_the_sandboxed_viewer_not_a_file_uri(qapp, monkeypatch, tmp_path):
+def test_open_chart_uses_the_sandboxed_viewer_not_a_file_uri(
+    qapp, monkeypatch, tmp_path
+):
     opened = []
     monkeypatch.setattr(results_dialog.chart_viewer.webbrowser, "open", opened.append)
     chart = tmp_path / "lda_model.html"
