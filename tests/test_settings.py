@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import sys
 
 import pytest
@@ -9,7 +10,6 @@ import settings
 @pytest.fixture
 def config(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "config_dir", lambda: tmp_path)
-    monkeypatch.setattr(settings, "_active_at_start", None)
     for s in settings.SETTINGS:
         monkeypatch.delenv(s.name, raising=False)
     return tmp_path / "settings.json"
@@ -36,26 +36,69 @@ def test_blank_value_removes_setting(config):
     }
 
 
-def test_restart_needed_only_for_import_time_values(config):
-    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "y"}) == [
-        "LESSONS_COLLECTION"
-    ]
+def test_saved_settings_apply_without_a_restart(config):
+    import bertopic_runs
+    import tag_runs
+    import topic_store
+    from decision_engine import classify, feedback
+
+    settings.save(
+        {
+            "TOPIC_RUNS_COLLECTION": "lda_x",
+            "BERTOPIC_RUNS_COLLECTION": "bertopic_x",
+            "TAG_RUNS_COLLECTION": "tags_x",
+            "NORMALIZED_TAGS_COLLECTION": "normalized_x",
+            "MISCLASSIFICATION_COLLECTION": "log_x",
+            "LESSONS_COLLECTION": "lessons_x",
+            "DECISION_ENGINE_MODEL": "model_x",
+        }
+    )
+    assert topic_store.runs_collection() == "lda_x"
+    assert bertopic_runs.runs_collection() == "bertopic_x"
+    assert tag_runs.runs_collection() == "tags_x"
+    assert tag_runs.normalized_collection() == "normalized_x"
+    log, lessons = feedback.get_feedback_collections({"log_x": "L", "lessons_x": "S"})
+    assert (log, lessons) == ("L", "S")
+    assert classify.primary_model() == "model_x"
+
+    settings.save({})  # blanked: the defaults apply, again at once
+    assert topic_store.runs_collection() == "topic_modeling_run_log"
+    assert classify.primary_model() == classify.DEFAULT_MODEL
 
 
-def test_restart_reminder_survives_later_saves_until_restart(config, monkeypatch):
-    monkeypatch.setattr(settings, "is_frozen", lambda: True)
-    settings.load()  # startup: LESSONS_COLLECTION unset
-    assert settings.save({"LESSONS_COLLECTION": "x"}) == ["LESSONS_COLLECTION"]
-    # Saving again without restarting: the running code still has the old value.
-    assert settings.save({"LESSONS_COLLECTION": "x", "MONGO_DB": "z"}) == [
-        "LESSONS_COLLECTION"
-    ]
-    # Changing it back to what's running clears the reminder.
-    assert settings.save({"LESSONS_COLLECTION": ""}) == []
+def test_no_setting_is_read_into_a_constant_at_import():
+    """A module-level `X = os.environ.get("SETTING")` would keep the value the
+    app started with, so a saved change wouldn't apply until a restart."""
+    import ast
 
-    settings.save({"LESSONS_COLLECTION": "x"})
-    settings.load()  # restart
-    assert settings.save({"LESSONS_COLLECTION": "x"}) == []
+    names = {s.name for s in settings.SETTINGS}
+    src = pathlib.Path(__file__).resolve().parents[1] / "src"
+    found = []
+    for path in src.rglob("*.py"):
+        if "zendesk_retag" in path.parts:  # standalone scripts, not the app
+            continue
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            for read in ast.walk(node):
+                name = _env_read(read)
+                if name in names:
+                    found.append(f"{path.relative_to(src)}:{node.lineno} {name}")
+    assert found == []
+
+
+def _env_read(node):
+    """The variable name if node is os.environ.get("X"), os.getenv("X") or os.environ["X"]."""
+    import ast
+
+    if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+        func = ast.unparse(node.func)
+        if func in ("os.environ.get", "os.getenv", "environ.get", "getenv"):
+            return node.args[0].value
+    if isinstance(node, ast.Subscript) and ast.unparse(node.value) in ("os.environ", "environ"):
+        if isinstance(node.slice, ast.Constant):
+            return node.slice.value
+    return None
 
 
 def test_missing_required(config, monkeypatch):

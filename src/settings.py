@@ -2,9 +2,9 @@
 
 Settings live in a per-user JSON file (settings_path()), so a packaged build
 needs no shell setup. load() copies them into os.environ before the rest of
-the app imports; save() writes the file and updates os.environ, so most
-changes apply without a restart. A few values are read once at import time
-(Setting.restart) and need one.
+the app imports; save() writes the file and updates os.environ. Code reads
+each setting from os.environ when it uses it, never into a constant at
+import, so every change applies without restarting the app.
 """
 
 import json
@@ -33,7 +33,6 @@ class Setting:
         required: True if some feature refuses to run without it.
         default: Placeholder text; what the code falls back to when unset.
         help: Tooltip text.
-        restart: True if the value is read at import, so a change needs a restart.
     """
 
     name: str
@@ -43,7 +42,6 @@ class Setting:
     required: bool = False
     default: str = ""
     help: str = ""
-    restart: bool = False
 
 
 SETTINGS: List[Setting] = [
@@ -97,7 +95,6 @@ SETTINGS: List[Setting] = [
         "Decision Engine (Cheaper Inference)",
         default="claude-opus-4.8",
         help="Used when no primary model is set.",
-        restart=True,
     ),
     Setting(
         "MODEL_BUCKET",
@@ -195,21 +192,18 @@ SETTINGS: List[Setting] = [
         "LDA runs collection",
         "Storage",
         default="topic_modeling_run_log",
-        restart=True,
     ),
     Setting(
         "BERTOPIC_RUNS_COLLECTION",
         "BERTopic runs collection",
         "Storage",
         default="bertopic_run_log",
-        restart=True,
     ),
     Setting(
         "TAG_RUNS_COLLECTION",
         "Tag Normalizer runs collection",
         "Storage",
         default="tag_normalization_run_log",
-        restart=True,
     ),
     Setting(
         "NORMALIZED_TAGS_COLLECTION",
@@ -217,21 +211,18 @@ SETTINGS: List[Setting] = [
         "Storage",
         default="normalized_tags",
         help="One document per successor tag, listing the tags it replaces.",
-        restart=True,
     ),
     Setting(
         "MISCLASSIFICATION_COLLECTION",
         "Misclassification collection",
         "Storage",
         default="misclassification_log",
-        restart=True,
     ),
     Setting(
         "LESSONS_COLLECTION",
         "Lessons collection",
         "Storage",
         default="lessons_learned",
-        restart=True,
     ),
 ]
 
@@ -313,24 +304,8 @@ def workspace_dir() -> pathlib.Path:
     return pathlib.Path.home() / "Documents" / APP_NAME
 
 
-# Restart-required values as this process read them at startup (see
-# Setting.restart). save() compares against these, not os.environ, which
-# save() itself updates: otherwise a second save before restarting would
-# report nothing pending while the import-time constants still hold old values.
-_active_at_start: Optional[Dict[str, str]] = None
-
-
-def _snapshot_restart_values() -> Dict[str, str]:
-    global _active_at_start
-    if _active_at_start is None:
-        _active_at_start = {
-            s.name: os.environ.get(s.name, "") for s in SETTINGS if s.restart
-        }
-    return _active_at_start
-
-
 def load() -> None:
-    """Loads settings into os.environ, before modules that read them at import.
+    """Loads settings into os.environ, before anything uses them.
 
     A project .env (when running from source) is loaded first, then the user
     settings file, so values saved from the dialog win, and settings blanked
@@ -340,7 +315,7 @@ def load() -> None:
     An unreadable settings file is set aside and reported in load_error
     rather than stopping the app, so the user can re-enter settings.
     """
-    global load_error, _active_at_start
+    global load_error
     load_error = None
     if not is_frozen():
         load_dotenv(override=True)
@@ -354,8 +329,6 @@ def load() -> None:
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
-    _active_at_start = None
-    _snapshot_restart_values()
 
 
 def use_workspace() -> pathlib.Path:
@@ -482,7 +455,7 @@ def _write_atomically(path: pathlib.Path, text: str) -> None:
         raise
 
 
-def save(values: Dict[str, str]) -> List[str]:
+def save(values: Dict[str, str]) -> None:
     """Writes settings to the user file and applies them to os.environ.
 
     An empty value removes the setting, so the code's default applies. If
@@ -491,23 +464,14 @@ def save(values: Dict[str, str]) -> List[str]:
 
     Args:
         values: Setting name to value, as entered in the dialog.
-
-    Returns:
-        Restart-required settings whose saved value differs from the one this
-        process started with, including ones changed by an earlier save, so
-        the reminder stays until the app restarts.
     """
-    active = _snapshot_restart_values()
     try:
         previous = stored()
     except (OSError, ValueError):
         previous = {}
     saved: Dict[str, Optional[str]] = {}
-    restart_needed = []
     for setting in SETTINGS:
         value = values.get(setting.name, "").strip()
-        if setting.restart and value != active[setting.name]:
-            restart_needed.append(setting.name)
         if value:
             saved[setting.name] = value
         elif os.environ.get(setting.name) or (
@@ -520,4 +484,3 @@ def save(values: Dict[str, str]) -> List[str]:
             os.environ[setting.name] = saved[setting.name]
         else:
             os.environ.pop(setting.name, None)
-    return restart_needed

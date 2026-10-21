@@ -535,7 +535,7 @@ def main(argv: List[str]) -> int:
             bertopic_model.model_dir(),
             bertopic_runs.storage_config(cfg),
         )
-        collection_name = bertopic_runs.RUNS_COLLECTION
+        collection_name = bertopic_runs.runs_collection()
     elif args.tags:
         import tag_runs
 
@@ -544,10 +544,10 @@ def main(argv: List[str]) -> int:
             tag_runs.run_dir(),
             tag_runs.storage_config(cfg),
         )
-        collection_name = tag_runs.RUNS_COLLECTION
+        collection_name = tag_runs.runs_collection()
     else:
         runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
-        collection_name = topic_store.RUNS_COLLECTION
+        collection_name = topic_store.runs_collection()
     if args.run_ids:
         by_id = {run["run_id"]: run for run in runs}
         missing = [r for r in args.run_ids if r not in by_id]
