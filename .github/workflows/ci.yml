@@ -1,0 +1,92 @@
+# Tests (required), plus lint and format checks. The last two are report-only
+# for now: most of the repo isn't black-formatted yet and prospector still finds
+# ~185 messages. Drop their continue-on-error once those are cleaned up.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The app ships as a macOS .app, so test there as well as on Linux.
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # No display on the runners; the Qt tests render offscreen.
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # Python comes from .python-version; --locked fails if uv.lock is stale.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # The live model evaluation stays skipped: RUN_LIVE_EVAL is never set here.
+      - name: Run tests
+        run: uv run pytest
+
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: isort
+        continue-on-error: true
+        run: uv run isort --check-only --diff src tests
+
+      - name: black
+        continue-on-error: true
+        run: uv run black --check src tests
+
+      - name: prospector
+        continue-on-error: true
+        run: uv run prospector src --no-autodetect
+
+  requirements:
+    name: requirements.txt matches uv.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Re-export and compare
+        run: |
+          uv export --format requirements-txt --no-dev --no-hashes --quiet -o requirements.txt
+          git diff --exit-code requirements.txt || {
+            echo "::error file=requirements.txt::Out of date with uv.lock; run 'task reqs' and commit it."
+            exit 1
+          }
