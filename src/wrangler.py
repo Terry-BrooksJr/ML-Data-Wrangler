@@ -706,9 +706,8 @@ class DataWrangler(QObject):
     def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
         """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
 
-        The shape follows the `tickets` collection in
-        AI_CODER_INTEGRATION_BRIEF.md (section 4.2), which the decision engine
-        reads. The subject and comment text go through clean_text (HTML
+        The shape is the `tickets` collection the decision engine reads
+        (decision_engine.payload builds the model's input from it). The subject and comment text go through clean_text (HTML
         entities decoded, control characters removed) but are not cleansed:
         no words are dropped, because the decision engine needs the real
         wording. raw_xml keeps the original text.

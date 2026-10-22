@@ -1,4 +1,4 @@
-"""Weekly review of misclassifications and the lessons learned from them (brief §4.2).
+"""Weekly review of misclassifications and the lessons learned from them.
 
 Entries reach misclassification_log from the Decision Engine tab's Mark
 Misclassified… button. Here a reviewer picks a week, marks its entries
