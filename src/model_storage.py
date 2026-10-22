@@ -493,10 +493,16 @@ def main(argv: List[str]) -> int:
         "upload", help="upload saved runs (default: local runs not uploaded yet)"
     )
     upload.add_argument("run_ids", nargs="*")
-    upload.add_argument(
+    kind = upload.add_mutually_exclusive_group()
+    kind.add_argument(
         "--bertopic",
         action="store_true",
         help="upload BERTopic runs (BERTOPIC_MODEL_DIR) instead of LDA runs",
+    )
+    kind.add_argument(
+        "--tags",
+        action="store_true",
+        help="upload Tag Normalizer runs (TAG_RUN_DIR) instead of LDA runs",
     )
     commands.add_parser("new-key", help="print a new random MODEL_SIGNING_KEY")
     args = parser.parse_args(argv)
@@ -529,10 +535,19 @@ def main(argv: List[str]) -> int:
             bertopic_model.model_dir(),
             bertopic_runs.storage_config(cfg),
         )
-        collection_name = bertopic_runs.RUNS_COLLECTION
+        collection_name = bertopic_runs.runs_collection()
+    elif args.tags:
+        import tag_runs
+
+        runs, run_dir, cfg = (
+            tag_runs.list_runs(),
+            tag_runs.run_dir(),
+            tag_runs.storage_config(cfg),
+        )
+        collection_name = tag_runs.runs_collection()
     else:
         runs, run_dir = topic_store.list_runs(), topic_store.model_dir()
-        collection_name = topic_store.RUNS_COLLECTION
+        collection_name = topic_store.runs_collection()
     if args.run_ids:
         by_id = {run["run_id"]: run for run in runs}
         missing = [r for r in args.run_ids if r not in by_id]

@@ -33,10 +33,14 @@ from loguru import logger
 from pymongo.collection import Collection
 
 METHOD = "bertopic"
-RUNS_COLLECTION = os.environ.get("BERTOPIC_RUNS_COLLECTION", "bertopic_run_log")
 # Under MODEL_PREFIX in the bucket, apart from the LDA runs.
 STORAGE_SUBFOLDER = "bertopic/"
 CHARTS = ("barchart_html", "intertopic_html")
+
+
+def runs_collection() -> str:
+    """The BERTopic runs collection's name, read when used so a saved setting applies at once."""
+    return os.environ.get("BERTOPIC_RUNS_COLLECTION", "bertopic_run_log")
 
 
 @dataclass

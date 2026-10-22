@@ -59,8 +59,6 @@ class SettingsDialog(QDialog):
                 field.setPlaceholderText(setting.default)
                 field.setClearButtonEnabled(True)
                 tooltip = setting.name + (f"\n{setting.help}" if setting.help else "")
-                if setting.restart:
-                    tooltip += "\nChanges take effect after a restart."
                 field.setToolTip(tooltip)
                 if setting.secret:
                     self._make_secret(field)
@@ -173,7 +171,7 @@ class SettingsDialog(QDialog):
         ):
             return
         try:
-            restart_needed = settings.save(self.values())
+            settings.save(self.values())
         except OSError as e:
             QMessageBox.critical(
                 self,
@@ -182,11 +180,4 @@ class SettingsDialog(QDialog):
             )
             return
         logger.info(f"Settings saved to {settings.settings_path()}.")
-        if restart_needed:
-            QMessageBox.information(
-                self,
-                "Restart Needed",
-                "These changes take effect after you restart the app:\n"
-                + "\n".join(restart_needed),
-            )
         self.accept()

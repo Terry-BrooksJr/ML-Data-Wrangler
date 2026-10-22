@@ -148,7 +148,8 @@ def test_structured_tags_apart_in_large_groups():
 
 def test_tab_toggle_lets_structured_tags_merge(qapp):
     tab = TagTab(
-        lambda backend: lambda texts: np.array([[1.0, 0.0], [0.99, 0.1]])[: len(texts)]
+        lambda backend: lambda texts: np.array([[1.0, 0.0], [0.99, 0.1]])[: len(texts)],
+        **OFFLINE,
     )
     tab.input.setPlainText("sentiment__positive, sentiment__negative")
     tab.start_find()
@@ -218,6 +219,10 @@ def test_cli_no_tags(tmp_path):
 # --- the tab ------------------------------------------------------------------------
 
 
+# No MongoDB (normalized_tags, the run log) and no S3 uploads.
+OFFLINE = dict(database_factory=lambda: None, storage=lambda: None)
+
+
 @pytest.fixture
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -240,7 +245,7 @@ def make_tab(calls):
 
         return embed
 
-    return TagTab(factory)
+    return TagTab(factory, **OFFLINE)
 
 
 def test_tab_groups_regroups_and_caches(qapp):
@@ -296,7 +301,7 @@ def test_tab_reports_embedding_error(qapp, monkeypatch):
     def factory(backend):
         raise RuntimeError("EMBEDDING_API_KEY is not set")
 
-    tab = TagTab(factory)
+    tab = TagTab(factory, **OFFLINE)
     tab.input.setPlainText("refund, oil change")
     tab.start_find()
     wait_until_idle(qapp, tab)

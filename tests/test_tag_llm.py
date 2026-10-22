@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import tag_llm
 import tag_normalizer
+import tag_tab
 from PyQt5.QtWidgets import QApplication, QFileDialog
 from tag_normalizer import collect, LLM, mapping
 from tag_tab import TagTab
@@ -531,3 +532,28 @@ def test_request_lists_candidate_groups():
     head, groups = text.rsplit("\n\n", 1)
     assert "Candidate pairs" in head
     assert json.loads(groups) == [{"tags": ["a", "b"], "similarity": 0.9}]
+
+
+def test_model_results_cant_be_saved_but_embedding_results_can(qapp, tmp_path):
+    def fake_normalize(tags, candidates=()):
+        return tag_llm.check_reply(EXAMPLE_REPLY, tags, "m")
+
+    tab = TagTab(
+        lambda backend: fake_voyage,
+        database_factory=lambda: None,
+        run_dir=tmp_path,
+        model_normalizer=fake_normalize,
+    )
+    tab.backend_combo.setCurrentIndex(tab.backend_combo.findData(LLM))
+    tab.input.setPlainText(", ".join(EXAMPLE_INPUT))
+    tab.start_find()
+    wait_until_idle(qapp, tab)
+    assert tab.export_button.isEnabled() and not tab.save_button.isEnabled()
+    assert "can't be saved" in tab.save_button.toolTip()
+    assert tab.save_run() is False
+
+    tab.backend_combo.setCurrentIndex(tab.backend_combo.findData(tag_normalizer.VOYAGE))
+    tab.start_find()
+    wait_until_idle(qapp, tab)
+    assert tab.save_button.isEnabled()
+    assert tab.save_button.toolTip() == tag_tab.SAVE_TOOLTIP

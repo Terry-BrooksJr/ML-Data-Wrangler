@@ -30,9 +30,8 @@ on macOS). They're saved to
 `settings.json` in your user config folder (`~/Library/Application
 Support/Lasso/` on macOS, `%APPDATA%\Lasso\` on
 Windows), readable only by you, and override `.env` and the shell. On launch
-the app offers to open Settings if any required value is missing. Most
-changes apply immediately; the collection names and `DECISION_ENGINE_MODEL`
-need a restart. Blanking a field makes the code's default apply, even if
+the app offers to open Settings if any required value is missing. Every
+change applies as soon as you save; nothing needs a restart. Blanking a field makes the code's default apply, even if
 `.env` or the shell sets it. If the file can't be read, the app renames it to
 `settings.json.corrupt-<date>` and asks you to re-enter your settings.
 
@@ -215,8 +214,8 @@ documents = wrangler.ticket_documents()          # one cleansed document per tic
 
 The **Tag Normalizer** tab finds tags that mean the same thing and maps each
 to one tag, so "oil change", "tire_rotation" and "Car Maintenance" all become
-`car_maintenance`. It reads and writes nothing in MongoDB or Zendesk; the
-result is a mapping you export.
+`car_maintenance`. It never writes to Zendesk; the result is a mapping you
+export, and **Save Run** keeps it (see [Saved runs and normalized tags](#saved-runs-and-normalized-tags)).
 
 1. Paste tags (comma- or newline-separated, or a JSON list), or **Load
    File…**. A CSV such as a Zendesk tag export (`name,count`) uses its first
@@ -252,6 +251,49 @@ cd src && python -m tag_normalizer tags.csv --out tag_mapping.csv
 cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
 ```
 
+### Saved runs and normalized tags
+
+**Save Run** keeps a run the way LDA and BERTopic runs are kept: its folder
+under `tag_normalizer_runs/` (`TAG_RUN_DIR`) holds the tags, their vectors and
+the mapping (CSV and JSON); with model storage set up it is uploaded with a
+signed manifest to `s3://<bucket>/<MODEL_PREFIX>tag_normalizer/<run_id>/`
+(retry a failed upload with `cd src && python -m model_storage upload --tags RUN_ID`);
+and it is recorded in MongoDB's `tag_normalization_run_log`
+(`TAG_RUNS_COLLECTION`) with its settings, your renames and unticked tags,
+and every tag it changed. **Previous Runs…** lists runs from MongoDB and
+this computer and reopens one exactly as saved (downloading and verifying it
+first if needed), without embedding anything again.
+
+Saving also records the run's decisions in `normalized_tags`
+(`NORMALIZED_TAGS_COLLECTION`), one document per successor tag:
+
+```json
+{
+  "tag": "password_reset",
+  "text": "password reset",
+  "replaces": [
+    {"tag": "pw_reset", "text": "pw reset", "run_id": "20261020T...", "replaced_at": "..."}
+  ],
+  "run_ids": ["20261020T..."],
+  "created_at": "...", "updated_at": "..."
+}
+```
+
+- A deprecated tag belongs to one successor (unique index on `replaces.tag`).
+- Successors never chain: merging successor A into B moves A and everything
+  A replaced to B, and A's document goes.
+- The latest run wins: a tag deprecated before but kept as itself (unticked)
+  or chosen as a successor now is taken off its old successor; a successor
+  left replacing nothing is removed.
+
+**Find Similar Tags** reads `normalized_tags` back. Every saved successor
+joins the grouping (embedded with your tags), so new synonyms join it and
+it keeps its name, shown as "(saved successor)" when it isn't in your input;
+two saved successors are never grouped together (rename a group to merge
+them). A tag already deprecated goes straight to its successor's group.
+Without `MONGO_URI` the tab works as before and Save Run keeps the folder
+(and upload) only.
+
 ### Normalizing with a language model
 
 The third option, **Language model**, sends the tags (with how often each was
@@ -284,7 +326,10 @@ explains its non-trivial decisions (shown as tooltips) and raises flags for a
 person to decide (shown below the groups). Rename, untick and both exports
 work as for embeddings; the JSON export also holds the model's `decisions`,
 `flags`, `model`, the `candidates` it judged and the `ignored` intent tags.
-There is no threshold: the rules decide.
+There is no threshold: the rules decide. Language-model runs can't be saved
+with **Save Run** yet (saved runs keep a vector per tag and regroup by
+embeddings when reopened), and they don't apply earlier `normalized_tags`
+decisions; use **Export Mapping** to keep the result.
 
 The reply is checked before it's shown:
 - Every input tag must be mapped. A tag the model leaves out keeps its name
