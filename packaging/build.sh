@@ -8,7 +8,7 @@
 # development. PyInstaller doesn't cross-compile, so run this on each OS you
 # ship for (macOS -> dist/Lasso.app, Windows/Linux -> dist/Lasso/).
 set -euo pipefail
-
+echo "Building Lasso desktop app..."
 cd "$(dirname "$0")/.."
 PYTHON_VERSION="${PYTHON_VERSION:-3.10.21}"
 export UV_PROJECT_ENVIRONMENT="$PWD/build/pkg-venv"

@@ -1,0 +1,274 @@
+{
+  "run_id": "20261020T195426Z-eab210",
+  "ran_at": "2026-10-20 19:54:26.809902+00:00",
+  "method": "bertopic",
+  "bertopic_version": "0.17.4",
+  "settings": {
+    "min_cluster_size": 10,
+    "n_neighbors": 15,
+    "n_components": 5,
+    "nr_topics": null,
+    "reduce_outliers": true,
+    "seed": 42
+  },
+  "embedding": {
+    "endpoint": "https://ai.mongodb.com/v1/embeddings",
+    "model": "voyage-3.5",
+    "dimensions": 1024
+  },
+  "preprocessing": {
+    "spacy_version": "3.7.5",
+    "spacy_model": "en_core_web_lg",
+    "spacy_model_version": "3.7.1",
+    "stopwords_count": 198,
+    "stopwords_hash": "47608d511aa4fec9",
+    "removed_pos": [
+      "ADV",
+      "PRON",
+      "PUNCT",
+      "PART",
+      "DET",
+      "ADP",
+      "SPACE",
+      "NUM",
+      "SYM"
+    ],
+    "gensim_version": "4.4.0"
+  },
+  "dataset": {
+    "ticket_count": 631,
+    "hash": "06a6bec99aac7c5f",
+    "skipped": {}
+  },
+  "metrics": {
+    "num_topics": 12,
+    "coherence_c_v": 0.45503391462018555,
+    "topic_diversity": 0.9333333333333333,
+    "outliers_before": 230,
+    "outliers_after": 0,
+    "ticket_count": 631
+  },
+  "comparison": null,
+  "topics": [
+    {
+      "topic_id": 0,
+      "count": 105,
+      "share": 0.1664025356576862,
+      "words": [
+        "aria",
+        "reader",
+        "element",
+        "screen",
+        "role",
+        "focus",
+        "label",
+        "accessibility",
+        "dialog",
+        "attribute"
+      ]
+    },
+    {
+      "topic_id": 3,
+      "count": 86,
+      "share": 0.13629160063391443,
+      "words": [
+        "question",
+        "answer",
+        "attempt",
+        "value",
+        "point",
+        "choice",
+        "type",
+        "distractor",
+        "correct",
+        "alternate"
+      ]
+    },
+    {
+      "topic_id": 1,
+      "count": 65,
+      "share": 0.10301109350237718,
+      "words": [
+        "audio",
+        "video",
+        "play",
+        "protractor",
+        "fullscreen",
+        "player",
+        "preview",
+        "feature",
+        "close",
+        "ruler"
+      ]
+    },
+    {
+      "topic_id": 2,
+      "count": 59,
+      "share": 0.09350237717908082,
+      "words": [
+        "session",
+        "error",
+        "adaptive",
+        "score",
+        "submit",
+        "datum",
+        "report",
+        "true",
+        "fail",
+        "api"
+      ]
+    },
+    {
+      "topic_id": 5,
+      "count": 57,
+      "share": 0.09033280507131537,
+      "words": [
+        "axis",
+        "math",
+        "chart",
+        "x",
+        "calculator",
+        "graph",
+        "line",
+        "character",
+        "keypad",
+        "custom"
+      ]
+    },
+    {
+      "topic_id": 4,
+      "count": 51,
+      "share": 0.08082408874801902,
+      "words": [
+        "tag",
+        "bank",
+        "filter",
+        "item",
+        "workflow",
+        "search",
+        "api",
+        "author",
+        "list",
+        "update"
+      ]
+    },
+    {
+      "topic_id": 7,
+      "count": 46,
+      "share": 0.07290015847860538,
+      "words": [
+        "image",
+        "text",
+        "size",
+        "font",
+        "box",
+        "masking",
+        "inline",
+        "response",
+        "zoom",
+        "undo"
+      ]
+    },
+    {
+      "topic_id": 6,
+      "count": 43,
+      "share": 0.06814580031695722,
+      "words": [
+        "playback",
+        "accommodation",
+        "audio",
+        "player",
+        "berklee",
+        "exam",
+        "transcript",
+        "setup",
+        "feature",
+        "medium"
+      ]
+    },
+    {
+      "topic_id": 8,
+      "count": 35,
+      "share": 0.0554675118858954,
+      "words": [
+        "file",
+        "submission",
+        "upload",
+        "limit",
+        "support",
+        "total",
+        "activity",
+        "project",
+        "count",
+        "edgear"
+      ]
+    },
+    {
+      "topic_id": 9,
+      "count": 35,
+      "share": 0.0554675118858954,
+      "words": [
+        "math",
+        "mathjax",
+        "equation",
+        "latex",
+        "formula",
+        "xss",
+        "enter",
+        "render",
+        "consecutive",
+        "equivsymbolic"
+      ]
+    },
+    {
+      "topic_id": 11,
+      "count": 25,
+      "share": 0.039619651347068144,
+      "words": [
+        "activity",
+        "author",
+        "org",
+        "developer",
+        "aide",
+        "load",
+        "warning",
+        "version",
+        "access",
+        "api"
+      ]
+    },
+    {
+      "topic_id": 10,
+      "count": 24,
+      "share": 0.03803486529318542,
+      "words": [
+        "color",
+        "contrast",
+        "ratio",
+        "white",
+        "component",
+        "border",
+        "bold",
+        "background",
+        "black",
+        "underline"
+      ]
+    }
+  ],
+  "model_dir": "/Users/terry-brooksjr/Documents/Github/ML-Data-Wrangler/bertopic_models/20261020T195426Z-eab210",
+  "charts": {
+    "barchart_html": "/Users/terry-brooksjr/Documents/Github/ML-Data-Wrangler/bertopic_models/20261020T195426Z-eab210/barchart.html",
+    "intertopic_html": "/Users/terry-brooksjr/Documents/Github/ML-Data-Wrangler/bertopic_models/20261020T195426Z-eab210/intertopic.html"
+  },
+  "warnings": [],
+  "storage": {
+    "url": "s3://lrn-support/topic-models/bertopic/20261020T195426Z-eab210/",
+    "bucket": "lrn-support",
+    "prefix": "topic-models/bertopic/20261020T195426Z-eab210/",
+    "endpoint_url": "https://s3.us-east-005.backblazeb2.com",
+    "region": "us-east-005",
+    "files": 5,
+    "bytes": 3206843,
+    "uploaded_at": "2026-10-20 19:54:31.895330+00:00"
+  }
+}
