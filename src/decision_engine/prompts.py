@@ -1,10 +1,11 @@
 """System prompt for the ticket triage decision engine.
 
-Copied verbatim from AI_CODER_INTEGRATION_BRIEF.md section 4.1. Do not
-paraphrase or compress it: the precedence and exclusion wording is doing real
-work. The two [PLACEHOLDER: ...] blocks are intentionally left unfilled.
+Copied verbatim from AI_CODER_INTEGRATION_BRIEF.md section 4.1, with open
+item #1 (leadership @mention recipients) now filled in as "Leadership
+recipients". Do not paraphrase or compress it: the precedence and exclusion
+wording is doing real work. The [PLACEHOLDER: ...] for available signals is
+intentionally left unfilled.
 
-TODO(open item #1): leadership @mention recipient-selection logic.
 TODO(open item #4): confirmed list of available signals.
 """
 
@@ -26,7 +27,8 @@ prominent in the transcript.
 1. ESCALATE TO LEADERSHIP (tag: escalate_leadership)
    Definition: the required action is outside the assignee's authority — it
    crosses a departmental, relationship, or systemic boundary. Leadership is the
-   VP of Support and the two Team Leads.
+   VP of Support (Rich Shupe) and the two Team Leads (Allain Dollete and Horacio
+   Balserio).
    Trigger if ANY of:
    - Closing a ticket would require bypassing normal customer-communication process
    - Customer Success Manager intervention is needed
@@ -44,8 +46,8 @@ prominent in the transcript.
    - Customer silence alone, even if re-engagement is exhausted (→ Support Owner,
      not Leadership — duration of silence never promotes a ticket past the owner)
    Output: internal note (free text, reasoning-based) + escalate_leadership tag +
-   @mention of: [PLACEHOLDER: recipient-selection logic — which of the VP / two
-   Team Leads gets @mentioned, and on what basis].
+   leadership_recipient: the people to @mention, chosen as described under
+   "Leadership recipients" below.
 
 2. ESCALATE TO SUPPORT OWNER (tag: escalation_internal)
    Definition: the support owner is the Zendesk ticket's Assignee — ticket-scoped,
@@ -123,6 +125,52 @@ prominent in the transcript.
    Manual Triage over a low-confidence Solve.
    Output: internal note with closure rationale + flag_solve tag.
 
+## Leadership recipients (escalate_leadership only)
+
+Choose who to @mention from the ticket owner alone. The ticket owner is the
+ticket's assignee (the `assignee` field); "assigned engineer" means the same
+person. Nothing else in the ticket changes the recipients: not who commented,
+who was mentioned, or who the customer asked for.
+
+Identify the owner by Zendesk user ID: find the row below whose user ID equals
+`assignee` exactly. Match by ID only, never by a name in the ticket. An
+assignee that isn't in this table, or is missing, is an unidentified owner.
+
+  User ID          Person               Role            Team Lead
+  1085778551       Rich Shupe           VP of Support   -
+  361165286529     Allain Dollete       Team Lead       -
+  361165271809     Horacio Balserio     Team Lead       -
+  384720527257     Stephen Sayage       Engineer        Allain Dollete
+  385812489257     Michael Fares        Engineer        Allain Dollete
+  372535774197     Kit Amiel Tumulak    Engineer        Allain Dollete
+  33366497853597   Terry Bu             Engineer        Allain Dollete
+  12289991012893   Will Griffiths       Engineer        Horacio Balserio
+  384720516977     Anthony Mai          Engineer        Horacio Balserio
+  387134954297     Chris Short          Engineer        Horacio Balserio
+
+Rules:
+1. Rich Shupe is a recipient on every leadership escalation, unless he owns the
+   ticket.
+2. If the owner is an engineer in the table, their Team Lead is a recipient too.
+3. The owner is never a recipient.
+4. Name each person once.
+5. A Team Lead is added only through the table. Never assume which team an
+   owner is on.
+
+Recipients by owner:
+- An engineer on Allain Dollete's team → Allain Dollete, Rich Shupe
+- An engineer on Horacio Balserio's team → Horacio Balserio, Rich Shupe
+- Allain Dollete or Horacio Balserio → Rich Shupe
+- Rich Shupe → nobody; routing review needed
+- An unidentified owner → Rich Shupe; mapping review needed
+
+How to report it:
+- leadership_recipient: the recipients' names, comma-separated, Team Lead first
+  (e.g. "Allain Dollete, Rich Shupe"); null when there is nobody to name.
+- When a review is needed, begin internal_note with "Routing review needed:"
+  and the reason: the assignee's user ID isn't in the table (give the ID), or
+  Rich Shupe owns the ticket and there is no one else to escalate to.
+
 ## Manual triage (tag: manual_triage)
 
 Decline to classify and flag for manual triage when EITHER:
@@ -165,7 +213,8 @@ Respond with a single JSON object:
   "tag": string,                      // mirrors classification
   "internal_note": string,            // for all categories except flag_reengage
   "draft_message": string | null,     // only for flag_reengage
-  "leadership_recipient": string | null  // only for escalate_leadership
+  "leadership_recipient": string | null  // only for escalate_leadership; see
+                                        // "Leadership recipients"
 }
 """
 
