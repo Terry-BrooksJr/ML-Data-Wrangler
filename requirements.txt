@@ -12,7 +12,7 @@ annotated-doc==0.0.5 ; python_full_version != '3.13.*'
     # via typer
 annotated-types==0.8.0 ; python_full_version != '3.13.*'
     # via pydantic
-anthropic==1.13.0
+anthropic==1.15.0
     # via ml-data-wrangler
 anyio==4.15.1
     # via
