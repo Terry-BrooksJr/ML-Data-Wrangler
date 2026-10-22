@@ -486,7 +486,7 @@ truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
     #   httpx2
-typer==0.7.0 ; python_full_version == '3.13.*'
+typer==0.27.3 ; python_full_version == '3.13.*'
     # via
     #   spacy
     #   transformers
