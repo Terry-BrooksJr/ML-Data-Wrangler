@@ -18,8 +18,15 @@ keeps topic_store.list_runs from loading one as an LDA model. The app trains
 and shows runs through bertopic_runs. With --assign, each ticket's topic is written to `embedding_topic`,
 never to `topic`, which holds the LDA assignment that feedback reports use.
 
+A run can be limited to tickets with chosen Zendesk outcomes (the
+`historical_outcome` the wrangler stores), e.g. only Client Education, to
+find the themes inside one outcome. Each saved topic lists how many of its
+tickets have each outcome, and the IDs of the tickets nearest its centre;
+no ticket text is saved with a run.
+
     cd src && python -m bertopic_model [--min-cluster-size N] [--nr-topics N]
         [--keep-outliers] [--seed N] [--compare-lda RUN_ID] [--assign]
+        [--outcome OUTCOME ...]   (--outcome none for tickets with no outcome)
 """
 
 import argparse
@@ -30,7 +37,7 @@ import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import embeddings
 import numpy as np
@@ -48,6 +55,10 @@ DEFAULT_N_NEIGHBORS = 15
 DEFAULT_N_COMPONENTS = 5
 # HDBSCAN's smallest topic: 1% of the tickets, but never below this.
 MIN_CLUSTER_SIZE_FLOOR = 10
+# The Zendesk ticket outcome, as the wrangler stores it on each ticket.
+OUTCOME_FIELD = "historical_outcome"
+# Tickets per topic listed as its examples: those nearest the topic's centre.
+EXAMPLES_PER_TOPIC = 5
 
 
 def model_dir() -> pathlib.Path:
@@ -70,13 +81,39 @@ class Corpus:
     embedding: dict
     # Why the other tickets were left out: no_text, no_embedding, stale, other_model.
     skipped: Dict[str, int] = field(default_factory=dict)
+    # Each ticket's Zendesk outcome (None when unset), in the same order as ids.
+    outcomes: List[Optional[str]] = field(default_factory=list)
 
 
-def load_corpus(tickets: Collection) -> Corpus:
+def outcome_query(outcomes: Optional[Sequence[Optional[str]]]) -> dict:
+    """The Mongo filter for tickets with any of outcomes; None (or empty) means every ticket.
+
+    None in outcomes matches tickets whose outcome is unset or missing.
+    """
+    if not outcomes:
+        return {}
+    return {OUTCOME_FIELD: {"$in": list(outcomes)}}
+
+
+def outcome_counts(tickets: Collection) -> List[Tuple[Optional[str], int]]:
+    """(outcome, tickets) for every outcome in the collection, most tickets first; None is unset."""
+    counts = Counter(
+        doc.get(OUTCOME_FIELD) for doc in tickets.find({}, {OUTCOME_FIELD: 1})
+    )
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0] or ""))
+
+
+def load_corpus(
+    tickets: Collection, outcomes: Optional[Sequence[Optional[str]]] = None
+) -> Corpus:
     """Reads the tickets whose stored embedding was made from their current text.
 
     Vectors from different models (or dimensions) can't be clustered together,
     so only the model most tickets were embedded with is used.
+
+    Args:
+        outcomes: Only tickets with one of these outcomes (None for unset);
+            None or empty reads every ticket.
     """
     skipped: Counter = Counter()
     by_model: Dict[tuple, list] = {}
@@ -86,8 +123,9 @@ def load_corpus(tickets: Collection) -> Corpus:
         "transcript": 1,
         "embedding": 1,
         "embedding_meta": 1,
+        OUTCOME_FIELD: 1,
     }
-    for doc in tickets.find({}, projection):
+    for doc in tickets.find(outcome_query(outcomes), projection):
         text = embeddings.TICKET_TEXT(doc)
         meta = doc.get("embedding_meta") or {}
         vector = doc.get("embedding")
@@ -102,19 +140,20 @@ def load_corpus(tickets: Collection) -> Corpus:
         else:
             key = (meta.get("endpoint"), meta.get("model"), meta.get("dimensions"))
             by_model.setdefault(key, []).append(
-                (str(doc.get("zendesk_id")), text, vector)
+                (str(doc.get("zendesk_id")), text, vector, doc.get(OUTCOME_FIELD))
             )
     if not by_model:
         return Corpus([], [], np.empty((0, 0), dtype=np.float32), {}, dict(skipped))
     key, rows = max(by_model.items(), key=lambda item: len(item[1]))
     skipped["other_model"] = sum(len(r) for k, r in by_model.items() if k != key)
-    ids, texts, vectors = zip(*rows)
+    ids, texts, vectors, ticket_outcomes = zip(*rows)
     return Corpus(
         ids=list(ids),
         texts=list(texts),
         vectors=np.asarray(vectors, dtype=np.float32),
         embedding=dict(zip(("endpoint", "model", "dimensions"), key)),
         skipped={k: v for k, v in skipped.items() if v},
+        outcomes=list(ticket_outcomes),
     )
 
 
@@ -249,6 +288,32 @@ def topic_summaries(result: Result) -> List[dict]:
     return sorted(summaries, key=lambda s: (-s["count"], s["topic_id"]))
 
 
+def add_topic_details(
+    summaries: List[dict], result: Result, corpus: Corpus, n: int = EXAMPLES_PER_TOPIC
+) -> List[dict]:
+    """Adds each topic's outcome counts and example ticket IDs to its summary.
+
+    `outcomes`: {outcome: tickets} for the topic, largest first, with an unset
+    outcome under "unset". `examples`: the IDs of up to n of the topic's
+    tickets whose embeddings are nearest its centre, nearest first; IDs only,
+    so a saved run holds no ticket text.
+    """
+    vectors = np.asarray(corpus.vectors, dtype=np.float64)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    unit = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
+    for summary in summaries:
+        rows = [i for i, t in enumerate(result.topics) if t == summary["topic_id"]]
+        counts = Counter(
+            (corpus.outcomes[i] if i < len(corpus.outcomes) else None) or "unset"
+            for i in rows
+        )
+        summary["outcomes"] = dict(counts.most_common())
+        centre = unit[rows].mean(axis=0)
+        nearest = sorted(rows, key=lambda i: -float(unit[i] @ centre))[:n]
+        summary["examples"] = [corpus.ids[i] for i in nearest]
+    return summaries
+
+
 # --- scoring ----------------------------------------------------------------------
 
 
@@ -344,8 +409,12 @@ def save_run(
     comparison: Optional[dict] = None,
     base_dir: Optional[pathlib.Path] = None,
     now: Optional[datetime] = None,
+    outcomes: Optional[Sequence[Optional[str]]] = None,
 ) -> dict:
     """Saves the model, per-ticket topics, charts and run.json; returns the run's details.
+
+    outcomes: the outcomes the corpus was limited to (None: every ticket),
+    recorded under dataset.outcomes.
 
     The model is pickled (BERTopic's other formats need PyTorch or
     safetensors). Load it only from a run directory you made.
@@ -377,10 +446,11 @@ def save_run(
         "dataset": {
             **topic_store.dataset_fingerprint(corpus.texts, corpus.ids),
             "skipped": corpus.skipped,
+            "outcomes": list(outcomes) if outcomes else None,
         },
         "metrics": scores,
         "comparison": comparison,
-        "topics": topic_summaries(result),
+        "topics": add_topic_details(topic_summaries(result), result, corpus),
         "model_dir": str(run_dir),
         "charts": save_charts(result, run_dir),
     }
@@ -458,6 +528,7 @@ def format_report(run: dict, top: int = 15) -> str:
         f"BERTopic run {run['run_id']}: {m['num_topics']} topics from {m['ticket_count']} tickets "
         f"({run['embedding'].get('model')} @ {run['embedding'].get('dimensions')})",
         f"Outliers: {m['outliers_before']} before reassignment, {m['outliers_after']} after",
+        f"Outcomes: {describe_outcomes((run.get('dataset') or {}).get('outcomes'))}",
         "",
         f"{'':<22}{'topics':>8}{'c_v':>8}{'diversity':>11}",
         f"{'BERTopic':<22}{m['num_topics']:>8}{fmt(m['coherence_c_v']):>8}{fmt(m['topic_diversity']):>11}",
@@ -474,11 +545,29 @@ def format_report(run: dict, top: int = 15) -> str:
         lines.append(
             f"{rank:>3}. {topic['share']:>4.0%}  ({topic['count']:>4})  {', '.join(topic['words'])}"
         )
+        if topic.get("outcomes"):
+            lines.append(f"{'':>7}outcomes: {format_outcome_counts(topic['outcomes'])}")
     if len(run["topics"]) > top:
         lines.append(
             f"     … {len(run['topics']) - top} more in {run['model_dir']}/run.json"
         )
     return "\n".join(lines)
+
+
+def describe_outcomes(outcomes: Optional[Sequence[Optional[str]]]) -> str:
+    """The outcomes a run was limited to, for display; every ticket when there's no limit."""
+    if not outcomes:
+        return "every ticket"
+    return ", ".join(o or "unset" for o in outcomes)
+
+
+def format_outcome_counts(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{outcome} {n}" for outcome, n in counts.items())
+
+
+def _outcome_arg(value: str) -> Optional[str]:
+    """--outcome value: "none" (any case) stands for tickets with no outcome."""
+    return None if value.strip().lower() in ("none", "unset") else value.strip()
 
 
 def _positive_int(value: str) -> int:
@@ -527,6 +616,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"write each ticket's topic to its `{ASSIGNMENT_FIELD}` field in Mongo",
     )
+    parser.add_argument(
+        "--outcome",
+        dest="outcomes",
+        action="append",
+        type=_outcome_arg,
+        metavar="OUTCOME",
+        help="only tickets with this Zendesk outcome (repeatable; 'none' for no outcome)",
+    )
     return parser
 
 
@@ -540,7 +637,7 @@ def main(argv: List[str]) -> int:
     from wrangler import DataWrangler
 
     tickets = DataWrangler.get_tickets_collection()
-    corpus = load_corpus(tickets)
+    corpus = load_corpus(tickets, args.outcomes)
     skipped = (
         ", ".join(f"{n} {why.replace('_', ' ')}" for why, n in corpus.skipped.items())
         or "none"
@@ -580,6 +677,7 @@ def main(argv: List[str]) -> int:
         topic_store.preprocessing_info(nlp, stop_words),
         metrics(result, tokens),
         comparison,
+        outcomes=args.outcomes,
     )
     print()
     print(format_report(run))

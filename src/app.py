@@ -1085,7 +1085,8 @@ class MainWindow(QMainWindow, QDialog):
     # --- BERTopic --------------------------------------------------------------
 
     def start_bertopic_training(self) -> None:
-        """Asks for BERTopic options, then trains and saves a run on run_thread."""
+        """Reads the tickets' outcomes, asks for BERTopic options, then trains and
+        saves a run on run_thread."""
         if not os.getenv("MONGO_URI"):
             QMessageBox.warning(
                 self,
@@ -1099,11 +1100,25 @@ class MainWindow(QMainWindow, QDialog):
                 self, "Busy", "Wait for the current saved-run job to finish."
             )
             return
-        dialog = BertopicOptionsDialog(bertopic_runs.lda_runs(), self)
+        # The outcome counts come from Mongo, so read them off the GUI thread.
+        self._start_run_job(
+            lambda: bertopic_model.outcome_counts(self._tickets_collection()),
+            "Reading ticket outcomes",
+            self._ask_bertopic_options,
+        )
+
+    def _tickets_collection(self):
+        return get_database()[os.environ.get("MONGO_COLLECTION", "tickets")]
+
+    def _ask_bertopic_options(self, outcome_counts) -> None:
+        dialog = BertopicOptionsDialog(
+            bertopic_runs.lda_runs(), outcome_counts, parent=self
+        )
         if dialog.exec_() != QDialog.Accepted:
             return
-        options = dialog.options()
+        self._train_bertopic(dialog.options())
 
+    def _train_bertopic(self, options: bertopic_runs.TrainOptions) -> None:
         self.bertopic_button.setEnabled(False)
         # No cancel: a fit in progress can't be interrupted.
         self.pdialog = QProgressDialog("Training BERTopic model...", None, 0, 0, self)
@@ -1137,7 +1152,7 @@ class MainWindow(QMainWindow, QDialog):
         # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in bertopic_run_log.
         self._start_run_job(
             lambda: bertopic_runs.train_and_save(
-                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")],
+                self._tickets_collection(),
                 nlp,
                 stop_words,
                 options,
@@ -1161,8 +1176,13 @@ class MainWindow(QMainWindow, QDialog):
         # This runs as a Qt slot, where an unhandled exception aborts the app.
         try:
             # Kept on self: a dialog with no reference is garbage-collected and closes.
+            subjects = None
+            if os.getenv("MONGO_URI"):
+                subjects = lambda r: bertopic_runs.example_subjects(
+                    self._tickets_collection(), r
+                )
             self.bertopic_results_dialog = BertopicResultsDialog(
-                run, bertopic_runs.chart_paths(run), self
+                run, bertopic_runs.chart_paths(run), self, subjects=subjects
             )
             self.bertopic_results_dialog.show()
         except Exception as e:

@@ -19,7 +19,9 @@ downloaded and verified before it is opened, into <BERTOPIC_MODEL_DIR>/<run_id>
 only: its model is a pickle, which runs code when loaded.
 """
 
+import csv
 import dataclasses
+import io
 import os
 import pathlib
 from dataclasses import dataclass
@@ -54,6 +56,8 @@ class TrainOptions:
     compare_lda: Optional[str] = None
     # Write each ticket's topic to `embedding_topic` in Mongo.
     assign: bool = False
+    # Only tickets with these Zendesk outcomes (None for unset); None: every ticket.
+    outcomes: Optional[List[Optional[str]]] = None
 
     def settings(self) -> bertopic_model.Settings:
         return bertopic_model.Settings(
@@ -87,8 +91,14 @@ def train_and_save(
         ValueError: no tickets have a current embedding, or too few to find topics.
     """
     status("Reading tickets and their stored embeddings...")
-    corpus = bertopic_model.load_corpus(tickets)
+    corpus = bertopic_model.load_corpus(tickets, options.outcomes)
     if not corpus.ids:
+        if options.outcomes:
+            raise ValueError(
+                "No tickets with the chosen outcomes "
+                f"({bertopic_model.describe_outcomes(options.outcomes)}) have an embedding "
+                "made from their current text."
+            )
         raise ValueError(
             "No tickets have an embedding made from their current text. "
             "Embed them first: cd src && python -m embeddings backfill"
@@ -118,6 +128,7 @@ def train_and_save(
         scores,
         comparison,
         base_dir=base_dir,
+        outcomes=options.outcomes,
     )
     run["warnings"] = warnings
     upload(run, storage, status)
@@ -302,8 +313,10 @@ def summary_text(run: dict) -> str:
     skipped = (run.get("dataset") or {}).get("skipped") or {}
     text = (
         f"{m.get('ticket_count', '?')} tickets embedded with {embedding.get('model', '?')} "
-        f"({embedding.get('dimensions', '?')} dimensions). Outliers: {m.get('outliers_before', '?')} "
-        f"before reassignment, {m.get('outliers_after', '?')} after."
+        f"({embedding.get('dimensions', '?')} dimensions). Outcomes: "
+        f"{bertopic_model.describe_outcomes((run.get('dataset') or {}).get('outcomes'))}. "
+        f"Outliers: {m.get('outliers_before', '?')} before reassignment, "
+        f"{m.get('outliers_after', '?')} after."
     )
     if skipped:
         text += (
@@ -315,14 +328,84 @@ def summary_text(run: dict) -> str:
 
 
 def format_topics(run: dict) -> str:
-    """One numbered line per topic, largest first."""
+    """Each topic, largest first: its words, then (for runs that have them) its
+    outcomes and example ticket IDs."""
     topics = run.get("topics") or []
     if not topics:
         return "No topics were found."
-    return "\n".join(
-        f"{rank}. {t['share']:.0%} of tickets ({t['count']}): {', '.join(t['words'])}"
-        for rank, t in enumerate(topics, start=1)
-    )
+    lines = []
+    for rank, t in enumerate(topics, start=1):
+        lines.append(
+            f"{rank}. {t['share']:.0%} of tickets ({t['count']}): {', '.join(t['words'])}"
+        )
+        if t.get("outcomes"):
+            lines.append(
+                f"   Outcomes: {bertopic_model.format_outcome_counts(t['outcomes'])}"
+            )
+        if t.get("examples"):
+            lines.append(f"   Example tickets: {', '.join(t['examples'])}")
+    return "\n".join(lines)
+
+
+# --- topic list for curation ----------------------------------------------------------
+
+TOPIC_LIST_COLUMNS = (
+    "rank",
+    "topic_id",
+    "tickets",
+    "share",
+    "outcomes",
+    "top_words",
+    "example_tickets",
+    "example_subjects",
+    "proposed_name",
+    "decision",
+)
+
+
+def example_subjects(tickets: Optional[Collection], run: dict) -> Dict[str, str]:
+    """{zendesk_id: subject} for the run's example tickets, read from Mongo; {} without it.
+
+    Subjects come from Mongo, not the run, because a saved run holds no ticket text.
+    """
+    ids = sorted({i for t in run.get("topics") or [] for i in t.get("examples") or []})
+    if tickets is None or not ids:
+        return {}
+    return {
+        str(doc["zendesk_id"]): doc.get("subject") or ""
+        for doc in tickets.find(
+            {"zendesk_id": {"$in": ids}}, {"zendesk_id": 1, "subject": 1}
+        )
+    }
+
+
+def topic_list_csv(run: dict, subjects: Optional[Dict[str, str]] = None) -> str:
+    """The run's topics as CSV for a person to curate: one row per topic, largest first.
+
+    proposed_name and decision are left blank to fill in (e.g. keep, merge
+    into N, drop). Subjects appear when given (see example_subjects).
+    """
+    subjects = subjects or {}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(TOPIC_LIST_COLUMNS)
+    for rank, t in enumerate(run.get("topics") or [], start=1):
+        examples = t.get("examples") or []
+        writer.writerow(
+            [
+                rank,
+                t["topic_id"],
+                t["count"],
+                f"{t['share']:.1%}",
+                bertopic_model.format_outcome_counts(t.get("outcomes") or {}),
+                ", ".join(t["words"]),
+                ", ".join(examples),
+                " | ".join(subjects[i] for i in examples if subjects.get(i)),
+                "",
+                "",
+            ]
+        )
+    return out.getvalue()
 
 
 def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Path:

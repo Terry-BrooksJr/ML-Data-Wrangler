@@ -301,3 +301,77 @@ def test_assign_topics_writes_embedding_topic_and_leaves_topic_alone():
     assert one["embedding_topic"]["topic"] == 0
     assert one["embedding_topic"]["words"] == ["csv", "import", "error", "row", "fail"]
     assert tickets.find_one({"zendesk_id": "2"})["embedding_topic"]["topic"] == -1
+
+
+# --- outcomes ---------------------------------------------------------------------
+
+
+def _outcome_tickets():
+    tickets = mongomock.MongoClient().support_db.tickets
+    for zid, subject, outcome in [
+        ("1", "csv import fails", "client_education"),
+        ("2", "sso login loop", "learnosity_bug"),
+        ("3", "report export", None),
+    ]:
+        doc = _ticket(zid, subject, [0.1, 0.2], _meta(subject))
+        if outcome is not None:
+            doc["historical_outcome"] = outcome
+        tickets.insert_one(doc)
+    # Stored as null, not missing: both count as unset.
+    tickets.insert_one(
+        {
+            **_ticket("4", "api limits", [0.3, 0.4], _meta("api limits")),
+            "historical_outcome": None,
+        }
+    )
+    return tickets
+
+
+def test_load_corpus_filters_by_outcome_and_keeps_each_outcome():
+    tickets = _outcome_tickets()
+
+    every = bertopic_model.load_corpus(tickets)
+    assert every.ids == ["1", "2", "3", "4"]
+    assert every.outcomes == ["client_education", "learnosity_bug", None, None]
+
+    education = bertopic_model.load_corpus(tickets, ["client_education"])
+    assert education.ids == ["1"] and education.outcomes == ["client_education"]
+
+    unset = bertopic_model.load_corpus(tickets, [None])
+    assert unset.ids == ["3", "4"]
+
+    both = bertopic_model.load_corpus(tickets, ["learnosity_bug", None])
+    assert both.ids == ["2", "3", "4"]
+
+
+def test_outcome_counts_most_first_with_unset_as_none():
+    tickets = _outcome_tickets()
+    assert bertopic_model.outcome_counts(tickets) == [
+        (None, 2),
+        ("client_education", 1),
+        ("learnosity_bug", 1),
+    ]
+
+
+def test_topic_details_list_outcomes_and_nearest_examples(trained):
+    corpus, _, result = trained
+    corpus.outcomes = [
+        "client_education" if i % 2 else None for i in range(len(corpus.ids))
+    ]
+    summaries = bertopic_model.add_topic_details(
+        bertopic_model.topic_summaries(result), result, corpus, n=3
+    )
+    unit = corpus.vectors / np.linalg.norm(corpus.vectors, axis=1, keepdims=True)
+    for summary in summaries:
+        assert sum(summary["outcomes"].values()) == summary["count"]
+        assert set(summary["outcomes"]) <= {"client_education", "unset"}
+        rows = [i for i, t in enumerate(result.topics) if t == summary["topic_id"]]
+        assert len(summary["examples"]) == 3
+        assert {corpus.ids.index(e) for e in summary["examples"]} <= set(rows)
+        # Nearest the topic's centre first.
+        centre = unit[rows].mean(axis=0)
+        closeness = [
+            float(unit[corpus.ids.index(e)] @ centre) for e in summary["examples"]
+        ]
+        assert closeness == sorted(closeness, reverse=True)
+        assert closeness[0] == pytest.approx(max(float(unit[i] @ centre) for i in rows))

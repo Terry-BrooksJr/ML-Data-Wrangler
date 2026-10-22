@@ -152,6 +152,23 @@ one whose files aren't here before showing its charts. Retry a failed upload
 with `cd src && python -m model_storage upload --bertopic [RUN_ID ...]`. The
 same can be run from the command line: `cd src && python -m bertopic_model --help`.
 
+#### Finding themes within an outcome
+
+The options window also lists each Zendesk ticket outcome (custom field
+27219391, stored on each ticket as `historical_outcome`) with its ticket
+count, all ticked. Untick outcomes to train on the rest only: for example,
+only `client_education`, to see what that catch-all bucket actually holds.
+The run records which outcomes it used.
+
+Each topic then shows how many of its tickets have each outcome and the five
+tickets nearest its centre (by ID; a saved run holds no ticket text). **Export
+Topic List…** in the results window writes a CSV with one row per topic
+(size, outcomes, top words, example tickets and, read from MongoDB, their
+subjects) and blank `proposed_name` and `decision` columns to curate the
+topics into a reporting list. From the command line:
+`cd src && python -m bertopic_model --outcome client_education` (repeat
+`--outcome` for several; `--outcome none` for tickets with no outcome).
+
 ### Saving models to S3
 
 With **Bucket** and **Signing key** set under Settings > Model storage (S3 /
