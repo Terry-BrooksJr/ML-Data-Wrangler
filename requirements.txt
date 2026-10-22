@@ -8,11 +8,11 @@ aiolimiter==1.3.0
     # via voyageai
 aiosignal==1.4.0
     # via aiohttp
-annotated-doc==0.0.5 ; python_full_version != '3.13.*'
+annotated-doc==0.0.5
     # via typer
-annotated-types==0.8.0 ; python_full_version != '3.13.*'
+annotated-types==0.8.0
     # via pydantic
-anthropic==1.13.0
+anthropic==1.17.0
     # via ml-data-wrangler
 anyio==4.15.1
     # via
@@ -39,8 +39,7 @@ catalogue==2.0.10
     #   spacy
     #   srsly
     #   thinc
-    #   weasel
-certifi==2026.7.22
+certifi==2026.10.19
     # via
     #   httpcore
     #   httpx
@@ -51,8 +50,7 @@ click==8.5.0
     # via
     #   huggingface-hub
     #   nltk
-    #   typer
-cloudpathlib==0.26.0 ; python_full_version != '3.13.*'
+cloudpathlib==0.26.0
     # via weasel
 cloudpickle==3.1.2
     # via joblib
@@ -62,11 +60,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   tqdm
     #   typer
     #   wasabi
-confection==0.0.4 ; python_full_version == '3.13.*'
-    # via
-    #   thinc
-    #   weasel
-confection==0.1.5 ; python_full_version != '3.13.*'
+confection==0.1.5
     # via
     #   thinc
     #   weasel
@@ -202,7 +196,7 @@ llvmlite==0.50.0
     #   pynndescent
 loguru==0.7.3
     # via ml-data-wrangler
-markdown-it-py==4.2.0 ; python_full_version != '3.13.*'
+markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.4
     # via jinja2
@@ -214,7 +208,7 @@ matplotlib==3.11.2 ; python_full_version >= '3.11'
     # via
     #   ml-data-wrangler
     #   seaborn
-mdurl==0.1.2 ; python_full_version != '3.13.*'
+mdurl==0.1.2
     # via markdown-it-py
 mpmath==1.3.0 ; sys_platform == 'never'
     # via sympy
@@ -268,6 +262,8 @@ numpy==1.26.4
     #   transformers
     #   umap-learn
     #   voyageai
+opentelemetry-api==1.45.1
+    # via anthropic
 orjson==3.13.0 ; python_full_version != '3.13.*' and platform_python_implementation != 'PyPy'
     # via langsmith
 packaging==26.3
@@ -293,10 +289,6 @@ pandas==3.0.6 ; python_full_version >= '3.11' and python_full_version < '3.14'
     #   ml-data-wrangler
     #   pyldavis
     #   seaborn
-pathlib-abc==0.5.2 ; python_full_version == '3.13.*'
-    # via pathy
-pathy==0.14.2 ; python_full_version == '3.13.*'
-    # via weasel
 pillow==12.3.0
     # via
     #   matplotlib
@@ -311,15 +303,7 @@ propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
-pydantic==1.10.26 ; python_full_version == '3.13.*'
-    # via
-    #   anthropic
-    #   confection
-    #   spacy
-    #   thinc
-    #   voyageai
-    #   weasel
-pydantic==2.14.1 ; python_full_version != '3.13.*'
+pydantic==2.14.1
     # via
     #   anthropic
     #   confection
@@ -329,9 +313,9 @@ pydantic==2.14.1 ; python_full_version != '3.13.*'
     #   thinc
     #   voyageai
     #   weasel
-pydantic-core==2.50.1 ; python_full_version != '3.13.*'
+pydantic-core==2.50.1
     # via pydantic
-pygments==2.21.0 ; python_full_version != '3.13.*'
+pygments==2.21.0
     # via rich
 pyldavis==3.4.1
     # via ml-data-wrangler
@@ -380,7 +364,7 @@ requests==2.34.2
     #   weasel
 requests-toolbelt==1.0.0 ; python_full_version != '3.13.*'
     # via langsmith
-rich==15.0.0 ; python_full_version != '3.13.*'
+rich==15.0.0
     # via typer
 s3transfer==0.19.2
     # via boto3
@@ -422,18 +406,14 @@ setuptools==84.0.0
     #   spacy
     #   thinc
     #   torch
-shellingham==1.5.4 ; python_full_version != '3.13.*'
+shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
-smart-open==7.7.1 ; python_full_version != '3.13.*'
+smart-open==7.7.1
     # via
     #   gensim
     #   weasel
-smart-open==8.0.3 ; python_full_version == '3.13.*'
-    # via
-    #   gensim
-    #   pathy
 sniffio==1.3.1
     # via
     #   anthropic
@@ -480,23 +460,18 @@ tqdm==4.70.1
     #   spacy
     #   transformers
     #   umap-learn
-transformers==5.19.0 ; sys_platform == 'never'
+transformers==5.20.2 ; sys_platform == 'never'
     # via sentence-transformers
 truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   httpcore2
     #   httpx2
-typer==0.7.0 ; python_full_version == '3.13.*'
-    # via
-    #   spacy
-    #   transformers
-    #   weasel
-typer==0.27.3 ; python_full_version != '3.13.*'
+typer==0.27.3
     # via
     #   spacy
     #   transformers
     #   typer-slim
-typer-slim==0.24.0 ; python_full_version != '3.13.*'
+typer-slim==0.24.0
     # via weasel
 typing-extensions==4.16.0
     # via
@@ -512,13 +487,14 @@ typing-extensions==4.16.0
     #   langchain-protocol
     #   langsmith
     #   multidict
+    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   pyqt-siliconui
     #   sentence-transformers
     #   torch
     #   typing-inspection
-typing-inspection==0.4.4 ; python_full_version != '3.13.*'
+typing-inspection==0.4.4
     # via pydantic
 tzdata==2026.5 ; python_full_version < '3.11' or python_full_version >= '3.14' or sys_platform == 'emscripten' or sys_platform == 'win32'
     # via pandas
@@ -545,9 +521,7 @@ wasabi==1.1.3
     #   spacy
     #   thinc
     #   weasel
-weasel==0.1.1 ; python_full_version == '3.13.*'
-    # via spacy
-weasel==0.4.3 ; python_full_version != '3.13.*'
+weasel==0.4.3
     # via spacy
 websockets==16.1.1 ; python_full_version < '3.11'
     # via langsmith
