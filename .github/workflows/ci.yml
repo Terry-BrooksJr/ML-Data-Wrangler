@@ -1,6 +1,12 @@
-# Tests (required), plus lint and format checks. The last two are report-only
-# for now: most of the repo isn't black-formatted yet and prospector still finds
-# ~185 messages. Drop their continue-on-error once those are cleaned up.
+# One pipeline, run in order: Lint -> Tests -> Requirements -> Installer.
+# Each job waits for the one before it and runs only if that succeeded.
+#
+# - Lint and format checks are report-only for now (continue-on-error): most
+#   of the repo isn't black-formatted yet and prospector still finds ~185
+#   messages. Drop their continue-on-error once those are cleaned up.
+# - Installer builds Lasso.app and checks it starts. It runs on every push to
+#   main (and when run by hand), once every other job has passed; pull
+#   requests stop after Requirements.
 name: CI
 
 on:
@@ -9,16 +15,44 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A new push to a pull request cancels its older run. Pushes to main are never
+# cancelled, so each one gets its own installer build.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: isort
+        continue-on-error: true
+        run: uv run isort --check-only --diff src tests
+
+      - name: black
+        continue-on-error: true
+        run: uv run black --check src tests
+
+      - name: prospector
+        continue-on-error: true
+        run: uv run prospector src --no-autodetect
+
   test:
     name: Tests (${{ matrix.os }})
+    needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,33 +84,9 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-  lint:
-    name: Lint and format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --locked
-
-      - name: isort
-        continue-on-error: true
-        run: uv run isort --check-only --diff src tests
-
-      - name: black
-        continue-on-error: true
-        run: uv run black --check src tests
-
-      - name: prospector
-        continue-on-error: true
-        run: uv run prospector src --no-autodetect
-
   requirements:
     name: requirements.txt matches uv.lock
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -90,3 +100,46 @@ jobs:
             echo "::error file=requirements.txt::Out of date with uv.lock; run 'task reqs' and commit it."
             exit 1
           }
+
+  # PyInstaller doesn't cross-compile, and the app ships for Apple Silicon, so
+  # this runs on an arm64 macOS runner.
+  installer:
+    name: Build and launch Lasso.app
+    # Listed in full so it's plain that every check must pass first.
+    needs: [lint, test, requirements]
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build Lasso.app
+        run: packaging/build.sh
+
+      # A missing hidden import or data file only shows up when the bundle
+      # runs. The app has no exit-after-start mode, so: launch it offscreen and
+      # fail if it exits within 45 seconds.
+      - name: Launch the built app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          dist/Lasso.app/Contents/MacOS/Lasso >launch.log 2>&1 &
+          pid=$!
+          for _ in $(seq 45); do
+            sleep 1
+            if ! kill -0 "$pid" 2>/dev/null; then
+              wait "$pid" && code=0 || code=$?
+              echo "::error::Lasso exited after starting (exit code $code)"
+              cat launch.log
+              exit 1
+            fi
+          done
+          kill "$pid"
+          echo "Lasso was still running after 45s"
+          cat launch.log
