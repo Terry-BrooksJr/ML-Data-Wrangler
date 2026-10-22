@@ -73,6 +73,18 @@ def tickets():
     return mongomock.MongoClient().support_db.tickets
 
 
+def test_custom_fields_are_read_by_id_not_position(data_dir):
+    # Zendesk doesn't promise the order of custom fields.
+    reordered = {**TICKET, "fields": list(reversed(TICKET["fields"]))}
+    (data_dir / "tickets-only.json").write_text(json.dumps([reordered]))
+    wrangler = DataWrangler(
+        comments_dir=data_dir / "comments", ticket_file=data_dir / "tickets-only.json"
+    )
+    doc = wrangler.ticket_to_document(101)
+    assert doc["request_type"] == "developer_support"
+    assert doc["historical_outcome"] == "learnosity_bug"
+
+
 def test_document_maps_fields(wrangler):
     doc = wrangler.ticket_to_document(101)
 
