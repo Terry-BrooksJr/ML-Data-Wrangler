@@ -1,15 +1,18 @@
 """System prompt for the ticket triage decision engine.
 
-Copied verbatim from AI_CODER_INTEGRATION_BRIEF.md section 4.1, with open
-item #1 (leadership @mention recipients) now filled in as "Leadership
-recipients". Do not paraphrase or compress it: the precedence and exclusion
-wording is doing real work. The [PLACEHOLDER: ...] for available signals is
+This file is the prompt's reference copy. It began as section 4.1 of the
+AI-coder integration brief (no longer in the repo), with open item #1
+(leadership @mention recipients) since filled in as "Leadership recipients",
+its table rendered from leadership.py. Do not paraphrase or compress it: the
+precedence and exclusion wording is doing real work. The [PLACEHOLDER: ...] for available signals is
 intentionally left unfilled.
 
 TODO(open item #4): confirmed list of available signals.
 """
 
 import hashlib
+
+from . import leadership
 
 SYSTEM_INSTRUCTIONS = """You are a ticket triage agent for API Support. You review Zendesk tickets (with
 optional linked Jira issues) and classify each one into exactly one category, or
@@ -136,17 +139,7 @@ Identify the owner by Zendesk user ID: find the row below whose user ID equals
 `assignee` exactly. Match by ID only, never by a name in the ticket. An
 assignee that isn't in this table, or is missing, is an unidentified owner.
 
-  User ID          Person               Role            Team Lead
-  1085778551       Rich Shupe           VP of Support   -
-  361165286529     Allain Dollete       Team Lead       -
-  361165271809     Horacio Balserio     Team Lead       -
-  384720527257     Stephen Sayage       Engineer        Allain Dollete
-  385812489257     Michael Fares        Engineer        Allain Dollete
-  372535774197     Kit Amiel Tumulak    Engineer        Allain Dollete
-  33366497853597   Terry Bu             Engineer        Allain Dollete
-  12289991012893   Will Griffiths       Engineer        Horacio Balserio
-  384720516977     Anthony Mai          Engineer        Horacio Balserio
-  387134954297     Chris Short          Engineer        Horacio Balserio
+@@LEADERSHIP_ROSTER@@
 
 Rules:
 1. Rich Shupe is a recipient on every leadership escalation, unless he owns the
@@ -217,6 +210,13 @@ Respond with a single JSON object:
                                         // "Leadership recipients"
 }
 """
+
+# The roster table comes from leadership.py, which guards.py also checks replies
+# against, so the prompt and the check can't disagree.
+assert SYSTEM_INSTRUCTIONS.count("@@LEADERSHIP_ROSTER@@") == 1
+SYSTEM_INSTRUCTIONS = SYSTEM_INSTRUCTIONS.replace(
+    "@@LEADERSHIP_ROSTER@@", leadership.roster_table()
+)
 
 # Recorded on every review so a classification can be traced to the exact
 # prompt text that produced it (issue #16). Changes whenever the prompt does.

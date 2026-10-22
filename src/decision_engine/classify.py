@@ -130,7 +130,7 @@ def get_client() -> anthropic.Anthropic:
     """Builds the client on first use so importing this module needs no secrets.
 
     The SDK retries only 408/409/429/5xx and connection errors (with
-    backoff); 400/401/402/413 are raised immediately, as the brief requires.
+    backoff); 400/401/402/413 are raised immediately: retrying them can't help.
     """
     return anthropic.Anthropic(
         api_key=os.environ["CHEAPER_INFERENCE_API_KEY"],
@@ -140,7 +140,9 @@ def get_client() -> anthropic.Anthropic:
     )
 
 
-def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
+def classify_ticket(
+    ticket_payload: str, reengage_count: int = 0, assignee: Optional[str] = None
+) -> dict:
     """Classifies one ticket, escalating through the configured models.
 
     The primary model classifies first; if that call fails (an API error, or
@@ -159,13 +161,15 @@ def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
         ticket_payload: The output of build_ticket_payload.
         reengage_count: Re-engage attempts the ticket already has, for the
             re-engage limit guard.
+        assignee: The ticket's assignee (Zendesk user ID), which decides a
+            leadership escalation's recipients (guards.apply_guards).
 
     Raises:
         anthropic.APIError or EngineError: when no model gave a usable answer.
     """
     primary = primary_model()
     try:
-        result = _classify_with(primary, ticket_payload, reengage_count)
+        result = _classify_with(primary, ticket_payload, reengage_count, assignee)
     except (anthropic.APIError, EngineError) as e:
         secondary = secondary_model()
         if secondary in (None, primary):
@@ -174,7 +178,7 @@ def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
             )
             raise
         logger.warning(f"Primary model failed ({e}); retrying on secondary model.")
-        result = _classify_with(secondary, ticket_payload, reengage_count)
+        result = _classify_with(secondary, ticket_payload, reengage_count, assignee)
 
     if not needs_confirmation(result):
         return result
@@ -186,7 +190,9 @@ def classify_ticket(ticket_payload: str, reengage_count: int = 0) -> dict:
         )
         return result
     try:
-        confirmed = _classify_with(confirmation, ticket_payload, reengage_count)
+        confirmed = _classify_with(
+            confirmation, ticket_payload, reengage_count, assignee
+        )
     except (anthropic.APIError, EngineError) as e:
         logger.warning(f"Confirmation model failed ({e}); keeping the first result.")
         return result
@@ -243,7 +249,12 @@ def _usage(response) -> dict:
     }
 
 
-def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> dict:
+def _classify_with(
+    model: str,
+    ticket_payload: str,
+    reengage_count: int = 0,
+    assignee: Optional[str] = None,
+) -> dict:
     started = time.monotonic()
     response = get_client().messages.create(
         model=model,
@@ -286,7 +297,7 @@ def _classify_with(model: str, ticket_payload: str, reengage_count: int = 0) -> 
             f"{kind} from model ({len(raw_text)}-character reply): {e}", model, audit
         ) from e
 
-    apply_guards(result, reengage_count)
+    apply_guards(result, reengage_count, assignee)
     result["model_version"] = model
     result["audit"] = audit
     return result

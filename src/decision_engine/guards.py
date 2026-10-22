@@ -6,7 +6,9 @@ apply_guards then overrides a valid reply that breaks a hard rule, recording
 each override in `reasoning` and `guard_overrides`.
 """
 
-from typing import List
+from typing import List, Optional
+
+from . import leadership
 
 CLASSIFICATIONS = (
     "escalate_leadership",
@@ -110,12 +112,38 @@ def _override(result: dict, message: str) -> None:
     result["reasoning"] = f"{message} Original reasoning: {result.get('reasoning', '')}"
 
 
-def apply_guards(result: dict, reengage_count: int = 0) -> dict:
+def _route_leadership(result: dict, assignee: Optional[str]) -> None:
+    """Sets leadership_recipient from the assignee (leadership.recipients_for),
+    and makes the internal note open with the routing review when one is needed."""
+    expected, review = leadership.recipients_for(assignee)
+    given = result.get("leadership_recipient")
+    if set(leadership.parse_recipients(given)) != set(expected):
+        _override(
+            result,
+            f"Set leadership_recipient to {leadership.format_recipients(expected) or 'nobody'} "
+            f"(model gave {given!r}): recipients follow the assignee.",
+        )
+    # Same people in another order is tidied without an override.
+    result["leadership_recipient"] = leadership.format_recipients(expected)
+    note = result.get("internal_note") or ""
+    if review and not note.startswith(leadership.REVIEW_PREFIX):
+        result["internal_note"] = f"{leadership.REVIEW_PREFIX} {review}" + (
+            f"\n\n{note}" if note else ""
+        )
+        _override(result, f"Added the routing review note: {review}")
+
+
+def apply_guards(
+    result: dict, reengage_count: int = 0, assignee: Optional[str] = None
+) -> dict:
     """Overrides a validated reply that breaks a hard rule.
 
     Args:
         result: A reply that passed validate_reply. Modified in place.
         reengage_count: How many re-engage attempts the ticket already has.
+        assignee: The ticket's assignee (Zendesk user ID) the reply was made
+            for; it decides a leadership escalation's recipients. None means
+            the ticket has no assignee.
 
     Returns:
         The same dict.
@@ -164,6 +192,9 @@ def apply_guards(result: dict, reengage_count: int = 0) -> dict:
         _override(
             result, "Cleared leadership_recipient: only escalate_leadership names one."
         )
+
+    if result["classification"] == "escalate_leadership":
+        _route_leadership(result, assignee)
 
     # A tag that disagreed with the model's own classification is an override
     # worth recording; one that only trails a guard's change above is not.
