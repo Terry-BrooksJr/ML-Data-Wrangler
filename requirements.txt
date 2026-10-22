@@ -311,7 +311,7 @@ propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
-pydantic==1.10.26 ; python_full_version == '3.13.*'
+pydantic==2.14.1 ; python_full_version == '3.13.*'
     # via
     #   anthropic
     #   confection
