@@ -480,7 +480,7 @@ tqdm==4.70.1
     #   spacy
     #   transformers
     #   umap-learn
-transformers==5.19.0 ; sys_platform == 'never'
+transformers==5.20.1 ; sys_platform == 'never'
     # via sentence-transformers
 truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
