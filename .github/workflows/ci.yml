@@ -6,6 +6,8 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags (v0.1.0, ...) also build and test the macOS .pkg.
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -29,7 +31,7 @@ jobs:
       # No display on the runners; the Qt tests render offscreen.
       QT_QPA_PLATFORM: offscreen
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Qt runtime libraries
         if: runner.os == 'Linux'
@@ -54,7 +56,7 @@ jobs:
     name: Lint and format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -79,7 +81,7 @@ jobs:
     name: requirements.txt matches uv.lock
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
 
@@ -90,13 +92,18 @@ jobs:
             echo "::error file=requirements.txt::Out of date with uv.lock; run 'task reqs' and commit it."
             exit 1
           }
+
+  # PyInstaller doesn't cross-compile, and the installer is Apple Silicon only,
+  # so this runs on an arm64 macOS runner. Only after the tests and the
+  # requirements check pass, so a failed run never publishes an installer.
   macos-pkg:
     name: Build and upload the macOS .pkg
+    needs: [test, requirements]
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -115,24 +122,22 @@ jobs:
           path: dist/Lasso-*.pkg
           retention-days: 14
           compression-level: 0
+
+  # Installs the uploaded .pkg on a fresh runner, the way a person would get
+  # it. Skipped whenever macos-pkg is, so it needs no condition of its own.
   test-macos-pkg:
     name: Test the macOS .pkg
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+    needs: macos-pkg
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
       - name: Download the installer
         uses: actions/download-artifact@v4
         with:
-          name: dist/Lasso-macos-pkg
+          name: Lasso-macos-pkg
+          path: dist
 
-          # The runner is throwaway, so install for real: this exercises the
+      # The runner is throwaway, so install for real: this exercises the
       # installer's architecture and macOS version checks and the
       # /Applications install location, not just that productbuild ran.
       - name: Install the .pkg
@@ -159,5 +164,4 @@ jobs:
           kill "$pid"
           echo "Lasso was still running after 45s"
           cat launch.log
-
 
