@@ -133,34 +133,59 @@ def test_train_never_loads_pytorch(trained):
     assert "torch" not in sys.modules and "sentence_transformers" not in sys.modules
 
 
-def test_train_reassigns_outliers_by_default():
+class _FixedClusters:
+    """Stands in for HDBSCAN: fit() yields these labels (OUTLIER for an outlier)."""
+
+    def __init__(self, labels):
+        self.labels = np.asarray(labels)
+
+    def fit(self, X, y=None):
+        self.labels_ = self.labels
+        return self
+
+
+def test_train_reassigns_outliers_by_default(monkeypatch):
+    # Which tickets UMAP and HDBSCAN leave as outliers depends on the platform's
+    # numerics (a small isolated group lands in a topic on some machines and not
+    # others), so the clustering is fixed here: this tests train()'s handling of
+    # outliers, and test_train_finds_one_topic_per_theme the real clustering.
+    from bertopic.dimensionality import BaseDimensionalityReduction
+
     corpus, tokens = _corpus()
-    # Five near-identical tickets far from the rest: too few for a topic of 10.
+    n_themed = len(corpus.ids)
+    # Five tickets right next to ticket 1's theme, left as outliers.
     rng = np.random.default_rng(1)
-    stray = (rng.normal(size=DIMS) * 20 + rng.normal(size=(5, DIMS)) * 0.1).astype(
-        np.float32
-    )
+    stray = (corpus.vectors[1] + rng.normal(size=(5, DIMS)) * 0.1).astype(np.float32)
     corpus.ids += [str(9000 + i) for i in range(5)]
     corpus.texts += ["odd one"] * 5
     corpus.vectors = np.vstack([corpus.vectors, stray])
     tokens = tokens + [["odd", "one"]] * 5
+    labels = [i % len(THEMES) for i in range(n_themed)] + [bertopic_model.OUTLIER] * 5
 
+    build = bertopic_model.build_model
+
+    def fixed_clusters(settings, n_docs):
+        model = build(settings, n_docs)
+        model.umap_model = BaseDimensionalityReduction()
+        model.hdbscan_model = _FixedClusters(labels)
+        return model
+
+    monkeypatch.setattr(bertopic_model, "build_model", fixed_clusters)
+    settings = bertopic_model.Settings(min_cluster_size=10)
     kept = bertopic_model.train(
         corpus,
         tokens,
-        bertopic_model.Settings(
-            min_cluster_size=10, n_neighbors=4, reduce_outliers=False
-        ),
+        bertopic_model.Settings(min_cluster_size=10, reduce_outliers=False),
     )
-    moved = bertopic_model.train(
-        corpus, tokens, bertopic_model.Settings(min_cluster_size=10, n_neighbors=4)
-    )
+    moved = bertopic_model.train(corpus, tokens, settings)
 
-    assert (
-        kept.outliers_before > 0
-        and kept.topics.count(bertopic_model.OUTLIER) == kept.outliers_before
-    )
+    # Off: HDBSCAN's outliers are counted and left as they are.
+    assert kept.outliers_before == 5
+    assert kept.topics.count(bertopic_model.OUTLIER) == 5
+    # On (the default): each moves to the topic its embedding is closest to.
+    assert moved.outliers_before == 5
     assert moved.topics.count(bertopic_model.OUTLIER) == 0
+    assert set(moved.topics[n_themed:]) == {moved.topics[1]}
 
 
 def test_train_refuses_too_few_tickets():
