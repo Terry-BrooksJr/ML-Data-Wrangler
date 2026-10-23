@@ -1,5 +1,6 @@
 import argparse
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 
 import mongomock
@@ -520,3 +521,240 @@ def test_a_changed_decision_question_stops_a_resume(collections, monkeypatch):
     monkeypatch.setattr(ab_test.decisions, "INSTRUCTIONS_VERSION", "new-question")
     with pytest.raises(ab_test.PromptChanged, match="new-question"):
         run(collections, run_id)
+
+
+# --- failures keep their raw reply; retries are capped ------------------------------
+
+
+def test_a_failure_keeps_its_raw_reply(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    error = EngineError(
+        "bad reply",
+        "new-model",
+        {
+            "raw_response": "not json " * 5000,
+            "stop_reason": "end_turn",
+            "request_id": "r1",
+        },
+    )
+    engine = FakeEngine(fail={("", "new-model"): error})
+    run(collections, run_id, classify=engine)
+    output = results.find_one({"run_id": run_id})["outputs"]["B"]
+    assert output["raw_response"].startswith("not json")
+    assert len(output["raw_response"]) == ab_test.RAW_REPLY_LIMIT
+    assert output["stop_reason"] == "end_turn" and output["request_id"] == "r1"
+
+
+def test_an_api_error_keeps_its_error_body():
+    import anthropic
+    import httpx2
+
+    request = httpx2.Request("POST", "https://test")
+    error = anthropic.APIStatusError(
+        "HTTP 400",
+        response=httpx2.Response(400, request=request),
+        body={"error": {"message": "context too long"}},
+    )
+    output = ab_test._error_output(error)
+    assert output["error"].startswith("APIStatusError")
+    assert json.loads(output["raw_response"]) == {
+        "error": {"message": "context too long"}
+    }
+
+
+def test_a_failing_variant_is_retried_at_most_max_attempts_times(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    error = EngineError("bad reply", "new-model")
+    engine = FakeEngine(fail={("", "new-model"): error})
+    for attempt in range(1, ab_test.MAX_ATTEMPTS + 2):
+        run(collections, run_id, classify=engine)
+    b_calls = [c for _, c in engine.calls if c.primary == "new-model"]
+    assert len(b_calls) == ab_test.MAX_ATTEMPTS
+    doc = results.find_one({"run_id": run_id})
+    assert doc["outputs"]["B"]["attempts"] == ab_test.MAX_ATTEMPTS
+    assert ab_test.gave_up(doc) == ["B"] and ab_test.pending_variants(doc) == []
+    # Nothing left to try, so the run is complete (with the failure counted).
+    assert status(collections, run_id) == "complete"
+
+
+# --- reusing saved answers -------------------------------------------------------------
+
+
+def test_a_second_run_reuses_saved_answers_instead_of_calling(collections):
+    _, runs, results = collections
+    first = new_run(collections, size=3, seed=1)
+    run(collections, first)
+    second = new_run(collections, size=3, seed=1)  # the same tickets
+    engine = FakeEngine()
+    run(collections, second, classify=engine)
+
+    assert engine.calls == []
+    doc = results.find_one({"run_id": second})
+    assert doc["outputs"]["B"]["reused_from"]["run_id"] == first
+    assert doc["outputs"]["B"]["classification"] == "flag_solve"
+    assert status(collections, second) == "complete"
+
+
+def test_reuse_needs_the_same_content_configuration_and_moment(collections):
+    tickets, runs, results = collections
+    first = new_run(collections, size=1)
+    run(collections, first)
+    ticket_id = ticket_ids(collections, first)[0]
+
+    def calls_for_new_run(**kwargs):
+        run_id = ab_test.create_run(
+            tickets,
+            runs,
+            results,
+            kwargs.pop("a", A),
+            kwargs.pop("b", B),
+            [ticket_id],
+            **kwargs,
+        )
+        engine = FakeEngine()
+        run(collections, run_id, classify=engine)
+        return run_id, len(engine.calls)
+
+    # Another configuration for B: only B is asked.
+    other_b = EngineConfig("new-model", max_tokens=9000)
+    assert calls_for_new_run(b=other_b)[1] == 1
+    # Reuse switched off: both are asked.
+    assert calls_for_new_run(reuse_answers=False)[1] == 2
+    # The ticket changed: both are asked.
+    tickets.update_one({"zendesk_id": ticket_id}, {"$set": {"status": "pending"}})
+    run_id, calls = calls_for_new_run()
+    assert calls == 2
+    # Too long after the saved answers: both are asked.
+    results.update_many(
+        {"run_id": {"$ne": run_id}},
+        {"$set": {"as_of": datetime.now(timezone.utc) - timedelta(days=3)}},
+    )
+    results.update_one(
+        {"run_id": run_id},
+        {"$set": {"as_of": datetime.now(timezone.utc) - timedelta(days=3)}},
+    )
+    assert calls_for_new_run()[1] == 2
+
+
+# --- finalizing --------------------------------------------------------------------------
+
+
+def judged_run(collections, size=2):
+    _, runs, results = collections
+    run_id = new_run(collections, size=size)
+    run(collections, run_id)
+    for ticket_id in ticket_ids(collections, run_id):
+        ab_test.record_preference(results, run_id, ticket_id, "B", 0, "lead", "better")
+    return run_id
+
+
+def test_finalize_needs_every_answered_ticket_judged(collections):
+    tickets, runs, results = collections
+    run_id = new_run(collections, size=2)
+    with pytest.raises(ab_test.NotReadyToFinalize):
+        ab_test.finalize(tickets, runs, results, run_id)
+    run(collections, run_id)
+    first = ticket_ids(collections, run_id)[0]
+    ab_test.record_preference(results, run_id, first, "A", 0)
+    assert not ab_test.ready_to_finalize(
+        runs.find_one({"_id": run_id}), list(results.find({"run_id": run_id}))
+    )
+    with pytest.raises(ab_test.NotReadyToFinalize):
+        ab_test.finalize(tickets, runs, results, run_id)
+
+
+def test_finalize_saves_verdicts_on_tickets_and_slims_the_results(collections):
+    tickets, runs, results = collections
+    run_id = judged_run(collections)
+    outcome = ab_test.finalize(tickets, runs, results, run_id)
+    assert outcome == {"tickets_updated": 2, "tickets_missing": []}
+
+    for ticket_id in ticket_ids(collections, run_id):
+        (verdict,) = tickets.find_one({"zendesk_id": ticket_id})["ab_test_verdicts"]
+        assert verdict["run_id"] == run_id and verdict["choice"] == "B"
+        assert verdict["preferred_config"]["primary"] == "new-model"
+        assert verdict["reviewer"] == "lead" and verdict["note"] == "better"
+        assert verdict["variants"]["A"]["classification"] == "manual_triage"
+        assert verdict["variants"]["B"]["config"]["effort"] == "high"
+
+    doc = results.find_one({"run_id": run_id})
+    assert "payload" not in doc and "transcript" not in doc["ticket"]
+    assert doc["ticket"]["subject"] and doc["content_hash"] and doc["finalized"]
+    assert doc["outputs"]["B"]["classification"] == "flag_solve"  # kept for reports
+    finalized = runs.find_one({"_id": run_id})
+    assert finalized["status"] == "finalized"
+    assert finalized["summary"]["preferences"] == {"B": 2}
+
+    # Repeating it adds nothing; the verdicts and run are locked.
+    assert ab_test.finalize(tickets, runs, results, run_id)["tickets_updated"] == 0
+    assert all(
+        len(t["ab_test_verdicts"]) == 1
+        for t in tickets.find({"ab_test_verdicts": {"$exists": True}})
+    )
+    with pytest.raises(ab_test.RunFinalized):
+        ab_test.record_preference(results, run_id, doc["ticket_id"], "A", 1)
+    with pytest.raises(ab_test.RunFinalized):
+        run(collections, run_id)
+
+
+def test_finalized_answers_are_still_reused(collections):
+    tickets, runs, results = collections
+    first = judged_run(collections)
+    ab_test.finalize(tickets, runs, results, first)
+    second = new_run(collections, size=2)
+    engine = FakeEngine()
+    run(collections, second, classify=engine)
+    assert engine.calls == []
+
+
+def test_a_deleted_ticket_is_reported_not_fatal(collections):
+    tickets, runs, results = collections
+    run_id = judged_run(collections)
+    gone = ticket_ids(collections, run_id)[0]
+    tickets.delete_one({"zendesk_id": gone})
+    outcome = ab_test.finalize(tickets, runs, results, run_id)
+    assert outcome == {"tickets_updated": 1, "tickets_missing": [gone]}
+
+
+# --- export ------------------------------------------------------------------------------
+
+
+def test_export_csv_names_both_sides_and_is_spreadsheet_safe(collections, tmp_path):
+    import csv
+
+    _, runs, results = collections
+    run_id = judged_run(collections)
+    results.update_many(
+        {"run_id": run_id}, {"$set": {"preference.note": "=HYPERLINK(1)"}}
+    )
+    path = ab_test.export_run(
+        runs.find_one({"_id": run_id}),
+        list(results.find({"run_id": run_id})),
+        tmp_path / "out.csv",
+    )
+    rows = list(csv.DictReader(path.open()))
+    assert len(rows) == 2
+    assert rows[0]["A_classification"] == "manual_triage"
+    assert rows[0]["B_classification"] == "flag_solve"
+    assert rows[0]["verdict"] == "B" and rows[0]["note"] == "'=HYPERLINK(1)"
+    assert rows[0]["B_output_tokens"] == "5"
+    assert list(tmp_path.iterdir()) == [path]  # no temporary file left
+
+
+def test_export_json_keeps_everything_but_the_model_input(collections, tmp_path):
+    _, runs, results = collections
+    run_id = judged_run(collections)
+    path = ab_test.export_run(
+        runs.find_one({"_id": run_id}),
+        list(results.find({"run_id": run_id})),
+        tmp_path / "out.json",
+    )
+    data = json.loads(path.read_text())
+    assert data["run"]["_id"] == run_id
+    assert data["summary"]["preferences"] == {"B": 2}
+    assert len(data["results"]) == 2 and "payload" not in data["results"][0]
+    assert data["results"][0]["ticket"]["transcript"]  # not finalized yet
+    with pytest.raises(ValueError, match=".csv or .json"):
+        ab_test.export_run(data["run"], [], tmp_path / "out.txt")

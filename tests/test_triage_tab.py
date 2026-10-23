@@ -1043,7 +1043,7 @@ def open_ab_test(qapp, tab, monkeypatch, b_primary="new-model"):
 
 
 def test_ab_test_creates_classifies_and_reviews_blind(
-    qapp, configured, dialogs, ab_tickets, monkeypatch
+    qapp, configured, dialogs, ab_tickets, monkeypatch, tmp_path
 ):
     from decision_engine import ab_test
 
@@ -1119,10 +1119,34 @@ def test_ab_test_creates_classifies_and_reviews_blind(
     wait_until_idle(qapp, tab)
     assert len(dialog.visible()) == 0
 
+    # That was the last verdict: the test finalizes itself.
+    for _ in range(3):
+        wait_until_idle(qapp, tab)
+    assert "finalized" in dialog.status_label.text()
+    status_column = ab_test_dialog.RUN_COLUMNS.index("Status")
+    assert dialog.run_table.item(0, status_column).text() == "finalized"
+    verdicts = ab_tickets.find_one({"zendesk_id": ids[0]})["ab_test_verdicts"]
+    assert [v["choice"] for v in verdicts] == ["B"]
+    assert "payload" not in results.find_one({"ticket_id": ids[0]})
+    dialog.only_unreviewed.setChecked(False)  # every ticket is reviewed now
+    assert not any(b.isEnabled() for b in dialog.choice_buttons.values())
+    assert "removed when this test was finalized" in dialog.ticket_view.toPlainText()
+
     dialog.show_results()
     wait_until_idle(qapp, tab)
     summary = dialog.summary_dialog.findChild(triage_tab.QTextEdit).toPlainText()
     assert "B better" in summary and "B: primary new-model" in summary
+
+    export = tmp_path / "run.csv"
+    monkeypatch.setattr(
+        ab_test_dialog.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (str(export), ""),
+    )
+    dialog.export_selected()
+    wait_until_idle(qapp, tab)
+    assert export.exists() and "B_classification" in export.read_text()
+    assert str(export) in dialog.status_label.text()
 
 
 def test_ab_test_waits_for_another_job(qapp, configured, dialogs, ab_tickets, monkeypatch):

@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -82,7 +83,13 @@ def format_output(output: Optional[dict]) -> str:
     if not output:
         return "Not classified yet."
     if "error" in output:
-        return f"The engine failed on this ticket:\n{output['error']}"
+        attempts = output.get("attempts") or 1
+        state = (
+            f"Gave up after {attempts} failed attempts."
+            if attempts >= ab_test.MAX_ATTEMPTS
+            else f"Failed {attempts} time(s); Classify Pending tries again."
+        )
+        return f"The engine failed on this ticket. {state}\n{output['error']}"
     lines = [
         f"Classification: {output.get('classification')}",
         f"Confidence: {output.get('confidence')}",
@@ -155,6 +162,12 @@ def format_ticket(ticket: Optional[dict]) -> str:
         f"Ticket {ticket.get('zendesk_id')}: {ticket.get('subject') or '(no subject)'}",
         f"Status: {ticket.get('status') or '-'}",
     ]
+    if "transcript" not in ticket:
+        lines += [
+            "",
+            "The ticket text was removed when this test was finalized; the full "
+            "ticket is in the tickets collection.",
+        ]
     for entry in ticket.get("transcript") or []:
         kind = "Internal note" if entry.get("is_internal_note") else "Comment"
         when = entry.get("timestamp")
@@ -256,6 +269,14 @@ class NewRunDialog(QDialog):
         sample = QFormLayout()
         sample.addRow("Tickets", self.size)
         sample.addRow("", self.awaiting_only)
+        hours = int(ab_test.REUSE_WINDOW.total_seconds() // 3600)
+        self.reuse = CheckBox(f"Reuse answers saved in the last {hours} hours")
+        self.reuse.setChecked(True)
+        self.reuse.setToolTip(
+            "Where any earlier test asked the same models about the same ticket "
+            "content, copy that answer instead of paying for the call again."
+        )
+        sample.addRow("", self.reuse)
         sample.addRow("Name", self.name)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -363,6 +384,11 @@ class ABTestDialog(QDialog):
         self.results_button = Button("Show Results")
         self.results_button.setToolTip("Reveals which output was A and which was B.")
         self.results_button.clicked.connect(self.show_results)
+        self.export_button = Button("Export…")
+        self.export_button.setToolTip(
+            "Save the selected run as CSV (one row per ticket) or JSON (everything kept)."
+        )
+        self.export_button.clicked.connect(self.export_selected)
         self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.load_runs)
         run_buttons = QHBoxLayout()
@@ -370,6 +396,7 @@ class ABTestDialog(QDialog):
             run_buttons.addWidget(button)
         run_buttons.addStretch()
         run_buttons.addWidget(self.results_button)
+        run_buttons.addWidget(self.export_button)
         run_buttons.addWidget(self.refresh_button)
 
         self.progress_bar = ProgressBar()
@@ -487,13 +514,19 @@ class ABTestDialog(QDialog):
         idle = not self.classifying
         self.new_button.setEnabled(idle)
         self.refresh_button.setEnabled(idle)
-        for button in (self.open_button, self.classify_button, self.results_button):
+        for button in (
+            self.open_button,
+            self.classify_button,
+            self.results_button,
+            self.export_button,
+        ):
             button.setEnabled(idle and selected)
         docs = self.visible()
         doc = self._current_doc()
         self.prev_button.setEnabled(self.position > 0)
         self.next_button.setEnabled(self.position < len(docs) - 1)
-        can_judge = doc is not None and ab_test.answered(doc) and idle
+        finalized = (self.current or {}).get("status") == ab_test.FINALIZED
+        can_judge = doc is not None and ab_test.answered(doc) and idle and not finalized
         for button in self.choice_buttons.values():
             button.setEnabled(can_judge)
 
@@ -542,6 +575,7 @@ class ABTestDialog(QDialog):
         a, b = dialog.configs()
         size = dialog.size.value()
         awaiting_only = dialog.awaiting_only.isChecked()
+        reuse = dialog.reuse.isChecked()
         name = dialog.name.text().strip()
         reviewer = self.reviewer_input.text().strip()
 
@@ -549,7 +583,7 @@ class ABTestDialog(QDialog):
             tickets, runs, results = self.collections()
             ids = ab_test.sample_ticket_ids(tickets, size, awaiting_only=awaiting_only)
             run_id = ab_test.create_run(
-                tickets, runs, results, a, b, ids, name, reviewer
+                tickets, runs, results, a, b, ids, name, reviewer, reuse_answers=reuse
             )
             return run_id, len(ids)
 
@@ -698,6 +732,64 @@ class ABTestDialog(QDialog):
         ]
         self.position = unreviewed[0] if unreviewed else 0
         self._show_current()
+        if run.get("status") == ab_test.FINALIZED:
+            self.status_label.setText(
+                "This test is finalized: its verdicts are saved on the tickets and can't change."
+            )
+        else:
+            # Judged earlier but not finalized (say, the app closed first).
+            self._finalize_if_ready()
+
+    def _finalize_if_ready(self) -> None:
+        """Once every answered ticket has a verdict, saves the verdicts on the
+        tickets and removes the test's working data (ab_test.finalize)."""
+        if self.current is None or not ab_test.ready_to_finalize(
+            self.current, self.docs
+        ):
+            return
+        run_id = self.current["_id"]
+
+        def task():
+            tickets, runs, results = self.collections()
+            return ab_test.finalize(tickets, runs, results, run_id)
+
+        def done(outcome: dict) -> None:
+            missing = outcome["tickets_missing"]
+            self.status_label.setText(
+                f"Every ticket is judged, so the test is finalized: verdicts saved on "
+                f"{outcome['tickets_updated']} ticket(s)"
+                + (f", {len(missing)} ticket(s) no longer exist" if missing else "")
+                + "; its working data was removed."
+            )
+            self.load_runs_then_open(run_id)
+
+        if not self.run(task, "Finalizing the A/B test", done, None):
+            self._busy()
+
+    def export_selected(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export A/B Test",
+            f"ab-test-{run['_id']}.csv",
+            "CSV, one row per ticket (*.csv);;JSON, everything kept (*.json)",
+        )
+        if not path:
+            return
+
+        def task():
+            results = self.collections()[2]
+            return ab_test.export_run(
+                run, list(results.find({"run_id": run["_id"]})), path
+            )
+
+        def done(written) -> None:
+            self.status_label.setText(f"Exported to {written}.")
+
+        if not self.run(task, "Exporting the A/B test", done, None):
+            self._busy()
 
     def _filter_changed(self) -> None:
         self.position = 0
@@ -826,6 +918,7 @@ class ABTestDialog(QDialog):
         self.status_label.setText(f"Saved the verdict on ticket {doc['ticket_id']}.")
         self._update_reviewed_count()
         self._show_current()
+        self._finalize_if_ready()
 
     def show_results(self) -> None:
         run = self._selected_run()

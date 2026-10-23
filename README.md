@@ -517,8 +517,13 @@ with a configuration you're considering (B) on the same tickets:
    paid model calls per ticket. Both are sent the same snapshot of the
    ticket, taken when the test was created, so later edits to the ticket
    don't skew the comparison. **Stop After This Ticket** keeps what
-   finished, and **Classify Pending** carries on later and retries any
-   answer that failed. A test whose answers were saved under an older system
+   finished, and **Classify Pending** carries on later and retries an
+   answer that failed, up to 3 attempts per ticket and side (a failure keeps
+   the raw reply for debugging). With **Reuse answers saved in the last 24
+   hours** (on by default), an answer any earlier test got for the same
+   ticket content from the same models, settings and prompt is copied
+   instead of paying for the call again. The 24-hour limit is there because
+   the engine judges elapsed time, so an older answer may no longer hold. A test whose answers were saved under an older system
    prompt can't be resumed; create a new one.
 3. **Blind Review** shows the ticket and the two answers as Output 1 and
    Output 2, in an order shuffled per ticket, without model names. Choose
@@ -527,7 +532,15 @@ with a configuration you're considering (B) on the same tickets:
    tickets where both chose the same classification. If someone else saved
    a verdict on the ticket after you opened it, yours is refused and theirs
    is shown.
-4. **Show Results** names A and B and reports the verdicts (overall and
+4. **Finalizing.** Once every answered ticket has a verdict, the test
+   finalizes itself: each verdict is added to its ticket in the tickets
+   collection (`ab_test_verdicts`: the test, both configurations and their
+   answers, the choice, reviewer and note), and the test's bulky working data
+   is removed (the ticket text and model input copied at creation, raw
+   replies). The compact answers stay for reports, exports and reuse. The
+   verdicts are then locked. A test closed before it finalized does so the
+   next time it's opened.
+5. **Show Results** names A and B and reports the verdicts (overall and
    where they disagreed), how often they agreed, errors, mean confidence,
    latency and token use for each, counting every model call (fallback
    and confirmation calls, failed ones too).
@@ -545,9 +558,12 @@ refuses decision models and stops the batch, since a real review needs the
 written parts. The question asked is in `src/decision_engine/decisions.py`.
 
 Runs are stored in `ab_tests` and `ab_results` (`AB_TEST_COLLECTION`,
-`AB_RESULT_COLLECTION`); Settings refuses names that match the tickets
-collection or each other. An A/B run never writes to the tickets: no review
-is added and nothing leaves the awaiting-review queue. Two people can
+`AB_RESULT_COLLECTION`). **Export…** saves a test as CSV (one row per
+ticket, both sides named, spreadsheet-safe) or JSON (everything kept except
+the model input). Settings refuses names that match the tickets
+collection or each other. Until it is finalized, an A/B test never writes to
+the tickets: no review is added and nothing leaves the awaiting-review
+queue. Two people can
 classify the same test at once: each ticket is claimed while it's
 classified, so none is paid for twice. From the command line:
 
@@ -556,7 +572,12 @@ cd src
 python -m decision_engine.ab_test create --size 30 --b-primary claude-opus-5.5 --b-confirmation claude-fable-5.1 --b-max-tokens 16000
 python -m decision_engine.ab_test run RUN_ID      # paid model calls
 python -m decision_engine.ab_test report RUN_ID
+python -m decision_engine.ab_test export RUN_ID results.csv   # or .json
+python -m decision_engine.ab_test finalize RUN_ID   # once every verdict is in
 ```
+
+`create --no-reuse` makes a test call the models even where a saved answer
+matches.
 
 ### Ticket embeddings (Voyage AI)
 

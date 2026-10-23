@@ -7,18 +7,31 @@ side by side, blind (each ticket shows them in a random order, as "Output
 1" and "Output 2"), and records which is better. The summary reports the
 preferences, how often the two agree, and what each cost in tokens.
 
-Nothing here writes to the tickets collection: an A/B run never adds an
-agent review, claims a ticket or changes awaiting_review. Each result keeps
+Until a run is finalized nothing here writes to the tickets collection: an
+A/B run never adds an agent review, claims a ticket or changes
+awaiting_review. Finalizing a fully judged run adds each verdict to its
+ticket's ab_test_verdicts and removes the run's bulky working data.
+
+Answers are saved as they arrive and reused where possible, so a model is
+asked about the same ticket content and configuration only once (within
+REUSE_WINDOW); a failing variant is retried at most MAX_ATTEMPTS times. Each result keeps
 a snapshot of its ticket taken when the run was created, so both variants,
 and the reviewer, see the same ticket however it changes afterwards.
 
     python -m decision_engine.ab_test create --size 30 --b-primary claude-opus-5.5
     python -m decision_engine.ab_test run RUN_ID      # paid model calls
     python -m decision_engine.ab_test report RUN_ID
+    python -m decision_engine.ab_test export RUN_ID results.csv   # or .json
+    python -m decision_engine.ab_test finalize RUN_ID   # verdicts onto the tickets
 """
 
 import argparse
+import csv
+import hashlib
+import io
+import json
 import os
+import pathlib
 import random
 import socket
 import sys
@@ -68,13 +81,37 @@ _SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status", "assignee", "transcript")
 # A claim older than this is treated as abandoned (its worker crashed). Long
 # enough for both variants of one ticket, confirmation calls included.
 CLAIM_TTL = timedelta(minutes=30)
-# Run statuses. "creating" is only ever seen if creation was interrupted.
-CREATING, PENDING, RUNNING, PARTIAL, COMPLETE = (
+# Run statuses. "creating" is only ever seen if creation was interrupted;
+# "finalized" means the verdicts were copied to the tickets and the bulky
+# working data removed (finalize).
+CREATING, PENDING, RUNNING, PARTIAL, COMPLETE, FINALIZED = (
     "creating",
     "pending",
     "running",
     "partial",
     "complete",
+    "finalized",
+)
+# A variant that failed this many times on a ticket isn't tried again.
+MAX_ATTEMPTS = 3
+# A saved answer is reused for the same ticket content and configuration
+# only if it was made for a moment this close: the engine judges elapsed
+# time ("no reply in 48 hours"), so an older answer may no longer hold.
+REUSE_WINDOW = timedelta(hours=24)
+# How much of a failed call's raw reply is kept for debugging.
+RAW_REPLY_LIMIT = 20000
+# The tickets field a finalized run's verdicts are added to.
+VERDICTS_FIELD = "ab_test_verdicts"
+# Fields finalize removes from each result: the ticket text and model input
+# (copies of what is in the tickets collection), raw replies and claims.
+# The answers, verdicts and content fingerprints stay, for reports and reuse.
+_SLIMMED_FIELDS = (
+    "payload",
+    "ticket.transcript",
+    "ticket.assignee",
+    "assignee",
+    "claim",
+    *(f"outputs.{v}.raw_response" for v in ("A", "B")),
 )
 
 
@@ -88,6 +125,14 @@ class PromptChanged(ValueError):
 
 class VerdictConflict(ValueError):
     """Someone else saved a verdict on the ticket since it was loaded."""
+
+
+class RunFinalized(ValueError):
+    """The run is finalized: its verdicts are on the tickets and can't change."""
+
+
+class NotReadyToFinalize(ValueError):
+    """The run still has tickets to classify or answers without a verdict."""
 
 
 def collection_name_problem(
@@ -131,6 +176,7 @@ def get_collections(database) -> Tuple[Collection, Collection]:
     runs = database[runs_name]
     results = database[results_name]
     results.create_index([("run_id", 1), ("ticket_id", 1)], unique=True)
+    results.create_index([("content_hash", 1), ("as_of", 1)])
     return runs, results
 
 
@@ -174,15 +220,42 @@ def sample_ticket_ids(
     return random.Random(seed).sample(ids, min(size, len(ids)))
 
 
+# Stands in for as_of when fingerprinting a ticket, so the fingerprint
+# depends on the ticket's content and not on when the run was created.
+_FINGERPRINT_AS_OF = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
 def _snapshot(ticket: dict, as_of: datetime) -> dict:
     """What a result keeps of its ticket: the exact payload both variants
-    are sent, and the fields the reviewer reads."""
+    are sent, the fields the reviewer reads, and a fingerprint of the
+    ticket's content for reusing answers (content_hash)."""
+    reengage_count = len(ticket.get("reengage_attempts") or [])
+    assignee = ticket.get("assignee")
+    fingerprint = json.dumps(
+        [
+            build_ticket_payload(ticket, as_of=_FINGERPRINT_AS_OF),
+            reengage_count,
+            assignee,
+        ],
+        default=str,
+    )
     return {
         "payload": build_ticket_payload(ticket, as_of=as_of),
-        "reengage_count": len(ticket.get("reengage_attempts") or []),
-        "assignee": ticket.get("assignee"),
+        "reengage_count": reengage_count,
+        "assignee": assignee,
+        "as_of": as_of,
+        "content_hash": hashlib.sha256(fingerprint.encode()).hexdigest(),
         "ticket": {key: ticket.get(key) for key in _SNAPSHOT_FIELDS},
     }
+
+
+def answer_key(config: EngineConfig) -> str:
+    """Identifies what an answer depends on besides the ticket: the
+    configuration and the prompts. Equal keys and content hashes mean the
+    same question asked of the same models."""
+    return hashlib.sha256(
+        json.dumps([config.to_dict(), _versions()], sort_keys=True).encode()
+    ).hexdigest()[:16]
 
 
 def create_run(
@@ -195,8 +268,13 @@ def create_run(
     name: str = "",
     created_by: str = "",
     seed: Optional[int] = None,
+    reuse_answers: bool = True,
 ) -> str:
     """Records a new run and one pending result per ticket; classifies nothing.
+
+    With reuse_answers, classifying the run copies an answer saved in any
+    run for the same ticket content and configuration within REUSE_WINDOW,
+    instead of calling the model again.
 
     Each result keeps a snapshot of its ticket, including the payload built
     once (as of the run's creation), so A and B are sent exactly the same
@@ -244,6 +322,7 @@ def create_run(
             "variants": {"A": a.to_dict(), "B": b.to_dict()},
             **_versions(),
             "ticket_count": len(ticket_ids),
+            "reuse_answers": reuse_answers,
             "status": CREATING,
         }
     )
@@ -315,11 +394,23 @@ def _output(result: dict) -> dict:
 
 
 def _error_output(error: Exception) -> dict:
+    """A failed classification: the error, its cost, and the raw reply (or
+    the API's error body) for debugging. The raw reply can quote ticket
+    text; finalize removes it."""
     audit = getattr(error, "audit", None) or {}
     calls = getattr(error, "model_calls", None) or [
         {"usage": audit.get("usage"), "latency_ms": audit.get("latency_ms")}
     ]
-    return {"error": f"{type(error).__name__}: {error}"[:1000], **_cost(calls)}
+    raw = audit.get("raw_response")
+    if raw is None and getattr(error, "body", None) is not None:
+        raw = json.dumps(error.body, default=str)
+    return {
+        "error": f"{type(error).__name__}: {error}"[:1000],
+        "raw_response": raw[:RAW_REPLY_LIMIT] if raw else None,
+        "stop_reason": audit.get("stop_reason"),
+        "request_id": audit.get("request_id") or getattr(error, "request_id", None),
+        **_cost(calls),
+    }
 
 
 def _sum_usage(usages: Iterable[dict]) -> dict:
@@ -331,9 +422,31 @@ def _sum_usage(usages: Iterable[dict]) -> dict:
 
 
 def pending_variants(doc: dict) -> List[str]:
-    """The variants still to classify: never tried, or tried and failed."""
+    """The variants still to classify: never tried, or failed fewer than
+    MAX_ATTEMPTS times."""
     outputs = doc.get("outputs") or {}
-    return [v for v in VARIANTS if v not in outputs or "error" in outputs[v]]
+    return [
+        v
+        for v in VARIANTS
+        if v not in outputs
+        or ("error" in outputs[v] and _attempts(outputs[v]) < MAX_ATTEMPTS)
+    ]
+
+
+def gave_up(doc: dict) -> List[str]:
+    """The variants that failed MAX_ATTEMPTS times on this ticket."""
+    outputs = doc.get("outputs") or {}
+    return [
+        v
+        for v in VARIANTS
+        if v in outputs
+        and "error" in outputs[v]
+        and _attempts(outputs[v]) >= MAX_ATTEMPTS
+    ]
+
+
+def _attempts(output: dict) -> int:
+    return output.get("attempts") or 1
 
 
 def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
@@ -355,8 +468,9 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
 
 
 def _finish(runs: Collection, results: Collection, run_id: str) -> str:
-    """Records the run's status from what is saved: complete only when every
-    ticket has both answers."""
+    """Records the run's status from what is saved: complete when nothing is
+    left to classify (every ticket has both answers, or a variant gave up
+    after MAX_ATTEMPTS failures)."""
     unfinished = sum(
         1 for doc in results.find({"run_id": run_id}) if pending_variants(doc)
     )
@@ -406,6 +520,10 @@ def run_ab_test(
         raise ValueError(
             f"A/B run {run_id} wasn't created completely; create a new run."
         )
+    if run.get("status") == FINALIZED:
+        raise RunFinalized(
+            f"A/B run {run_id} is finalized; there is nothing to classify."
+        )
     docs = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
     current = _versions()
     changed = [
@@ -437,7 +555,13 @@ def run_ab_test(
                 else:
                     try:
                         _classify_pending(
-                            claimed, run_id, variant_configs, results, classify, worker
+                            claimed,
+                            run_id,
+                            variant_configs,
+                            results,
+                            classify,
+                            worker,
+                            reuse=run.get("reuse_answers", False),
                         )
                     finally:
                         results.update_one(
@@ -460,26 +584,44 @@ def _classify_pending(
     results: Collection,
     classify: Callable[..., dict],
     worker: str,
+    reuse: bool = False,
 ) -> None:
-    """Classifies a claimed ticket's pending variants and saves each output."""
+    """Classifies a claimed ticket's pending variants and saves each output.
+
+    With reuse, a matching saved answer (_reusable) is copied instead of
+    calling the model. Each output records its attempt number, so a variant
+    that keeps failing stops being retried after MAX_ATTEMPTS.
+    """
     for variant in pending_variants(doc):
-        try:
-            output = _output(
-                classify(
-                    doc["payload"],
-                    reengage_count=doc.get("reengage_count", 0),
-                    assignee=doc.get("assignee"),
-                    config=variant_configs[variant],
-                    allow_decision_models=True,
+        config = variant_configs[variant]
+        key = answer_key(config)
+        previous = (doc.get("outputs") or {}).get(variant)
+        attempt = _attempts(previous) + 1 if previous else 1
+        reused = _reusable(results, doc, key) if reuse else None
+        if reused is not None:
+            output = reused
+        else:
+            try:
+                output = _output(
+                    classify(
+                        doc["payload"],
+                        reengage_count=doc.get("reengage_count", 0),
+                        assignee=doc.get("assignee"),
+                        config=config,
+                        allow_decision_models=True,
+                    )
                 )
-            )
-        except Exception as e:
-            if is_fatal(e):
-                raise
-            logger.warning(
-                f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant}: {e}"
-            )
-            output = _error_output(e)
+                output["answer_key"] = key
+            except Exception as e:
+                if is_fatal(e):
+                    raise
+                logger.warning(
+                    f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant} "
+                    f"(attempt {attempt} of {MAX_ATTEMPTS}): {e}"
+                )
+                output = _error_output(e)
+        output["attempts"] = attempt
+        output["answered_at"] = datetime.now(timezone.utc)
         saved = results.update_one(
             {"_id": doc["_id"], "claim.worker": worker},
             {"$set": {f"outputs.{variant}": output}},
@@ -490,6 +632,37 @@ def _classify_pending(
                 f"A/B {run_id}: lost the claim on ticket {doc['ticket_id']}; its output wasn't saved."
             )
             return
+
+
+def _reusable(results: Collection, doc: dict, key: str) -> Optional[dict]:
+    """A successful answer saved for the same ticket content and answer key,
+    for a moment within REUSE_WINDOW of this ticket's, or None."""
+    as_of = doc.get("as_of")
+    if not doc.get("content_hash") or as_of is None:
+        return None
+    for other in results.find(
+        {
+            "_id": {"$ne": doc["_id"]},
+            "content_hash": doc["content_hash"],
+            "as_of": {"$gte": as_of - REUSE_WINDOW, "$lte": as_of + REUSE_WINDOW},
+            "$or": [{f"outputs.{v}.answer_key": key} for v in VARIANTS],
+        }
+    ):
+        for v in VARIANTS:
+            output = (other.get("outputs") or {}).get(v) or {}
+            if output.get("answer_key") == key and "error" not in output:
+                copied = {
+                    k: value
+                    for k, value in output.items()
+                    if k not in ("reused_from", "attempts", "answered_at")
+                }
+                copied["reused_from"] = {
+                    "run_id": other["run_id"],
+                    "ticket_id": other["ticket_id"],
+                    "variant": v,
+                }
+                return copied
+    return None
 
 
 def record_preference(
@@ -512,6 +685,7 @@ def record_preference(
 
     Raises:
         VerdictConflict: Someone else saved a verdict on it since it was loaded.
+        RunFinalized: The run is finalized; its verdicts can't change.
         ValueError: An unknown choice, or the ticket isn't in the run.
     """
     if choice is not None and choice not in PREFERENCES:
@@ -531,13 +705,22 @@ def record_preference(
     # Results saved before versions existed have no preference_version: 0.
     version = expected_version if expected_version else {"$in": [0, None]}
     outcome = results.update_one(
-        {"run_id": run_id, "ticket_id": str(ticket_id), "preference_version": version},
+        {
+            "run_id": run_id,
+            "ticket_id": str(ticket_id),
+            "preference_version": version,
+            "finalized": {"$ne": True},
+        },
         {"$set": {"preference": preference}, "$inc": {"preference_version": 1}},
     )
     if outcome.matched_count == 0:
         current = results.find_one({"run_id": run_id, "ticket_id": str(ticket_id)})
         if current is None:
             raise ValueError(f"Ticket {ticket_id} isn't in A/B run {run_id}.")
+        if current.get("finalized"):
+            raise RunFinalized(
+                f"A/B run {run_id} is finalized: its verdicts are saved on the tickets and can't change."
+            )
         by = ((current.get("preference") or {}).get("reviewer")) or "someone else"
         raise VerdictConflict(
             f"The verdict on ticket {ticket_id} was changed by {by} after you opened it. "
@@ -685,6 +868,233 @@ def format_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
+# --- finishing a run -------------------------------------------------------------
+
+
+def ready_to_finalize(run: dict, docs: List[dict]) -> bool:
+    """True when nothing is left to classify and every ticket both variants
+    answered has a verdict (tickets a variant gave up on can't be judged)."""
+    if run.get("status") in (FINALIZED, CREATING) or not docs:
+        return False
+    if any(pending_variants(d) for d in docs):
+        return False
+    judged = [d for d in docs if answered(d)]
+    return bool(judged) and all(d.get("preference") for d in judged)
+
+
+def _verdict_entry(run: dict, doc: dict, finalized_at: datetime) -> dict:
+    """What a ticket keeps of an A/B verdict: the run, both configurations
+    and their answers, and the reviewer's choice."""
+    preference = doc["preference"]
+    choice = preference["choice"]
+    return {
+        "run_id": run["_id"],
+        "run_name": run.get("name"),
+        "choice": choice,
+        "preferred_config": run["variants"][choice] if choice in VARIANTS else None,
+        "reviewer": preference.get("reviewer"),
+        "note": preference.get("note"),
+        "decided_at": preference.get("at"),
+        "finalized_at": finalized_at,
+        "prompt_version": run.get("prompt_version"),
+        "variants": {
+            v: {
+                "config": run["variants"][v],
+                **{
+                    key: doc["outputs"][v].get(key)
+                    for key in (
+                        "classification",
+                        "confidence",
+                        "model_version",
+                        "decision_only",
+                    )
+                },
+            }
+            for v in VARIANTS
+        },
+    }
+
+
+def finalize(
+    tickets: Collection, runs: Collection, results: Collection, run_id: str
+) -> dict:
+    """Saves a judged run's verdicts on the tickets and removes the working data.
+
+    Each verdict is added to its ticket's ab_test_verdicts (once per run, so
+    finalizing again adds nothing). Then each result loses the ticket text,
+    model input, raw replies and claim (_SLIMMED_FIELDS); its answers,
+    verdict and fingerprint stay, so reports, exports and answer reuse keep
+    working. The run is marked finalized with its summary, and its verdicts
+    can't change after that. Safe to repeat if it was interrupted.
+
+    Returns:
+        {"tickets_updated": int, "tickets_missing": [ticket IDs]}.
+
+    Raises:
+        NotReadyToFinalize: something is left to classify or judge.
+    """
+    run = runs.find_one({"_id": run_id})
+    if run is None:
+        raise ValueError(f"No A/B run {run_id}.")
+    docs = list(results.find({"run_id": run_id}))
+    if run.get("status") != FINALIZED and not ready_to_finalize(run, docs):
+        raise NotReadyToFinalize(
+            f"A/B run {run_id} isn't finished: classify every ticket and give each answered "
+            "ticket a verdict first."
+        )
+    finalized_at = run.get("finalized_at") or datetime.now(timezone.utc)
+    # Lock the verdicts first, so none changes while they are copied.
+    results.update_many({"run_id": run_id}, {"$set": {"finalized": True}})
+    updated, missing = 0, []
+    for doc in docs:
+        if not doc.get("preference"):
+            continue
+        outcome = tickets.update_one(
+            {
+                "zendesk_id": doc["ticket_id"],
+                f"{VERDICTS_FIELD}.run_id": {"$ne": run_id},
+            },
+            {"$push": {VERDICTS_FIELD: _verdict_entry(run, doc, finalized_at)}},
+        )
+        if outcome.modified_count:
+            updated += 1
+        elif tickets.count_documents({"zendesk_id": doc["ticket_id"]}, limit=1) == 0:
+            missing.append(doc["ticket_id"])
+    if missing:
+        logger.warning(
+            f"A/B {run_id}: {len(missing)} ticket(s) are no longer in the tickets collection; "
+            "their verdicts stay in the A/B results only."
+        )
+    results.update_many(
+        {"run_id": run_id}, {"$unset": {field: "" for field in _SLIMMED_FIELDS}}
+    )
+    summary = summarize(run, list(results.find({"run_id": run_id})))
+    runs.update_one(
+        {"_id": run_id},
+        {
+            "$set": {
+                "status": FINALIZED,
+                "finalized_at": finalized_at,
+                "summary": _plain_summary(summary),
+            }
+        },
+    )
+    return {"tickets_updated": updated, "tickets_missing": missing}
+
+
+def _plain_summary(summary: dict) -> dict:
+    """The summary without the run, with Counters as plain dicts (for storage and JSON)."""
+    plain = {k: v for k, v in summary.items() if k != "run"}
+    for key in ("preferences", "disagreement_preferences"):
+        plain[key] = dict(plain[key])
+    plain["variants"] = {
+        v: {**stats, "classifications": dict(stats["classifications"])}
+        for v, stats in summary["variants"].items()
+    }
+    return plain
+
+
+# --- export --------------------------------------------------------------------------
+
+# A cell starting like this is a formula to a spreadsheet; customer-written
+# text gets a leading apostrophe (as bertopic_runs.spreadsheet_safe does).
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_OUTPUT_COLUMNS = (
+    "classification",
+    "confidence",
+    "decision_only",
+    "model_version",
+    "error",
+    "attempts",
+    "reused",
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "latency_ms",
+)
+
+
+def _cell(value) -> str:
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA_PREFIXES) else text
+
+
+def export_rows(run: dict, docs: List[dict]) -> List[dict]:
+    """One row per ticket with both answers named (not blind) and the verdict."""
+    rows = []
+    for doc in sorted(docs, key=lambda d: d["ticket_id"]):
+        preference = doc.get("preference") or {}
+        row = {
+            "ticket_id": doc["ticket_id"],
+            "subject": (doc.get("ticket") or {}).get("subject"),
+            "same_classification": answered(doc) and not differs(doc),
+            "verdict": preference.get("choice"),
+            "reviewer": preference.get("reviewer"),
+            "note": preference.get("note"),
+            "decided_at": preference.get("at"),
+        }
+        for v in VARIANTS:
+            output = (doc.get("outputs") or {}).get(v) or {}
+            usage = output.get("usage") or {}
+            values = {
+                **output,
+                "reused": bool(output.get("reused_from")),
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+            }
+            for column in _OUTPUT_COLUMNS:
+                row[f"{v}_{column}"] = values.get(column)
+        rows.append(row)
+    return rows
+
+
+def export_run(run: dict, docs: List[dict], path) -> pathlib.Path:
+    """Writes a run to path: .csv for one row per ticket, .json for everything
+    kept (run, summary, and each result without its model input).
+
+    The file is written beside path and then moved into place, so a failed
+    export never leaves a half-written file.
+    """
+    path = pathlib.Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        rows = export_rows(run, docs)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(
+            buffer, fieldnames=list(rows[0]) if rows else ["ticket_id"]
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: _cell(v) for k, v in row.items()})
+        text = buffer.getvalue()
+    elif suffix == ".json":
+        text = json.dumps(
+            {
+                "run": run,
+                "summary": _plain_summary(summarize(run, docs)),
+                "results": [
+                    {
+                        k: v
+                        for k, v in doc.items()
+                        if k not in ("_id", "payload", "claim")
+                    }
+                    for doc in sorted(docs, key=lambda d: d["ticket_id"])
+                ],
+            },
+            indent=2,
+            default=str,
+        )
+    else:
+        raise ValueError(f"Export to a .csv or .json file, not {path.name!r}.")
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return path
+
+
 # --- command line --------------------------------------------------------------
 
 
@@ -723,11 +1133,19 @@ def main(argv: List[str]) -> int:
     create.add_argument("--seed", type=int)
     create.add_argument("--name", default="")
     create.add_argument("--awaiting-only", action="store_true")
+    create.add_argument(
+        "--no-reuse",
+        action="store_true",
+        help="call the models even where a matching saved answer exists",
+    )
     _config_args(create, "A")
     _config_args(create, "B")
-    for name in ("run", "report"):
+    for name in ("run", "report", "finalize"):
         command = commands.add_parser(name)
         command.add_argument("run_id")
+    export = commands.add_parser("export", help="write a run to a .csv or .json file")
+    export.add_argument("run_id")
+    export.add_argument("path")
     args = parser.parse_args(argv)
 
     from .persistence import get_database, get_tickets_collection
@@ -739,7 +1157,15 @@ def main(argv: List[str]) -> int:
         b = _config_from(args, "B", a)
         ids = sample_ticket_ids(tickets, args.size, args.seed, args.awaiting_only)
         run_id = create_run(
-            tickets, runs, results, a, b, ids, args.name, seed=args.seed
+            tickets,
+            runs,
+            results,
+            a,
+            b,
+            ids,
+            args.name,
+            seed=args.seed,
+            reuse_answers=not args.no_reuse,
         )
         print(f"Created A/B run {run_id} with {len(ids)} tickets.")
         print(f"  A: {a.describe()}\n  B: {b.describe()}")
@@ -758,7 +1184,17 @@ def main(argv: List[str]) -> int:
     if run is None:
         print(f"No A/B run {args.run_id}.")
         return 1
-    print(format_summary(summarize(run, list(results.find({"run_id": args.run_id})))))
+    docs = list(results.find({"run_id": args.run_id}))
+    if args.command == "finalize":
+        done = finalize(tickets, runs, results, args.run_id)
+        print(
+            f"Saved verdicts on {done['tickets_updated']} ticket(s); removed the run's working data."
+        )
+        return 0
+    if args.command == "export":
+        print(f"Wrote {export_run(run, docs, args.path)}")
+        return 0
+    print(format_summary(summarize(run, docs)))
     return 0
 
 
