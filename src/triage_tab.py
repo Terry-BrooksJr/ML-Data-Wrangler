@@ -909,7 +909,10 @@ class TriageTab(QWidget):
             result: The engine's review dict, or None.
         """
         if result is None:
-            message = f"Ticket {zendesk_id} was not found, or is not awaiting review."
+            message = (
+                f"Ticket {zendesk_id} was not found, is not awaiting review, or was "
+                "reassigned while it was classified (it stays awaiting review)."
+            )
             logger.warning(message)
             QMessageBox.information(self, "Not Classified", message)
             return

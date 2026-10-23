@@ -315,7 +315,11 @@ def test_review_one_reports_not_awaiting(qapp, configured, dialogs, stored):
     wait_until_idle(qapp, tab)
 
     assert dialogs == [
-        ("information", "Ticket 999 was not found, or is not awaiting review.")
+        (
+            "information",
+            "Ticket 999 was not found, is not awaiting review, or was reassigned while "
+            "it was classified (it stays awaiting review).",
+        )
     ]
 
 

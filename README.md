@@ -10,8 +10,7 @@ The repo holds two separate pieces of work that read the same Zendesk ticket dat
 
 The two are **not** the same concern. LDA is unsupervised, offline topic
 modelling. The decision engine is a live classifier against a fixed taxonomy.
-No zero-shot or fine-tuning code exists yet. See
-[DISCOVERY_NOTES.md](DISCOVERY_NOTES.md) for the full repo survey.
+No zero-shot or fine-tuning code exists yet.
 
 ## Setup
 
@@ -576,5 +575,5 @@ These are unresolved by design. Nothing in the code invents a value for them.
 9. Whether `TicketOutcome` is usable ground truth. The discovery notes indicate **no**: it records root cause, and the export has no closed tickets.
 
 Two more items came out of the integration itself:
-- The model ID on Cheaper Inference is unconfirmed. It defaults to the brief's `claude-opus-4.8`.
+- The model ID on Cheaper Inference is unconfirmed. It defaults to `claude-opus-4.8` (`DECISION_ENGINE_MODEL`).
 - The Mongo database and collection names are unconfirmed. They default to `support_db.tickets`.

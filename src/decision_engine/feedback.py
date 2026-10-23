@@ -1,4 +1,4 @@
-"""Feedback loop: outcomes, misclassification_log and lessons_learned (brief §4.2).
+"""Feedback loop: outcomes, misclassification_log and lessons_learned.
 
 Outcomes are recorded manually for now (detection_method "manual"); per the
 discovery notes TicketOutcome can't be used to backfill them (open item #9).
