@@ -169,6 +169,20 @@ topics into a reporting list. From the command line:
 `cd src && python -m bertopic_model --outcome client_education` (repeat
 `--outcome` for several; `--outcome none` for tickets with no outcome).
 
+Writing each ticket's topic to `embedding_topic`:
+- **One process at a time.** It runs under a MongoDB lock, so two runs'
+  writes never interleave.
+- **The newest run wins.** A ticket keeps the topic from the run that ran
+  most recently, whichever run finishes writing last.
+- **Interruptions are recorded.** Writes go in batches. The run records
+  whether assignment completed (`assignment.status`, with counts) in
+  `run.json` and the run log. A partial or blocked assignment is finished
+  with `cd src && python -m bertopic_model --assign-run RUN_ID`.
+
+The exported topic list prefixes any cell that starts like a spreadsheet
+formula (`=`, `+`, `-`, `@`) with `'`, so opening it can't run a formula
+written into a ticket subject.
+
 ### Saving models to S3
 
 With **Bucket** and **Signing key** set under Settings > Model storage (S3 /

@@ -147,10 +147,38 @@ def train_and_save(
         status(
             f"Writing `{bertopic_model.ASSIGNMENT_FIELD}` to {len(corpus.ids)} tickets..."
         )
-        run["assignment"] = bertopic_model.assign_topics(
-            tickets, run, corpus.ids, result.topics
-        )
+        run["assignment"] = _assign(tickets, run, corpus.ids, result.topics, runs)
     return run
+
+
+def _assign(tickets, run: dict, ids, topics, runs: Optional[Collection]) -> dict:
+    """Assigns topics and records how it went (run.json, and the run log when
+    there is one), adding a warning to the run unless it completed."""
+    try:
+        summary = bertopic_model.assign_topics(tickets, run, ids, topics)
+    except bertopic_model.AssignmentRunning as e:
+        summary = {
+            "status": "not_started",
+            "total": len(ids),
+            "written": 0,
+            "assigned": 0,
+            "outliers": 0,
+            "error": str(e),
+        }
+    if summary["status"] != "complete":
+        run["warnings"].append(
+            bertopic_model.describe_assignment(summary, run["run_id"])
+        )
+    run["assignment"] = summary
+    try:
+        topic_store.write_run_file(run)
+        if runs is not None:
+            runs.update_one(
+                {"run_id": run["run_id"]}, {"$set": {"assignment": summary}}
+            )
+    except Exception as e:  # the assignment itself is done; only the record failed
+        logger.warning(f"Could not record the assignment of run {run['run_id']}: {e}")
+    return summary
 
 
 # --- persistence ------------------------------------------------------------------
@@ -363,6 +391,16 @@ TOPIC_LIST_COLUMNS = (
 )
 
 
+# A spreadsheet runs a cell starting with these as a formula.
+FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def spreadsheet_safe(text: str) -> str:
+    """text that a spreadsheet shows as text: one starting like a formula gets a
+    leading apostrophe. Ticket subjects and words are customer-written."""
+    return "'" + text if text.startswith(FORMULA_PREFIXES) else text
+
+
 def example_subjects(tickets: Optional[Collection], run: dict) -> Dict[str, str]:
     """{zendesk_id: subject} for the run's example tickets, read from Mongo; {} without it.
 
@@ -383,7 +421,9 @@ def topic_list_csv(run: dict, subjects: Optional[Dict[str, str]] = None) -> str:
     """The run's topics as CSV for a person to curate: one row per topic, largest first.
 
     proposed_name and decision are left blank to fill in (e.g. keep, merge
-    into N, drop). Subjects appear when given (see example_subjects).
+    into N, drop). Subjects appear when given (see example_subjects). Text
+    from tickets is made spreadsheet-safe (spreadsheet_safe), so opening the
+    file can't run a formula a customer wrote into a subject.
     """
     subjects = subjects or {}
     out = io.StringIO()
@@ -397,10 +437,14 @@ def topic_list_csv(run: dict, subjects: Optional[Dict[str, str]] = None) -> str:
                 t["topic_id"],
                 t["count"],
                 f"{t['share']:.1%}",
-                bertopic_model.format_outcome_counts(t.get("outcomes") or {}),
-                ", ".join(t["words"]),
-                ", ".join(examples),
-                " | ".join(subjects[i] for i in examples if subjects.get(i)),
+                spreadsheet_safe(
+                    bertopic_model.format_outcome_counts(t.get("outcomes") or {})
+                ),
+                spreadsheet_safe(", ".join(t["words"])),
+                spreadsheet_safe(", ".join(examples)),
+                " | ".join(
+                    spreadsheet_safe(subjects[i]) for i in examples if subjects.get(i)
+                ),
                 "",
                 "",
             ]

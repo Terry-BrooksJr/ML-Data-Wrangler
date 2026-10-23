@@ -59,6 +59,10 @@ MIN_CLUSTER_SIZE_FLOOR = 10
 OUTCOME_FIELD = "historical_outcome"
 # Tickets per topic listed as its examples: those nearest the topic's centre.
 EXAMPLES_PER_TOPIC = 5
+# Tickets per bulk write when assigning topics, and the lock (in
+# embeddings.LOCK_COLLECTION) that keeps two processes from assigning at once.
+ASSIGN_BATCH = 500
+ASSIGNMENT_LOCK_ID = "bertopic_assignment"
 
 
 def model_dir() -> pathlib.Path:
@@ -85,21 +89,28 @@ class Corpus:
     outcomes: List[Optional[str]] = field(default_factory=list)
 
 
+def _outcome(doc: dict) -> Optional[str]:
+    """A ticket's outcome; missing, null and empty all mean unset (None)."""
+    return doc.get(OUTCOME_FIELD) or None
+
+
 def outcome_query(outcomes: Optional[Sequence[Optional[str]]]) -> dict:
     """The Mongo filter for tickets with any of outcomes; None (or empty) means every ticket.
 
-    None in outcomes matches tickets whose outcome is unset or missing.
+    None in outcomes matches tickets whose outcome is unset: missing, null or "".
     """
     if not outcomes:
         return {}
-    return {OUTCOME_FIELD: {"$in": list(outcomes)}}
+    values = list(outcomes)
+    if None in values:
+        values.append("")
+    return {OUTCOME_FIELD: {"$in": values}}
 
 
 def outcome_counts(tickets: Collection) -> List[Tuple[Optional[str], int]]:
-    """(outcome, tickets) for every outcome in the collection, most tickets first; None is unset."""
-    counts = Counter(
-        doc.get(OUTCOME_FIELD) for doc in tickets.find({}, {OUTCOME_FIELD: 1})
-    )
+    """(outcome, tickets) for every outcome in the collection, most tickets first;
+    None is unset (missing, null or "")."""
+    counts = Counter(_outcome(doc) for doc in tickets.find({}, {OUTCOME_FIELD: 1}))
     return sorted(counts.items(), key=lambda item: (-item[1], item[0] or ""))
 
 
@@ -140,7 +151,7 @@ def load_corpus(
         else:
             key = (meta.get("endpoint"), meta.get("model"), meta.get("dimensions"))
             by_model.setdefault(key, []).append(
-                (str(doc.get("zendesk_id")), text, vector, doc.get(OUTCOME_FIELD))
+                (str(doc.get("zendesk_id")), text, vector, _outcome(doc))
             )
     if not by_model:
         return Corpus([], [], np.empty((0, 0), dtype=np.float32), {}, dict(skipped))
@@ -483,39 +494,158 @@ def save_charts(result: Result, run_dir: pathlib.Path) -> Dict[str, Optional[str
     return charts
 
 
+class AssignmentRunning(RuntimeError):
+    """Another process is writing BERTopic assignments to the tickets."""
+
+
+def _as_datetime(value) -> datetime:
+    """A run's ran_at, which run.json holds as text."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def assign_topics(
     tickets: Collection,
     run: dict,
     ids: Sequence[str],
     topics: Sequence[int],
     now: Optional[datetime] = None,
+    batch_size: int = ASSIGN_BATCH,
 ) -> dict:
     """Writes each ticket's topic under the run to `embedding_topic`.
 
     Outliers are written too (topic -1, no words), so it's clear the run
     looked at them. Only existing tickets are updated.
 
+    - Across processes, one assignment writes at a time (a MongoDB lock,
+      embeddings.job_lock), so two runs' writes never interleave.
+    - A ticket keeps the newest run's topic: one already assigned by a run
+      that ran later is left alone (counted as superseded), whichever run
+      writes last.
+    - Writes go in batches, one update_many per topic in each batch (every
+      ticket with that topic gets the same value). If one fails, assignment
+      stops and the summary
+      says so (status "partial", how many tickets were written, the error);
+      writing is idempotent, so assign_saved_run (CLI: --assign-run RUN_ID)
+      resumes it.
+
     Returns:
-        Counts: assigned, outliers, not_in_mongo.
+        status ("complete" or "partial"), total, written, assigned, outliers,
+        superseded, not_in_mongo, and error when partial.
+
+    Raises:
+        AssignmentRunning: another process holds the assignment lock.
     """
+    from pymongo.errors import PyMongoError
+
     now = now or datetime.now(timezone.utc)
+    ran_at = _as_datetime(run.get("ran_at") or now)
     words = {t["topic_id"]: t["words"][:5] for t in run["topics"]}
-    summary = {"assigned": 0, "outliers": 0, "not_in_mongo": 0}
-    for zendesk_id, topic in zip(ids, topics):
-        value = {
-            "run_id": run["run_id"],
-            "topic": int(topic),
-            "words": words.get(topic, []),
-            "assigned_at": now,
-        }
-        if not tickets.update_one(
-            {"zendesk_id": zendesk_id}, {"$set": {ASSIGNMENT_FIELD: value}}
-        ).matched_count:
-            summary["not_in_mongo"] += 1
-        else:
-            summary["outliers" if topic == OUTLIER else "assigned"] += 1
+    pairs = [(str(i), int(t)) for i, t in zip(ids, topics)]
+    summary = {
+        "status": "complete",
+        "total": len(pairs),
+        "written": 0,
+        "assigned": 0,
+        "outliers": 0,
+        "superseded": 0,
+        "not_in_mongo": 0,
+    }
+    # Write only where no newer run has assigned the ticket.
+    not_newer = {
+        "$or": [
+            {f"{ASSIGNMENT_FIELD}.ran_at": {"$lte": ran_at}},
+            {f"{ASSIGNMENT_FIELD}.ran_at": {"$exists": False}},
+        ]
+    }
+    with embeddings.job_lock(
+        tickets, ASSIGNMENT_LOCK_ID, AssignmentRunning, "BERTopic assignment"
+    ) as renew:
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start : start + batch_size]
+            try:
+                renew()
+                found = {
+                    str(doc["zendesk_id"]): (doc.get(ASSIGNMENT_FIELD) or {}).get(
+                        "ran_at"
+                    )
+                    for doc in tickets.find(
+                        {"zendesk_id": {"$in": [i for i, _ in batch]}},
+                        {"zendesk_id": 1, f"{ASSIGNMENT_FIELD}.ran_at": 1},
+                    )
+                }
+                by_topic: Dict[int, List[str]] = {}
+                for zendesk_id, topic in batch:
+                    if zendesk_id not in found:
+                        summary["not_in_mongo"] += 1
+                    elif (
+                        found[zendesk_id] is not None
+                        and _as_datetime(found[zendesk_id]) > ran_at
+                    ):
+                        summary["superseded"] += 1
+                    else:
+                        by_topic.setdefault(topic, []).append(zendesk_id)
+                for topic, topic_ids in by_topic.items():
+                    value = {
+                        "run_id": run["run_id"],
+                        "ran_at": ran_at,
+                        "topic": topic,
+                        "words": words.get(topic, []),
+                        "assigned_at": now,
+                    }
+                    done = tickets.update_many(
+                        {"zendesk_id": {"$in": topic_ids}, **not_newer},
+                        {"$set": {ASSIGNMENT_FIELD: value}},
+                    ).matched_count
+                    summary["written"] += done
+                    summary["outliers" if topic == OUTLIER else "assigned"] += done
+                    # A newer run that wrote since the read above keeps its topic.
+                    summary["superseded"] += len(topic_ids) - done
+            except (PyMongoError, AssignmentRunning) as e:
+                summary.update(status="partial", error=str(e)[:500])
+                logger.error(
+                    f"BERTopic assignment for run {run['run_id']} stopped after "
+                    f"{summary['written']} of {summary['total']} tickets: {e}"
+                )
+                break
     logger.info(f"BERTopic assignment for run {run['run_id']}: {summary}")
     return summary
+
+
+def assign_saved_run(tickets: Collection, run_dir: pathlib.Path) -> dict:
+    """Writes (or finishes writing) a saved run's assignments from its run
+    directory's run.json and assignments.json; see assign_topics."""
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assignments = json.loads((run_dir / ASSIGNMENTS_FILE).read_text(encoding="utf-8"))
+    return assign_topics(tickets, run, list(assignments), list(assignments.values()))
+
+
+def describe_assignment(summary: dict, run_id: str) -> str:
+    """One line on how assignment went, with how to resume a partial one."""
+    text = (
+        f"`{ASSIGNMENT_FIELD}` written to {summary['written']} of {summary['total']} ticket(s) "
+        f"({summary['outliers']} as outliers"
+        + (
+            f", {summary['superseded']} kept a newer run's topic"
+            if summary.get("superseded")
+            else ""
+        )
+        + (
+            f", {summary['not_in_mongo']} not in MongoDB"
+            if summary.get("not_in_mongo")
+            else ""
+        )
+        + ")."
+    )
+    if summary.get("status") != "complete":
+        how = "Stopped early" if summary.get("status") == "partial" else "Not started"
+        text += (
+            f" {how}: {summary.get('error')} Finish it with "
+            f"`cd src && python -m bertopic_model --assign-run {run_id}`."
+        )
+    return text
 
 
 # --- report -----------------------------------------------------------------------
@@ -617,6 +747,11 @@ def _parser() -> argparse.ArgumentParser:
         help=f"write each ticket's topic to its `{ASSIGNMENT_FIELD}` field in Mongo",
     )
     parser.add_argument(
+        "--assign-run",
+        metavar="RUN_ID",
+        help=f"don't train: write (or finish writing) a saved run's topics to `{ASSIGNMENT_FIELD}`",
+    )
+    parser.add_argument(
         "--outcome",
         dest="outcomes",
         action="append",
@@ -637,6 +772,20 @@ def main(argv: List[str]) -> int:
     from wrangler import DataWrangler
 
     tickets = DataWrangler.get_tickets_collection()
+    if args.assign_run:
+        try:
+            summary = assign_saved_run(tickets, model_dir() / args.assign_run)
+        except FileNotFoundError:
+            print(
+                f"error: no BERTopic run {args.assign_run!r} in {model_dir()}",
+                file=sys.stderr,
+            )
+            return 2
+        except AssignmentRunning as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(describe_assignment(summary, args.assign_run))
+        return 0 if summary["status"] == "complete" else 1
     corpus = load_corpus(tickets, args.outcomes)
     skipped = (
         ", ".join(f"{n} {why.replace('_', ' ')}" for why, n in corpus.skipped.items())
@@ -682,8 +831,14 @@ def main(argv: List[str]) -> int:
     print()
     print(format_report(run))
     if args.assign:
-        summary = assign_topics(tickets, run, corpus.ids, result.topics)
-        print(f"\nWrote `{ASSIGNMENT_FIELD}`: {summary}")
+        try:
+            summary = assign_topics(tickets, run, corpus.ids, result.topics)
+        except AssignmentRunning as e:
+            print(f"\nNot assigned: {e} Retry with --assign-run {run['run_id']}.")
+            return 1
+        print("\n" + describe_assignment(summary, run["run_id"]))
+        if summary["status"] != "complete":
+            return 1
     return 0
 
 

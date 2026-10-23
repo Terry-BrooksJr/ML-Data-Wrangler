@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import pathlib
 
 import bertopic_model
@@ -295,7 +296,15 @@ def test_assign_topics_writes_embedding_topic_and_leaves_topic_alone():
 
     summary = bertopic_model.assign_topics(tickets, run, ["1", "2", "3"], [0, -1, 0])
 
-    assert summary == {"assigned": 1, "outliers": 1, "not_in_mongo": 1}
+    assert summary == {
+        "status": "complete",
+        "total": 3,
+        "written": 2,
+        "assigned": 1,
+        "outliers": 1,
+        "superseded": 0,
+        "not_in_mongo": 1,
+    }
     one = tickets.find_one({"zendesk_id": "1"})
     assert one["topic"] == {"run_id": "lda"}
     assert one["embedding_topic"]["topic"] == 0
@@ -375,3 +384,111 @@ def test_topic_details_list_outcomes_and_nearest_examples(trained):
         ]
         assert closeness == sorted(closeness, reverse=True)
         assert closeness[0] == pytest.approx(max(float(unit[i] @ centre) for i in rows))
+
+
+def test_empty_outcome_counts_and_filters_as_unset():
+    tickets = _outcome_tickets()
+    tickets.insert_one(
+        {
+            **_ticket("5", "blank outcome", [0.5, 0.5], _meta("blank outcome")),
+            "historical_outcome": "",
+        }
+    )
+    # One "unset" bucket, not separate None and "" ones.
+    assert bertopic_model.outcome_counts(tickets)[0] == (None, 3)
+    unset = bertopic_model.load_corpus(tickets, [None])
+    assert unset.ids == ["3", "4", "5"]
+    assert unset.outcomes == [None, None, None]
+
+
+# --- assignment: newest run wins, locked, resumable -------------------------------
+
+ASSIGN_RUN = {
+    "topics": [{"topic_id": 0, "words": ["a"]}, {"topic_id": 1, "words": ["b"]}]
+}
+EARLY = datetime(2026, 10, 1, tzinfo=timezone.utc)
+LATE = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+
+def _assign_tickets(n=4):
+    tickets = mongomock.MongoClient().support_db.tickets
+    tickets.insert_many([{"zendesk_id": str(i)} for i in range(n)])
+    return tickets
+
+
+@pytest.mark.parametrize("order", ["older_first", "newer_first"])
+def test_newest_run_keeps_its_topics_whatever_order_runs_write(order):
+    tickets = _assign_tickets()
+    newer = {**ASSIGN_RUN, "run_id": "newer", "ran_at": LATE}
+    older = {**ASSIGN_RUN, "run_id": "older", "ran_at": EARLY}
+    # The runs overlap on tickets 1 and 2.
+    writes = [(older, ["0", "1", "2"], [0, 0, 0]), (newer, ["1", "2", "3"], [1, 1, 1])]
+    if order == "newer_first":
+        writes.reverse()
+    summaries = {
+        run["run_id"]: bertopic_model.assign_topics(tickets, run, ids, topics)
+        for run, ids, topics in writes
+    }
+
+    owner = {d["zendesk_id"]: d["embedding_topic"]["run_id"] for d in tickets.find()}
+    assert owner == {"0": "older", "1": "newer", "2": "newer", "3": "newer"}
+    if order == "newer_first":
+        assert (
+            summaries["older"]["superseded"] == 2 and summaries["older"]["written"] == 1
+        )
+
+
+def test_assignment_waits_for_no_one_else():
+    from datetime import timedelta
+
+    import embeddings
+
+    tickets = _assign_tickets()
+    tickets.database[embeddings.LOCK_COLLECTION].insert_one(
+        {
+            "_id": bertopic_model.ASSIGNMENT_LOCK_ID,
+            "holder": "another-process",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+    )
+    with pytest.raises(bertopic_model.AssignmentRunning, match="another-process"):
+        bertopic_model.assign_topics(
+            tickets, {**ASSIGN_RUN, "run_id": "r", "ran_at": LATE}, ["0"], [0]
+        )
+    assert "embedding_topic" not in tickets.find_one({"zendesk_id": "0"})
+
+
+def test_interrupted_assignment_reports_progress_and_resumes(tmp_path, monkeypatch):
+    from pymongo.errors import AutoReconnect
+
+    tickets = _assign_tickets()
+    run = {**ASSIGN_RUN, "run_id": "r", "ran_at": LATE}
+    ids, topics = ["0", "1", "2", "3"], [0, 0, 1, 1]
+    real = tickets.update_many
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise AutoReconnect("connection reset")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tickets, "update_many", flaky)
+    summary = bertopic_model.assign_topics(tickets, run, ids, topics, batch_size=2)
+    assert summary["status"] == "partial" and summary["written"] == 2
+    assert "connection reset" in summary["error"]
+    text = bertopic_model.describe_assignment(summary, "r")
+    assert "2 of 4" in text and "--assign-run r" in text
+
+    # Resuming from the saved run writes the rest; already-written tickets stay as they were.
+    run_dir = tmp_path / "r"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({**run, "ran_at": LATE.isoformat()}))
+    (run_dir / bertopic_model.ASSIGNMENTS_FILE).write_text(
+        json.dumps(dict(zip(ids, topics)))
+    )
+    resumed = bertopic_model.assign_saved_run(tickets, run_dir)
+    assert resumed["status"] == "complete" and resumed["written"] == 4
+    assert {
+        d["zendesk_id"]: d["embedding_topic"]["topic"] for d in tickets.find()
+    } == dict(zip(ids, topics))

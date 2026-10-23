@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from utility import ThreadWorker, worker_thread
 from widgets import button_row, Button, CheckBox, ComboBox, heading, hint, use_si_scrollbars
 
 
@@ -150,6 +151,8 @@ class BertopicResultsDialog(QDialog):
             List (bertopic_runs.example_subjects); None exports without them.
     """
 
+    EXPORT_LABEL = "Export Topic List…"
+
     def __init__(
         self,
         run: dict,
@@ -161,6 +164,10 @@ class BertopicResultsDialog(QDialog):
         self.run = run
         self.charts = charts
         self.subjects = subjects
+        # The subject lookup's worker, while one is running.
+        self._export_thread = None
+        self._export_worker = None
+        self._export_path = ""
         self.setWindowTitle(f"BERTopic Results · {bertopic_runs.describe_run(run)}")
         self.resize(760, 700)
 
@@ -207,7 +214,7 @@ class BertopicResultsDialog(QDialog):
                 )
             self.chart_buttons[name] = button
 
-        self.export_button = Button("Export Topic List…")
+        self.export_button = Button(self.EXPORT_LABEL)
         self.export_button.setToolTip(
             "A CSV of the topics, with each one's outcomes, words and example tickets, "
             "and blank columns to name and keep, merge or drop it."
@@ -234,6 +241,10 @@ class BertopicResultsDialog(QDialog):
             webbrowser.open(pathlib.Path(self.charts[name]).resolve().as_uri())
 
     def export_topic_list(self) -> None:
+        """Asks where to save, then reads the example subjects on a worker
+        thread (MongoDB may be slow or unreachable) and writes the CSV."""
+        if self._export_thread is not None:
+            return
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Topic List",
@@ -242,14 +253,54 @@ class BertopicResultsDialog(QDialog):
         )
         if not path:
             return
-        subjects: Dict[str, str] = {}
-        note = ""
-        if self.subjects is not None:
-            try:
-                subjects = self.subjects(self.run)
-            except Exception as e:  # Mongo unreachable: export the rest anyway
-                logger.warning(f"Could not read example subjects from MongoDB: {e}")
-                note = "\n\nExample subjects are missing: MongoDB could not be reached."
+        if self.subjects is None:
+            self._write_topic_list(path, {})
+            return
+        self._export_path = path
+        self.export_button.setEnabled(False)
+        self.export_button.setText("Reading subjects…")
+        lookup = self.subjects
+        self._export_thread = worker_thread(self)
+        self._export_worker = ThreadWorker(lambda: lookup(self.run), "Reading example subjects")
+        self._export_worker.moveToThread(self._export_thread)
+        self._export_worker.finished.connect(self._subjects_read)
+        self._export_worker.error.connect(self._subjects_failed)
+        self._export_thread.started.connect(self._export_worker.run)
+        self._export_thread.start()
+
+    def _subjects_read(self, subjects: Dict[str, str]) -> None:
+        path = self._end_lookup()
+        self._write_topic_list(path, subjects)
+
+    def _subjects_failed(self, message: str) -> None:
+        # Mongo unreachable: export the rest anyway.
+        path = self._end_lookup()
+        logger.warning(f"Could not read example subjects from MongoDB: {message}")
+        self._write_topic_list(
+            path, {}, "\n\nExample subjects are missing: MongoDB could not be reached."
+        )
+
+    def _end_lookup(self) -> str:
+        self.wait_for_export()
+        self.export_button.setText(self.EXPORT_LABEL)
+        self.export_button.setEnabled(bool(self.run.get("topics")))
+        return self._export_path
+
+    def wait_for_export(self) -> None:
+        """Blocks until a subject lookup in flight has finished. A running
+        QThread must not be destroyed, so this runs before the dialog goes."""
+        if self._export_thread is None:
+            return
+        self._export_thread.quit()
+        self._export_thread.wait()
+        self._export_thread = None
+        self._export_worker = None
+
+    def closeEvent(self, event) -> None:
+        self.wait_for_export()
+        super().closeEvent(event)
+
+    def _write_topic_list(self, path: str, subjects: Dict[str, str], note: str = "") -> None:
         try:
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(bertopic_runs.topic_list_csv(self.run, subjects))

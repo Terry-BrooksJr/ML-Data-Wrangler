@@ -43,7 +43,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Type
 
 import numpy as np
 import requests
@@ -721,14 +721,21 @@ def plan_backfill(tickets: Collection, cfg: Config) -> Plan:
 
 
 @contextmanager
-def backfill_lock(tickets: Collection) -> Iterator[Callable[[], None]]:
-    """Holds the backfill lock; yields a function that renews it.
+def job_lock(
+    tickets: Collection,
+    lock_id: str,
+    error: Type[RuntimeError],
+    what: str,
+    ttl: timedelta = LOCK_TTL,
+) -> Iterator[Callable[[], None]]:
+    """Holds a MongoDB lock (in LOCK_COLLECTION) across processes; yields a
+    function that renews it.
 
-    The lock expires after LOCK_TTL without renewal, so one left by a
-    crashed process doesn't block forever.
+    The lock expires after ttl without renewal, so one left by a crashed
+    process doesn't block forever.
 
     Raises:
-        BackfillRunning: another backfill holds it.
+        error: another process holds the lock; the message names `what`.
     """
     locks = tickets.database[LOCK_COLLECTION]
     holder = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
@@ -738,16 +745,16 @@ def backfill_lock(tickets: Collection) -> Iterator[Callable[[], None]]:
         try:
             locks.find_one_and_update(
                 {
-                    "_id": LOCK_ID,
+                    "_id": lock_id,
                     "$or": [{"holder": holder}, {"expires_at": {"$lt": now}}],
                 },
-                {"$set": {"holder": holder, "expires_at": now + LOCK_TTL}},
+                {"$set": {"holder": holder, "expires_at": now + ttl}},
                 upsert=True,
             )
         except DuplicateKeyError:
-            current = locks.find_one({"_id": LOCK_ID}) or {}
-            raise BackfillRunning(
-                f"Another embedding backfill is running ({current.get('holder')}, lock until "
+            current = locks.find_one({"_id": lock_id}) or {}
+            raise error(
+                f"Another {what} is running ({current.get('holder')}, lock until "
                 f"{current.get('expires_at')}). Wait for it to finish."
             ) from None
 
@@ -755,7 +762,16 @@ def backfill_lock(tickets: Collection) -> Iterator[Callable[[], None]]:
     try:
         yield take
     finally:
-        locks.delete_one({"_id": LOCK_ID, "holder": holder})
+        locks.delete_one({"_id": lock_id, "holder": holder})
+
+
+def backfill_lock(tickets: Collection):
+    """Holds the backfill lock (job_lock); yields a function that renews it.
+
+    Raises:
+        BackfillRunning: another backfill holds it.
+    """
+    return job_lock(tickets, LOCK_ID, BackfillRunning, "embedding backfill")
 
 
 def run_backfill(
