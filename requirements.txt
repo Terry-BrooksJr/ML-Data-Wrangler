@@ -241,7 +241,7 @@ numexpr==2.14.1 ; python_full_version < '3.11'
     # via pyldavis
 numexpr==2.14.2 ; python_full_version >= '3.11'
     # via pyldavis
-numpy==1.26.4
+numpy==2.2.6
     # via
     #   bertopic
     #   blis
