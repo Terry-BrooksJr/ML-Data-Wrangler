@@ -478,7 +478,7 @@ shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
-smart-open==7.7.1
+smart-open==8.0.4
     # via
     #   gensim
     #   weasel
