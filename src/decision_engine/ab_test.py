@@ -37,15 +37,25 @@ import socket
 import sys
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+import bson
 from loguru import logger
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError
 
 from . import decisions, pricing
-from .classify import classify_ticket, EFFORT_LEVELS, EngineConfig, is_fatal
+from .classify import (
+    classify_ticket,
+    EFFORT_LEVELS,
+    EngineConfig,
+    is_fatal,
+    MAX_RETRIES,
+    REQUEST_TIMEOUT_SECONDS,
+)
 from .guards import CLASSIFICATIONS
 from .payload import build_ticket_payload
 from .prompts import PROMPT_VERSION
@@ -76,11 +86,19 @@ _KEPT_FIELDS = (
     "decision_only",
     "probabilities",
 )
-# The ticket fields kept for the reviewer; the model gets the saved payload.
-_SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status", "assignee", "transcript")
-# A claim older than this is treated as abandoned (its worker crashed). Long
-# enough for both variants of one ticket, confirmation calls included.
-CLAIM_TTL = timedelta(minutes=30)
+# The ticket fields kept beside the payload, for the reviewer. The transcript
+# isn't copied: the reviewer reads it from the payload the models were sent.
+_SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status")
+# A claim (and an in-flight lock) older than this is treated as abandoned:
+# its worker stopped. It is renewed before each variant's calls, so it must
+# outlast one variant's worst case: primary, secondary and confirmation
+# calls, each with the client's timeout and retries, plus a margin.
+CLAIM_TTL = timedelta(
+    seconds=3 * REQUEST_TIMEOUT_SECONDS * (MAX_RETRIES + 1)
+) + timedelta(minutes=5)
+# MongoDB refuses documents over 16 MiB; a result whose ticket is this big
+# is left out of the run (and reported) rather than failing the whole run.
+MAX_RESULT_BYTES = 15 * 1024 * 1024
 # Run statuses. "creating" is only ever seen if creation was interrupted;
 # "finalized" means the verdicts were copied to the tickets and the bulky
 # working data removed (finalize).
@@ -107,10 +125,12 @@ VERDICTS_FIELD = "ab_test_verdicts"
 # The answers, verdicts and content fingerprints stay, for reports and reuse.
 _SLIMMED_FIELDS = (
     "payload",
-    "ticket.transcript",
+    "ticket.subject",
+    "ticket.transcript",  # in results saved before the transcript was dropped
     "ticket.assignee",
     "assignee",
     "claim",
+    "started",
     *(f"outputs.{v}.raw_response" for v in ("A", "B")),
 )
 
@@ -227,8 +247,9 @@ _FINGERPRINT_AS_OF = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 def _snapshot(ticket: dict, as_of: datetime) -> dict:
     """What a result keeps of its ticket: the exact payload both variants
-    are sent, the fields the reviewer reads, and a fingerprint of the
-    ticket's content for reusing answers (content_hash)."""
+    are sent (which the reviewer reads the transcript from), the subject and
+    status, and a fingerprint of the ticket's content for reusing answers
+    (content_hash)."""
     reengage_count = len(ticket.get("reengage_attempts") or [])
     assignee = ticket.get("assignee")
     fingerprint = json.dumps(
@@ -288,7 +309,9 @@ def create_run(
     can't tell which side is A.
 
     If saving the results fails part way, the run and its results are
-    removed, so no partial sample is left behind.
+    removed, so no partial sample is left behind. A ticket whose result
+    would exceed MongoDB's document limit is left out and listed in the
+    run's "skipped".
 
     Returns:
         The run's ID.
@@ -318,6 +341,35 @@ def create_run(
     run_id = uuid.uuid4().hex[:12]
     shuffle = random.Random(seed)
     created_at = datetime.now(timezone.utc)
+    docs, skipped = [], []
+    for ticket_id in ticket_ids:
+        doc = {
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "order": shuffle.sample(VARIANTS, 2),
+            "outputs": {},
+            "preference": None,
+            "preference_version": 0,
+            "claim": None,
+            **_snapshot(found[ticket_id][0], created_at),
+        }
+        size = len(bson.encode(doc))
+        if size > MAX_RESULT_BYTES:
+            skipped.append(
+                {
+                    "ticket_id": ticket_id,
+                    "reason": f"too large to store ({size / 1024 / 1024:.1f} MiB)",
+                }
+            )
+        else:
+            docs.append(doc)
+    if skipped:
+        logger.warning(
+            f"A/B {run_id}: left out {len(skipped)} ticket(s) too large to store: "
+            + ", ".join(s["ticket_id"] for s in skipped)
+        )
+    if not docs:
+        raise ValueError("Every sampled ticket is too large to store; nothing to test.")
     runs.insert_one(
         {
             "_id": run_id,
@@ -326,28 +378,15 @@ def create_run(
             "created_by": created_by,
             "variants": {"A": a.to_dict(), "B": b.to_dict()},
             **_versions(),
-            "ticket_count": len(ticket_ids),
+            "ticket_count": len(docs),
+            "skipped": skipped,
             "reuse_answers": reuse_answers,
             "prices": {m: p.to_dict() for m, p in (prices or {}).items()},
             "status": CREATING,
         }
     )
     try:
-        results.insert_many(
-            [
-                {
-                    "run_id": run_id,
-                    "ticket_id": ticket_id,
-                    "order": shuffle.sample(VARIANTS, 2),
-                    "outputs": {},
-                    "preference": None,
-                    "preference_version": 0,
-                    "claim": None,
-                    **_snapshot(found[ticket_id][0], created_at),
-                }
-                for ticket_id in ticket_ids
-            ]
-        )
+        results.insert_many(docs)
         runs.update_one({"_id": run_id}, {"$set": {"status": PENDING}})
     except BaseException:
         results.delete_many({"run_id": run_id})
@@ -461,15 +500,34 @@ def _sum_usage(usages: Iterable[dict]) -> dict:
     return dict(total)
 
 
-def pending_variants(doc: dict) -> List[str]:
+def pending_variants(doc: dict, retry_interrupted: bool = False) -> List[str]:
     """The variants still to classify: never tried, or failed fewer than
-    MAX_ATTEMPTS times."""
+    MAX_ATTEMPTS times. A variant whose call was interrupted (interrupted)
+    isn't retried unless retry_interrupted: it may already have been charged."""
     outputs = doc.get("outputs") or {}
     return [
         v
         for v in VARIANTS
-        if v not in outputs
-        or ("error" in outputs[v] and _attempts(outputs[v]) < MAX_ATTEMPTS)
+        if (
+            v not in outputs
+            or ("error" in outputs[v] and _attempts(outputs[v]) < MAX_ATTEMPTS)
+        )
+        and (retry_interrupted or v not in interrupted(doc))
+    ]
+
+
+def interrupted(doc: dict) -> List[str]:
+    """The variants whose model call started but whose answer was never saved:
+    the worker stopped mid-call (crashed, killed) and its claim has expired,
+    so the call may have been billed. They wait for a deliberate retry."""
+    started = doc.get("started") or {}
+    claim = doc.get("claim") or {}
+    live = claim.get("at") is not None and _aware(claim["at"]) >= _now() - CLAIM_TTL
+    return [
+        v
+        for v in VARIANTS
+        if v in started
+        and not (live and claim.get("worker") == started[v].get("worker"))
     ]
 
 
@@ -489,10 +547,19 @@ def _attempts(output: dict) -> int:
     return output.get("attempts") or 1
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _aware(moment: datetime) -> datetime:
+    """moment with UTC attached; Mongo returns naive UTC datetimes."""
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
     """Takes a result for this worker, so two workers never pay for the same
     ticket; returns the claimed document, or None if another worker has it."""
-    now = datetime.now(timezone.utc)
+    now = _now()
     return results.find_one_and_update(
         {
             "_id": doc_id,
@@ -507,19 +574,139 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
     )
 
 
-def _finish(runs: Collection, results: Collection, run_id: str) -> str:
+def _renew(results: Collection, doc_id, worker: str) -> bool:
+    """Extends this worker's claim before a model call, so it outlasts the
+    call (CLAIM_TTL bounds one variant's calls); False if it was lost."""
+    return (
+        results.update_one(
+            {"_id": doc_id, "claim.worker": worker},
+            {"$set": {"claim.at": _now()}},
+        ).matched_count
+        > 0
+    )
+
+
+def _locks(results: Collection) -> Collection:
+    """In-flight answers, one per ticket content and answer key, shared by
+    every run, so two tests never pay for the same answer at once."""
+    return results.database[f"{results.name}_locks"]
+
+
+def _lock_answer(results: Collection, doc: dict, key: str, worker: str) -> bool:
+    """Takes the in-flight lock for this ticket content and answer key; False
+    if another worker (in any run) is getting that answer right now."""
+    lock_id = f"{doc['content_hash']}:{key}"
+    locks = _locks(results)
+    now = _now()
+    try:
+        locks.insert_one({"_id": lock_id, "worker": worker, "at": now})
+        return True
+    except DuplicateKeyError:
+        # Taken over only if its worker stopped (the lock outlived CLAIM_TTL).
+        return (
+            locks.update_one(
+                {
+                    "_id": lock_id,
+                    "$or": [{"worker": worker}, {"at": {"$lt": now - CLAIM_TTL}}],
+                },
+                {"$set": {"worker": worker, "at": now}},
+            ).matched_count
+            > 0
+        )
+
+
+def _unlock_answer(results: Collection, doc: dict, key: str, worker: str) -> None:
+    _locks(results).delete_one(
+        {"_id": f"{doc['content_hash']}:{key}", "worker": worker}
+    )
+
+
+def _finish(runs: Collection, results: Collection, run_id: str) -> Optional[str]:
     """Records the run's status from what is saved: complete when nothing is
     left to classify (every ticket has both answers, or a variant gave up
-    after MAX_ATTEMPTS failures)."""
+    after MAX_ATTEMPTS failures) and no call was interrupted. A finalized
+    run is left alone. Returns the status set, or None."""
     unfinished = sum(
-        1 for doc in results.find({"run_id": run_id}) if pending_variants(doc)
+        1
+        for doc in results.find({"run_id": run_id})
+        if pending_variants(doc) or interrupted(doc)
     )
     status = PARTIAL if unfinished else COMPLETE
     update = {"status": status}
     if status == COMPLETE:
-        update["completed_at"] = datetime.now(timezone.utc)
-    runs.update_one({"_id": run_id}, {"$set": update})
-    return status
+        update["completed_at"] = _now()
+    outcome = runs.update_one(
+        {"_id": run_id, "status": {"$ne": FINALIZED}}, {"$set": update}
+    )
+    return status if outcome.matched_count else None
+
+
+class _Refused(Exception):
+    """run_ab_test couldn't start; carries the error to raise."""
+
+    def __init__(self, error: Exception):
+        super().__init__(str(error))
+        self.error = error
+
+
+def _start(runs: Collection, results: Collection, run_id: str) -> dict:
+    """Marks the run running for this app's prompts, atomically.
+
+    Workers on one run must use the same prompts. The run takes this app's
+    prompt versions only if it has them already, or if no answer was saved
+    yet and no other worker is running it; the versions and the running
+    status are set together, so two app versions can't both start.
+
+    Raises:
+        _Refused: no such run, unfinished creation, finalized, or a
+            different prompt (PromptChanged).
+    """
+    current = _versions()
+    if results.count_documents({"run_id": run_id, "outputs": {"$ne": {}}}, limit=1):
+        # Runs from before outputs_saved existed.
+        runs.update_one(
+            {"_id": run_id, "outputs_saved": {"$exists": False}},
+            {"$set": {"outputs_saved": True}},
+        )
+    run = runs.find_one_and_update(
+        {
+            "_id": run_id,
+            "status": {"$nin": [CREATING, FINALIZED]},
+            "$or": [
+                current,
+                {"outputs_saved": {"$ne": True}, "status": {"$ne": RUNNING}},
+            ],
+        },
+        {"$set": {**current, "status": RUNNING}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if run is not None:
+        return run
+    run = runs.find_one({"_id": run_id})
+    if run is None:
+        raise _Refused(ValueError(f"No A/B run {run_id}."))
+    if run.get("status") == CREATING:
+        raise _Refused(
+            ValueError(f"A/B run {run_id} wasn't created completely; create a new run.")
+        )
+    if run.get("status") == FINALIZED:
+        raise _Refused(
+            RunFinalized(
+                f"A/B run {run_id} is finalized; there is nothing to classify."
+            )
+        )
+    was = ", ".join(
+        f"{run.get(key)} now {version}"
+        for key, version in current.items()
+        if run.get(key) != version
+    )
+    raise _Refused(
+        PromptChanged(
+            f"A/B run {run_id} is being classified, or was classified, with a different "
+            f"prompt ({was}). Answers from two prompts can't be compared; create a new run, "
+            "or classify it with the app version that started it."
+        )
+    )
 
 
 def run_ab_test(
@@ -530,63 +717,61 @@ def run_ab_test(
     on_progress: Optional[Callable[[int, int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
     worker: Optional[str] = None,
+    retry_interrupted: bool = False,
 ) -> dict:
     """Classifies every pending ticket of a run with both configurations.
 
     Each ticket's saved payload is sent to both, so they see the same input.
     Resumable: an output is saved as soon as it arrives and isn't asked for
-    again, but a failed one is retried by the next run. Errors that will
-    hit every ticket (bad key, out of credit) stop the run, as in a review
-    batch. Each ticket is claimed while it is classified, so two workers on
-    one run never classify the same ticket. However the call ends, the run
-    is left "complete" or "partial", never "running".
+    again, but a failed one is retried by the next run (up to MAX_ATTEMPTS),
+    and every attempt is kept in attempt_history. Errors that will hit every
+    ticket (bad key, out of credit) stop the run, as in a review batch, after
+    saving what they cost. Each ticket is claimed while it is classified,
+    with the claim renewed before each call, so two workers on one run never
+    classify the same ticket; with reuse, an in-flight lock per ticket
+    content and answer key does the same across runs. A call interrupted by
+    a crash isn't repeated unless retry_interrupted. However the call ends,
+    the run is left "complete" or "partial", never "running".
 
     Args:
         on_progress: Called with (done, total) after each ticket.
         should_stop: Checked between tickets; True stops the run (Stopped).
         worker: Identifies this worker's claims; defaults to a fresh ID.
+        retry_interrupted: Also retry calls a crashed worker left unfinished.
 
     Returns:
         The run's summary (summarize).
 
     Raises:
         ValueError: No such run, or its creation didn't finish.
-        PromptChanged: Answers were saved under a different system prompt.
+        RunFinalized: The run is finalized.
+        PromptChanged: The run uses a different system prompt.
     """
-    run = runs.find_one({"_id": run_id})
-    if run is None:
-        raise ValueError(f"No A/B run {run_id}.")
-    if run.get("status") == CREATING:
-        raise ValueError(
-            f"A/B run {run_id} wasn't created completely; create a new run."
-        )
-    if run.get("status") == FINALIZED:
-        raise RunFinalized(
-            f"A/B run {run_id} is finalized; there is nothing to classify."
-        )
-    docs = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
-    current = _versions()
-    changed = [
-        key
-        for key, version in current.items()
-        if run.get(key) is not None and run[key] != version
-    ]
-    if changed and any(doc.get("outputs") for doc in docs):
-        was = ", ".join(f"{run[key]} now {current[key]}" for key in changed)
-        raise PromptChanged(
-            f"A/B run {run_id} was classified with a different prompt ({was}). Answers from "
-            "two prompts can't be compared; create a new run."
-        )
-    if any(run.get(key) != version for key, version in current.items()):
-        runs.update_one({"_id": run_id}, {"$set": current})
-    variant_configs = configs(run)
     worker = worker or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-    runs.update_one({"_id": run_id}, {"$set": {"status": RUNNING}})
+    started = False
     try:
+        try:
+            run = _start(runs, results, run_id)
+        except _Refused as refused:
+            raise refused.error from None
+        started = True
+        docs = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
+        context = _RunContext(
+            run_id=run_id,
+            runs=runs,
+            results=results,
+            configs=configs(run),
+            versions=_versions(),
+            classify=classify,
+            worker=worker,
+            reuse=run.get("reuse_answers", False),
+            prices=run_prices(run),
+            retry_interrupted=retry_interrupted,
+        )
         for done, doc in enumerate(docs, start=1):
             if should_stop and should_stop():
                 raise Stopped(f"Stopped after {done - 1} of {len(docs)} tickets.")
-            if pending_variants(doc):
+            if pending_variants(doc, retry_interrupted):
                 claimed = _claim(results, doc["_id"], worker)
                 if claimed is None:
                     logger.info(
@@ -594,16 +779,7 @@ def run_ab_test(
                     )
                 else:
                     try:
-                        _classify_pending(
-                            claimed,
-                            run_id,
-                            variant_configs,
-                            results,
-                            classify,
-                            worker,
-                            reuse=run.get("reuse_answers", False),
-                            prices=run_prices(run),
-                        )
+                        _classify_pending(claimed, context)
                     finally:
                         results.update_one(
                             {"_id": doc["_id"], "claim.worker": worker},
@@ -611,70 +787,172 @@ def run_ab_test(
                         )
             if on_progress:
                 on_progress(done, len(docs))
-    finally:
-        _finish(runs, results, run_id)
+    except BaseException as error:
+        # A refusal changed nothing; anything else may have left the run
+        # marked running (even a failed start: its update may have applied).
+        if started or not isinstance(error, (ValueError, RunFinalized, PromptChanged)):
+            _finish(runs, results, run_id)
+        raise
+    _finish(runs, results, run_id)
     return summarize(
         runs.find_one({"_id": run_id}), list(results.find({"run_id": run_id}))
     )
 
 
-def _classify_pending(
-    doc: dict,
-    run_id: str,
-    variant_configs: Dict[str, EngineConfig],
-    results: Collection,
-    classify: Callable[..., dict],
-    worker: str,
-    reuse: bool = False,
-    prices: Optional[Dict[str, pricing.Price]] = None,
-) -> None:
+@dataclass
+class _RunContext:
+    run_id: str
+    runs: Collection
+    results: Collection
+    configs: Dict[str, EngineConfig]
+    versions: Dict[str, str]
+    classify: Callable[..., dict]
+    worker: str
+    reuse: bool
+    prices: Dict[str, pricing.Price]
+    retry_interrupted: bool
+
+
+def _attempt_record(output: dict, attempt: int) -> dict:
+    """What attempt_history keeps of one model attempt: its outcome and cost."""
+    record = {
+        key: output.get(key)
+        for key in (
+            "classification",
+            "confidence",
+            "error",
+            "fatal",
+            "raw_response",
+            "request_id",
+            "usage",
+            "latency_ms",
+            "model_calls",
+            "cost_usd",
+            "cost_basis",
+        )
+        if key in output
+    }
+    record["attempt"] = attempt
+    record["at"] = _now()
+    return record
+
+
+def _classify_pending(doc: dict, ctx: "_RunContext") -> None:
     """Classifies a claimed ticket's pending variants and saves each output.
 
-    With reuse, a matching saved answer (_reusable) is copied instead of
-    calling the model. Each output records its attempt number, so a variant
-    that keeps failing stops being retried after MAX_ATTEMPTS.
+    For each variant: renew the claim, copy a reusable answer if there is one
+    (taking the in-flight lock first, so only one run asks), otherwise mark
+    the call started and ask the model. The output replaces outputs.<v>, and
+    each model attempt (failed ones included) is added to
+    attempt_history.<v>, so spend and debugging data are never lost. A fatal
+    error is saved to the history (not as an attempt) and then raised.
     """
-    for variant in pending_variants(doc):
-        config = variant_configs[variant]
+    for variant in pending_variants(doc, ctx.retry_interrupted):
+        config = ctx.configs[variant]
         key = answer_key(config)
         previous = (doc.get("outputs") or {}).get(variant)
         attempt = _attempts(previous) + 1 if previous else 1
-        reused = _reusable(results, doc, key) if reuse else None
-        if reused is not None:
-            output = reused
-        else:
-            try:
-                output = _output(
-                    classify(
-                        doc["payload"],
-                        reengage_count=doc.get("reengage_count", 0),
-                        assignee=doc.get("assignee"),
-                        config=config,
-                        allow_decision_models=True,
-                    ),
-                    prices,
-                )
-                output["answer_key"] = key
-            except Exception as e:
-                if is_fatal(e):
-                    raise
-                logger.warning(
-                    f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant} "
-                    f"(attempt {attempt} of {MAX_ATTEMPTS}): {e}"
-                )
-                output = _error_output(e, prices)
-        output["attempts"] = attempt
-        output["answered_at"] = datetime.now(timezone.utc)
-        saved = results.update_one(
-            {"_id": doc["_id"], "claim.worker": worker},
-            {"$set": {f"outputs.{variant}": output}},
-        )
-        if saved.matched_count == 0:
-            # The claim expired and another worker took the ticket over.
+        if not _renew(ctx.results, doc["_id"], ctx.worker):
             logger.warning(
-                f"A/B {run_id}: lost the claim on ticket {doc['ticket_id']}; its output wasn't saved."
+                f"A/B {ctx.run_id}: lost the claim on ticket {doc['ticket_id']}; stopping it."
             )
             return
+        locked = False
+        if ctx.reuse and doc.get("content_hash"):
+            if not _lock_answer(ctx.results, doc, key, ctx.worker):
+                logger.info(
+                    f"A/B {ctx.run_id}: another test is getting ticket {doc['ticket_id']}'s "
+                    f"{variant} answer; it will be reused next time."
+                )
+                continue
+            locked = True
+        try:
+            reused = _reusable(ctx.results, doc, key) if ctx.reuse else None
+            if reused is not None:
+                output, record = reused, None
+            else:
+                output, record = _ask(doc, variant, key, attempt, ctx)
+            output["attempts"] = attempt
+            output["answered_at"] = _now()
+            _check_versions(ctx)
+            ctx.runs.update_one(
+                {"_id": ctx.run_id, "outputs_saved": {"$ne": True}},
+                {"$set": {"outputs_saved": True}},
+            )
+            update = {
+                "$set": {f"outputs.{variant}": output},
+                "$unset": {f"started.{variant}": ""},
+            }
+            if record is not None:
+                update["$push"] = {f"attempt_history.{variant}": record}
+            saved = ctx.results.update_one(
+                {"_id": doc["_id"], "claim.worker": ctx.worker}, update
+            )
+            if saved.matched_count == 0:
+                # The claim expired and another worker took the ticket over.
+                logger.warning(
+                    f"A/B {ctx.run_id}: lost the claim on ticket {doc['ticket_id']}; "
+                    "its output wasn't saved."
+                )
+                return
+        finally:
+            if locked:
+                _unlock_answer(ctx.results, doc, key, ctx.worker)
+
+
+def _ask(doc: dict, variant: str, key: str, attempt: int, ctx: "_RunContext"):
+    """Calls the model for one variant; returns (output, attempt record).
+
+    The call is marked started first, so a crash mid-call is recognised as
+    interrupted rather than silently paid for twice. A fatal error's cost is
+    saved to attempt_history (it isn't counted as an attempt) before it is
+    raised.
+    """
+    ctx.results.update_one(
+        {"_id": doc["_id"], "claim.worker": ctx.worker},
+        {"$set": {f"started.{variant}": {"worker": ctx.worker, "at": _now()}}},
+    )
+    try:
+        output = _output(
+            ctx.classify(
+                doc["payload"],
+                reengage_count=doc.get("reengage_count", 0),
+                assignee=doc.get("assignee"),
+                config=ctx.configs[variant],
+                allow_decision_models=True,
+            ),
+            ctx.prices,
+        )
+        output["answer_key"] = key
+    except Exception as e:
+        output = _error_output(e, ctx.prices)
+        if is_fatal(e):
+            output["fatal"] = True
+            ctx.results.update_one(
+                {"_id": doc["_id"], "claim.worker": ctx.worker},
+                {
+                    "$push": {
+                        f"attempt_history.{variant}": _attempt_record(output, attempt)
+                    },
+                    "$unset": {f"started.{variant}": ""},
+                },
+            )
+            raise
+        logger.warning(
+            f"A/B {ctx.run_id}: ticket {doc['ticket_id']} failed on {variant} "
+            f"(attempt {attempt} of {MAX_ATTEMPTS}): {e}"
+        )
+    return output, _attempt_record(output, attempt)
+
+
+def _check_versions(ctx: "_RunContext") -> None:
+    """Refuses to save an answer if the run now uses other prompts (another
+    app version took it over)."""
+    run = ctx.runs.find_one({"_id": ctx.run_id}, {key: 1 for key in ctx.versions})
+    if run is None or any(run.get(k) != v for k, v in ctx.versions.items()):
+        raise PromptChanged(
+            f"A/B run {ctx.run_id} now uses a different prompt; this answer wasn't saved."
+        )
 
 
 def _reusable(results: Collection, doc: dict, key: str) -> Optional[dict]:
@@ -706,6 +984,56 @@ def _reusable(results: Collection, doc: dict, key: str) -> Optional[dict]:
                 }
                 return copied
     return None
+
+
+def estimate_calls(
+    runs: Collection, results: Collection, run_id: str, retry_interrupted: bool = False
+) -> dict:
+    """What classifying the run now would involve, before paying for it.
+
+    Returns:
+        {"answers": answers still needed, "reusable": how many of those a
+        saved answer covers (no model call), "calls": the rest, each at
+        least one paid call (more when a fallback or confirmation model is
+        used), "interrupted": calls left waiting after a crash, which are
+        only retried on request}.
+    """
+    run = runs.find_one({"_id": run_id}) or {}
+    variant_configs = configs(run) if run.get("variants") else {}
+    answers = reusable = waiting = 0
+    for doc in results.find({"run_id": run_id}):
+        waiting += len(interrupted(doc))
+        for variant in pending_variants(doc, retry_interrupted):
+            answers += 1
+            if (
+                run.get("reuse_answers")
+                and variant in variant_configs
+                and _reusable(results, doc, answer_key(variant_configs[variant]))
+            ):
+                reusable += 1
+    return {
+        "answers": answers,
+        "reusable": reusable,
+        "calls": answers - reusable,
+        "interrupted": waiting,
+    }
+
+
+def describe_estimate(estimate: dict) -> str:
+    """The estimate as a sentence for a confirmation."""
+    if not estimate["answers"]:
+        return "Nothing is left to classify."
+    text = f"{estimate['answers']} answer(s) to get"
+    if estimate["reusable"]:
+        text += f", {estimate['reusable']} of them copied from earlier tests at no cost"
+    calls = estimate["calls"]
+    text += (
+        f": at least {calls} paid model call(s), more if a fallback or "
+        "confirmation model is needed."
+        if calls
+        else ": no paid model calls."
+    )
+    return text
 
 
 def record_preference(
@@ -805,8 +1133,12 @@ def summarize(run: dict, docs: List[dict]) -> dict:
          "agreement": int (same classification), "variants": {variant:
          {"done", "errors", "classifications", "mean_confidence",
          "confirmed", "classification_only", "usage", "mean_latency_ms",
-         "cost_usd" (every answer, reused ones at their original cost),
-         "spent_usd" (calls this run paid for), "cost_unknown", "reused"}},
+         "attempts" (model attempts this run made), "cost_usd" (every
+         answer, reused ones at their original cost), "spent_usd" (every
+         attempt this run paid for, failed ones included), "cost_unknown"
+         and "spent_unknown" (how many of those had no known cost; the
+         amounts are then subtotals of the known ones), "reused",
+         "interrupted"}},
          "preferences":
          Counter, "reviewed": int, "disagreement_preferences": Counter}
     """
@@ -814,7 +1146,14 @@ def summarize(run: dict, docs: List[dict]) -> dict:
     for v in VARIANTS:
         outputs = [d["outputs"][v] for d in docs if v in (d.get("outputs") or {})]
         good = [o for o in outputs if "error" not in o]
-        latencies = [o["latency_ms"] for o in good if o.get("latency_ms") is not None]
+        # Failed answers took time too.
+        latencies = [
+            o["latency_ms"] for o in outputs if o.get("latency_ms") is not None
+        ]
+        attempts = [record for d in docs for record in attempt_records(d, v)]
+        reused = [o for o in outputs if o.get("reused_from")]
+        spent = [r.get("cost_usd") for r in attempts]
+        reused_costs = [o.get("cost_usd") for o in reused]
         variants[v] = {
             "done": len(outputs),
             "errors": len(outputs) - len(good),
@@ -824,14 +1163,17 @@ def summarize(run: dict, docs: List[dict]) -> dict:
             ),
             "confirmed": sum(1 for o in good if o.get("confirmed_from")),
             "classification_only": sum(1 for o in good if o.get("decision_only")),
-            "usage": _sum_usage(o.get("usage") for o in outputs),
-            "mean_latency_ms": sum(latencies) / len(latencies) if latencies else None,
-            "cost_usd": sum(o.get("cost_usd") or 0 for o in outputs),
-            "spent_usd": sum(
-                o.get("cost_usd") or 0 for o in outputs if not o.get("reused_from")
+            "usage": _sum_usage(
+                [r.get("usage") for r in attempts] + [o.get("usage") for o in reused]
             ),
-            "cost_unknown": sum(1 for o in outputs if o.get("cost_usd") is None),
-            "reused": sum(1 for o in outputs if o.get("reused_from")),
+            "mean_latency_ms": sum(latencies) / len(latencies) if latencies else None,
+            "attempts": len(attempts),
+            "spent_usd": sum(c for c in spent if c is not None),
+            "spent_unknown": sum(1 for c in spent if c is None),
+            "cost_usd": sum(c for c in spent + reused_costs if c is not None),
+            "cost_unknown": sum(1 for c in spent + reused_costs if c is None),
+            "reused": len(reused),
+            "interrupted": sum(1 for d in docs if v in interrupted(d)),
         }
     both = [d for d in docs if answered(d)]
     agree = [d for d in both if not differs(d)]
@@ -848,6 +1190,24 @@ def summarize(run: dict, docs: List[dict]) -> dict:
             d["preference"]["choice"] for d in reviewed if differs(d)
         ),
     }
+
+
+def attempt_records(doc: dict, variant: str) -> List[dict]:
+    """Every model attempt this result made for the variant (failed and fatal
+    ones included); a reused answer made none. Results saved before
+    attempt_history existed count their output as one attempt."""
+    history = (doc.get("attempt_history") or {}).get(variant)
+    if history is not None:
+        return history
+    output = (doc.get("outputs") or {}).get(variant)
+    return [output] if output and not output.get("reused_from") else []
+
+
+def _known_cost(amount: float, unknown: int) -> str:
+    """A cost subtotal, marked when some costs are unknown."""
+    if unknown and not amount:
+        return f"unknown ({unknown})"
+    return pricing.format_usd(amount) + (f" + {unknown} unknown" if unknown else "")
 
 
 def _percent(part: int, whole: int) -> str:
@@ -899,14 +1259,19 @@ def format_summary(summary: dict) -> str:
     )
     row("Confirmed", lambda s: str(s["confirmed"]))
     row("Classification only", lambda s: str(s["classification_only"]))
-    row("Cost", lambda s: pricing.format_usd(s["cost_usd"]))
+    row("Cost", lambda s: _known_cost(s["cost_usd"], s["cost_unknown"]))
     row(
         "Cost per answer",
-        lambda s: pricing.format_usd(s["cost_usd"] / s["done"]) if s["done"] else "-",
+        lambda s: (
+            pricing.format_usd(s["cost_usd"] / s["done"])
+            if s["done"] and not s["cost_unknown"]
+            else "-"
+        ),
     )
     row("Reused answers", lambda s: str(s["reused"]))
-    row("Spent in this test", lambda s: pricing.format_usd(s["spent_usd"]))
-    row("Cost unknown", lambda s: str(s["cost_unknown"]))
+    row("Model attempts", lambda s: str(s["attempts"]))
+    row("Spent in this test", lambda s: _known_cost(s["spent_usd"], s["spent_unknown"]))
+    row("Interrupted calls", lambda s: str(s["interrupted"]))
     row(
         "Mean latency (s)",
         lambda s: (
@@ -931,14 +1296,15 @@ def format_summary(summary: dict) -> str:
 
 
 def ready_to_finalize(run: dict, docs: List[dict]) -> bool:
-    """True when nothing is left to classify and every ticket both variants
-    answered has a verdict (tickets a variant gave up on can't be judged)."""
+    """True when nothing is left to classify, no call is waiting after an
+    interruption, and every ticket both variants answered has a verdict.
+    Tickets a variant gave up on can't be judged; a run where every ticket
+    gave up has nothing to judge and is ready too."""
     if run.get("status") in (FINALIZED, CREATING) or not docs:
         return False
-    if any(pending_variants(d) for d in docs):
+    if any(pending_variants(d) or interrupted(d) for d in docs):
         return False
-    judged = [d for d in docs if answered(d)]
-    return bool(judged) and all(d.get("preference") for d in judged)
+    return all(d.get("preference") for d in docs if answered(d))
 
 
 def _verdict_entry(run: dict, doc: dict, finalized_at: datetime) -> dict:
@@ -1003,8 +1369,16 @@ def finalize(
             "ticket a verdict first."
         )
     finalized_at = run.get("finalized_at") or datetime.now(timezone.utc)
-    # Lock the verdicts first, so none changes while they are copied.
+    # Lock the verdicts, then copy them as they are now: one saved between
+    # the check above and the lock is copied too.
     results.update_many({"run_id": run_id}, {"$set": {"finalized": True}})
+    docs = list(results.find({"run_id": run_id}))
+    if run.get("status") != FINALIZED and not ready_to_finalize(run, docs):
+        # A verdict was cleared just before the lock: unlock and refuse.
+        results.update_many({"run_id": run_id}, {"$set": {"finalized": False}})
+        raise NotReadyToFinalize(
+            f"A/B run {run_id} isn't finished: a verdict was cleared while finalizing."
+        )
     updated, missing = 0, []
     for doc in docs:
         if not doc.get("preference"):
@@ -1028,6 +1402,24 @@ def finalize(
     results.update_many(
         {"run_id": run_id}, {"$unset": {field: "" for field in _SLIMMED_FIELDS}}
     )
+    # Raw replies in the attempt history can quote ticket text too.
+    for doc in docs:
+        history = doc.get("attempt_history") or {}
+        if any("raw_response" in r for records in history.values() for r in records):
+            results.update_one(
+                {"_id": doc["_id"]},
+                {
+                    "$set": {
+                        "attempt_history": {
+                            v: [
+                                {k: x for k, x in r.items() if k != "raw_response"}
+                                for r in records
+                            ]
+                            for v, records in history.items()
+                        }
+                    }
+                },
+            )
     summary = summarize(run, list(results.find({"run_id": run_id})))
     runs.update_one(
         {"_id": run_id},
@@ -1098,6 +1490,9 @@ def export_rows(run: dict, docs: List[dict]) -> List[dict]:
         for v in VARIANTS:
             output = (doc.get("outputs") or {}).get(v) or {}
             usage = output.get("usage") or {}
+            spent = [r.get("cost_usd") for r in attempt_records(doc, v)]
+            row[f"{v}_spent_usd"] = sum(c for c in spent if c is not None)
+            row[f"{v}_spent_unknown"] = sum(1 for c in spent if c is None)
             values = {
                 **output,
                 "reused": bool(output.get("reused_from")),
@@ -1173,7 +1568,11 @@ def _config_args(parser: argparse.ArgumentParser, variant: str) -> None:
         f"--{lower}-confirmation", help=f"{variant}'s confirmation model; '' for none"
     )
     parser.add_argument(f"--{lower}-max-tokens", type=int)
-    parser.add_argument(f"--{lower}-effort", choices=EFFORT_LEVELS)
+    parser.add_argument(
+        f"--{lower}-effort",
+        choices=(*EFFORT_LEVELS, "none"),
+        help="'none' sends no effort (the model's default), even if A sets one",
+    )
 
 
 def _config_from(
@@ -1183,7 +1582,7 @@ def _config_from(
     for field in ("primary", "secondary", "confirmation", "max_tokens", "effort"):
         given = getattr(args, f"{variant.lower()}_{field}")
         if given is not None:
-            values[field] = given
+            values[field] = None if (field == "effort" and given == "none") else given
     return EngineConfig.from_dict(values)
 
 
@@ -1205,6 +1604,13 @@ def main(argv: List[str]) -> int:
     for name in ("run", "report", "finalize"):
         command = commands.add_parser(name)
         command.add_argument("run_id")
+        if name == "run":
+            command.add_argument(
+                "--retry-interrupted",
+                action="store_true",
+                help="also retry calls a crashed worker left unfinished (they may "
+                "already have been charged)",
+            )
     export = commands.add_parser("export", help="write a run to a .csv or .json file")
     export.add_argument("run_id")
     export.add_argument("path")
@@ -1247,11 +1653,19 @@ def main(argv: List[str]) -> int:
         print(f"Classify them with: python -m decision_engine.ab_test run {run_id}")
         return 0
     if args.command == "run":
+        estimate = estimate_calls(runs, results, args.run_id, args.retry_interrupted)
+        print(describe_estimate(estimate))
+        if estimate["interrupted"] and not args.retry_interrupted:
+            print(
+                f"{estimate['interrupted']} call(s) were interrupted and may already have "
+                "been charged; add --retry-interrupted to retry them."
+            )
         summary = run_ab_test(
             args.run_id,
             runs,
             results,
             on_progress=lambda done, total: print(f"{done}/{total}", end="\r"),
+            retry_interrupted=args.retry_interrupted,
         )
         print(format_summary(summary))
         return 0

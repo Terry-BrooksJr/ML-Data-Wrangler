@@ -680,8 +680,8 @@ def test_finalize_saves_verdicts_on_tickets_and_slims_the_results(collections):
         assert verdict["variants"]["B"]["config"]["effort"] == "high"
 
     doc = results.find_one({"run_id": run_id})
-    assert "payload" not in doc and "transcript" not in doc["ticket"]
-    assert doc["ticket"]["subject"] and doc["content_hash"] and doc["finalized"]
+    assert "payload" not in doc and "subject" not in doc["ticket"]
+    assert doc["content_hash"] and doc["finalized"]
     assert doc["outputs"]["B"]["classification"] == "flag_solve"  # kept for reports
     finalized = runs.find_one({"_id": run_id})
     assert finalized["status"] == "finalized"
@@ -755,7 +755,7 @@ def test_export_json_keeps_everything_but_the_model_input(collections, tmp_path)
     assert data["run"]["_id"] == run_id
     assert data["summary"]["preferences"] == {"B": 2}
     assert len(data["results"]) == 2 and "payload" not in data["results"][0]
-    assert data["results"][0]["ticket"]["transcript"]  # not finalized yet
+    assert data["results"][0]["ticket"]["subject"]  # not finalized yet
     with pytest.raises(ValueError, match=".csv or .json"):
         ab_test.export_run(data["run"], [], tmp_path / "out.txt")
 
@@ -862,3 +862,277 @@ def test_cost_reaches_exports_and_ticket_verdicts(collections, tmp_path):
     assert verdict["ab_test_verdicts"][0]["variants"]["B"]["cost_usd"] == pytest.approx(
         200 / 1e6
     )
+
+
+# --- review round 3 ------------------------------------------------------------------------
+
+
+def test_finalize_copies_a_verdict_saved_just_before_the_lock(collections, monkeypatch):
+    tickets, runs, results = collections
+    run_id = judged_run(collections, size=1)
+    ticket_id = ticket_ids(collections, run_id)[0]
+    check = ab_test.ready_to_finalize
+    calls = []
+
+    def changed_meanwhile(run, docs):
+        if not calls:  # between finalize's first read and its lock
+            ab_test.record_preference(results, run_id, ticket_id, "A", 1, "late")
+        calls.append(1)
+        return check(run, docs)
+
+    monkeypatch.setattr(ab_test, "ready_to_finalize", changed_meanwhile)
+    ab_test.finalize(tickets, runs, results, run_id)
+    (verdict,) = tickets.find_one({"zendesk_id": ticket_id})["ab_test_verdicts"]
+    assert verdict["choice"] == "A" and verdict["reviewer"] == "late"
+    assert runs.find_one({"_id": run_id})["summary"]["preferences"] == {"A": 1}
+
+
+def test_a_late_worker_never_reopens_a_finalized_run(collections):
+    tickets, runs, results = collections
+    run_id = judged_run(collections, size=1)
+    ab_test.finalize(tickets, runs, results, run_id)
+    assert ab_test._finish(runs, results, run_id) is None
+    assert status(collections, run_id) == "finalized"
+
+
+def test_a_fatal_error_keeps_what_it_cost(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    error = status_error(402)
+    error.model_calls = [
+        {"model": "new-model", "usage": {"output_tokens": 7}, "latency_ms": 5},
+        {"model": "checker", "usage": {}, "latency_ms": 1, "error": "APIStatusError"},
+    ]
+    with pytest.raises(Exception, match="402"):
+        run(collections, run_id, classify=FakeEngine(fail={("", "new-model"): error}))
+    doc = results.find_one({"run_id": run_id})
+    (record,) = doc["attempt_history"]["B"]
+    assert record["fatal"] and record["usage"] == {"output_tokens": 7}
+    assert "B" not in doc["outputs"] and "started" not in doc or not doc["started"]
+    # Not counted as an attempt: resuming tries B again.
+    assert ab_test.pending_variants(doc) == ["B"]
+    assert (
+        ab_test.summarize(runs.find_one({"_id": run_id}), [doc])["variants"]["B"][
+            "attempts"
+        ]
+        == 1
+    )
+
+
+def test_every_attempt_is_kept_and_counted(collections, tmp_path):
+    import csv
+
+    from decision_engine import pricing
+
+    tickets, runs, results = collections
+    ids = ab_test.sample_ticket_ids(tickets, 1, seed=1)
+    prices = {
+        m: pricing.Price(input=1, output=1) for m in ("current-model", "new-model")
+    }
+    run_id = ab_test.create_run(tickets, runs, results, A, B, ids, prices=prices)
+    error = EngineError("bad reply", "new-model", {"usage": {"output_tokens": 1000}})
+    run(collections, run_id, classify=FakeEngine(fail={("", "new-model"): error}))
+    run(collections, run_id)  # B succeeds on its second attempt
+    doc = results.find_one({"run_id": run_id})
+    history = doc["attempt_history"]["B"]
+    assert [bool(r.get("error")) for r in history] == [True, False]
+    assert history[0]["raw_response"] is None or "raw_response" in history[0]
+    stats = ab_test.summarize(runs.find_one({"_id": run_id}), [doc])["variants"]["B"]
+    assert stats["attempts"] == 2
+    assert stats["spent_usd"] == pytest.approx((1000 + 15) / 1e6)
+    path = ab_test.export_run(runs.find_one({"_id": run_id}), [doc], tmp_path / "x.csv")
+    row = next(csv.DictReader(path.open()))
+    assert float(row["B_spent_usd"]) == pytest.approx((1000 + 15) / 1e6)
+
+
+def test_the_claim_outlasts_a_variant_and_is_renewed(collections):
+    from decision_engine import classify
+
+    worst = 3 * classify.REQUEST_TIMEOUT_SECONDS * (classify.MAX_RETRIES + 1)
+    assert ab_test.CLAIM_TTL.total_seconds() > worst
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    doc = results.find_one({"run_id": run_id})
+    old = datetime.now(timezone.utc) - timedelta(minutes=20)
+    results.update_one(
+        {"_id": doc["_id"]}, {"$set": {"claim": {"worker": "me", "at": old}}}
+    )
+    assert ab_test._renew(results, doc["_id"], "me")
+    renewed = results.find_one({"_id": doc["_id"]})["claim"]["at"]
+    assert ab_test._aware(renewed) > old + timedelta(minutes=19)
+    assert not ab_test._renew(results, doc["_id"], "someone-else")
+
+
+def test_a_run_where_every_answer_failed_can_finalize(collections):
+    tickets, runs, results = collections
+    run_id = new_run(collections, size=1)
+    engine = FakeEngine(
+        fail={
+            ("", "new-model"): EngineError("x", "m"),
+            ("", "current-model"): EngineError("x", "m"),
+        }
+    )
+    for _ in range(ab_test.MAX_ATTEMPTS):
+        run(collections, run_id, classify=engine)
+    docs = list(results.find({"run_id": run_id}))
+    assert ab_test.ready_to_finalize(runs.find_one({"_id": run_id}), docs)
+    assert ab_test.finalize(tickets, runs, results, run_id)["tickets_updated"] == 0
+    assert status(collections, run_id) == "finalized"
+
+
+def test_another_app_version_cannot_join_a_running_run(collections, monkeypatch):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    runs.update_one(
+        {"_id": run_id}, {"$set": {"status": "running"}}
+    )  # old version mid-run
+    monkeypatch.setattr(ab_test, "PROMPT_VERSION", "newer")
+    with pytest.raises(ab_test.PromptChanged, match="different prompt"):
+        run(collections, run_id)
+    assert status(collections, run_id) == "running"  # the refusal changed nothing
+
+
+def test_an_answer_is_not_saved_if_the_run_changed_prompts_meanwhile(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+
+    def switched():
+        runs.update_one({"_id": run_id}, {"$set": {"prompt_version": "other"}})
+
+    with pytest.raises(ab_test.PromptChanged):
+        run(collections, run_id, classify=FakeEngine(during=switched))
+    assert results.find_one({"run_id": run_id})["outputs"] == {}
+
+
+def test_two_tests_never_pay_for_the_same_answer_at_once(collections):
+    tickets, runs, results = collections
+    first = new_run(collections, size=1)
+    doc = results.find_one({"run_id": first})
+    # Another test is getting B's answer for this ticket content right now.
+    ab_test._locks(results).insert_one(
+        {
+            "_id": f"{doc['content_hash']}:{ab_test.answer_key(B)}",
+            "worker": "other-test",
+            "at": datetime.now(timezone.utc),
+        }
+    )
+    engine = FakeEngine()
+    run(collections, first, classify=engine)
+    assert [c.primary for _, c in engine.calls] == ["current-model"]
+    assert status(collections, first) == "partial"
+    # Once it's free (or its worker stopped), B is asked.
+    ab_test._locks(results).update_many(
+        {}, {"$set": {"at": datetime.now(timezone.utc) - timedelta(hours=1)}}
+    )
+    run(collections, first, classify=engine)
+    assert ab_test.answered(results.find_one({"run_id": first}))
+    assert ab_test._locks(results).count_documents({}) == 0
+
+
+def test_an_interrupted_call_waits_for_a_deliberate_retry(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    doc = results.find_one({"run_id": run_id})
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    results.update_one(
+        {"_id": doc["_id"]},
+        {
+            "$set": {
+                "started": {"B": {"worker": "crashed", "at": long_ago}},
+                "claim": {"worker": "crashed", "at": long_ago},
+            }
+        },
+    )
+    engine = FakeEngine()
+    summary = run(collections, run_id, classify=engine)
+    assert [c.primary for _, c in engine.calls] == ["current-model"]
+    assert summary["variants"]["B"]["interrupted"] == 1
+    assert status(collections, run_id) == "partial"
+    assert ab_test.estimate_calls(runs, results, run_id)["interrupted"] == 1
+    run(collections, run_id, classify=engine, retry_interrupted=True)
+    doc = results.find_one({"_id": doc["_id"]})
+    assert ab_test.answered(doc) and not doc.get("started")
+    assert status(collections, run_id) == "complete"
+
+
+def test_a_ticket_too_large_to_store_is_left_out(collections, monkeypatch):
+    tickets, runs, results = collections
+    big = CATEGORY_FIXTURES["flag_solve"]["zendesk_id"]
+    tickets.update_one(
+        {"zendesk_id": big},
+        {
+            "$push": {
+                "transcript": {
+                    "author": "x",
+                    "body": "y" * 5000,
+                    "timestamp": datetime.now(timezone.utc),
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(ab_test, "MAX_RESULT_BYTES", 6000)
+    other = CATEGORY_FIXTURES["flag_reengage"]["zendesk_id"]
+    run_id = ab_test.create_run(tickets, runs, results, A, B, [big, other])
+    saved = runs.find_one({"_id": run_id})
+    assert saved["ticket_count"] == 1 and saved["skipped"][0]["ticket_id"] == big
+    assert ticket_ids(collections, run_id) == [other]
+    with pytest.raises(ValueError, match="too large"):
+        ab_test.create_run(tickets, runs, results, A, B, [big])
+
+
+def test_the_estimate_counts_reusable_answers(collections):
+    _, runs, results = collections
+    first = new_run(collections, size=2)
+    assert ab_test.estimate_calls(runs, results, first) == {
+        "answers": 4,
+        "reusable": 0,
+        "calls": 4,
+        "interrupted": 0,
+    }
+    run(collections, first)
+    second = new_run(collections, size=2)
+    estimate = ab_test.estimate_calls(runs, results, second)
+    assert estimate["reusable"] == 4 and estimate["calls"] == 0
+    assert ab_test.describe_estimate(estimate).endswith("no paid model calls.")
+
+
+def test_unknown_costs_are_labelled_not_zero(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=2)  # no prices, no billed charges
+    summary = run(collections, run_id)
+    assert summary["variants"]["A"]["cost_unknown"] == 2
+    text = ab_test.format_summary(summary)
+    assert "unknown (2)" in text and "$0 " not in text
+
+
+def test_failed_answers_count_in_mean_latency(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    error = EngineError("bad", "m", {"latency_ms": 900})
+    summary = run(
+        collections, run_id, classify=FakeEngine(fail={("", "new-model"): error})
+    )
+    assert summary["variants"]["B"]["mean_latency_ms"] == 900
+
+
+def test_a_failed_start_never_leaves_the_run_running(collections, monkeypatch):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    original = runs.find_one_and_update
+
+    def applied_then_lost(*args, **kwargs):
+        original(*args, **kwargs)
+        raise ConnectionError("reply lost")
+
+    monkeypatch.setattr(runs, "find_one_and_update", applied_then_lost)
+    with pytest.raises(ConnectionError):
+        run(collections, run_id)
+    assert status(collections, run_id) == "partial"
+
+
+def test_the_cli_can_clear_an_inherited_effort():
+    parser = argparse.ArgumentParser()
+    ab_test._config_args(parser, "B")
+    args = parser.parse_args(["--b-effort", "none"])
+    assert ab_test._config_from(args, "B", B).effort is None
+    assert ab_test._config_from(parser.parse_args([]), "B", B).effort == "high"

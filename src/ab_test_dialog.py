@@ -13,6 +13,9 @@ Nothing is written to the tickets collection.
 """
 
 import getpass
+import json
+import math
+import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -68,11 +71,18 @@ DEFAULT_EFFORT = "Model default"
 BUSY_MESSAGE = "Another Decision Engine job is running. Try again when it finishes."
 
 
-def _default_reviewer() -> str:
+def reviewer_identity() -> str:
+    """Who is reviewing: the computer login running the app, as user@host.
+
+    Verdicts and tests are recorded under it rather than a typed-in name, so
+    nobody can record a verdict as someone else from this window. It is only
+    as trustworthy as the login: anyone signed in as that user is that user.
+    """
     try:
-        return getpass.getuser()
+        user = getpass.getuser()
     except Exception:  # no login name (some containers)
-        return ""
+        user = "unknown"
+    return f"{user}@{socket.gethostname().split('.')[0]}"
 
 
 def format_output(output: Optional[dict]) -> str:
@@ -180,27 +190,53 @@ def _classification_only(output: dict) -> List[str]:
     return lines
 
 
-def format_ticket(ticket: Optional[dict]) -> str:
-    """The ticket's subject and transcript, oldest entry first."""
-    if not ticket:
-        return "This ticket is no longer in MongoDB."
+def _payload_transcript(payload: Optional[str]) -> Optional[List[dict]]:
+    """The transcript in a saved model payload (build_ticket_payload: a
+    preamble, a blank line, then JSON), or None if there is none."""
+    if not payload or "\n\n" not in payload:
+        return None
+    try:
+        return json.loads(payload.split("\n\n", 1)[1]).get("transcript")
+    except ValueError:
+        return None
+
+
+def format_ticket(result: Optional[dict]) -> str:
+    """A result's ticket as both sides were sent it: subject, status and
+    transcript, oldest entry first.
+
+    The transcript comes from the saved payload; results saved before that
+    kept it in ticket.transcript. Comment bodies are shown as sent, inside
+    their <customer_text> markers.
+    """
+    if not result:
+        return ""
+    ticket = result.get("ticket") or {}
     lines = [
-        f"Ticket {ticket.get('zendesk_id')}: {ticket.get('subject') or '(no subject)'}",
+        f"Ticket {ticket.get('zendesk_id') or result.get('ticket_id')}: "
+        f"{ticket.get('subject') or '(subject removed)'}",
         f"Status: {ticket.get('status') or '-'}",
     ]
-    if "transcript" not in ticket:
+    transcript = _payload_transcript(result.get("payload"))
+    if transcript is None:
+        transcript = ticket.get("transcript")
+    if transcript is None:
         lines += [
             "",
             "The ticket text was removed when this test was finalized; the full "
             "ticket is in the tickets collection.",
         ]
-    for entry in ticket.get("transcript") or []:
+    for entry in transcript or []:
         kind = "Internal note" if entry.get("is_internal_note") else "Comment"
         when = entry.get("timestamp")
         lines += [
             "",
             f"— {kind} by {entry.get('author') or 'unknown'} ({entry.get('role') or '-'})"
-            + (f", {when:%Y-%m-%d %H:%M}" if hasattr(when, "strftime") else ""),
+            + (
+                f", {when:%Y-%m-%d %H:%M}"
+                if hasattr(when, "strftime")
+                else f", {when[:16].replace('T', ' ')}" if isinstance(when, str) else ""
+            ),
             str(entry.get("body") or "").strip(),
         ]
     return "\n".join(lines)
@@ -355,8 +391,10 @@ class PriceTable(QTableWidget):
                     raise ValueError(
                         f"The {PRICE_COLUMNS[column].lower()} price for {model} isn't a number."
                     )
-                if values[field] < 0:
-                    raise ValueError(f"Prices for {model} can't be negative.")
+                if not math.isfinite(values[field]) or values[field] < 0:
+                    raise ValueError(
+                        f"Prices for {model} must be finite numbers of 0 or more."
+                    )
             if values["input"] is None or values["output"] is None:
                 continue
             source = "entered" if model in self.entered else "live"
@@ -621,8 +659,10 @@ class ABTestDialog(QDialog):
         self.verdict_label = hint("")
         self.note_input = LineEdit("Note", "")
         self.note_input.setPlaceholderText("Why (optional)")
-        self.reviewer_input = LineEdit("Reviewer", _default_reviewer())
-        self.reviewer_input.setMinimumWidth(220)
+        self.reviewer = reviewer_identity()
+        self.reviewer_label = hint(
+            f"Reviewing as {self.reviewer} (your computer login)"
+        )
         self.choice_buttons = {
             "1": Button("Output 1 Better"),
             "2": Button("Output 2 Better"),
@@ -635,7 +675,7 @@ class ABTestDialog(QDialog):
         for button in self.choice_buttons.values():
             verdict_row.addWidget(button)
         verdict_row.addStretch()
-        verdict_row.addWidget(self.reviewer_input)
+        verdict_row.addWidget(self.reviewer_label)
         review_card = Card("Blind Review")
         review_card.body.addLayout(nav)
         review_card.body.addWidget(splitter, stretch=1)
@@ -757,7 +797,7 @@ class ABTestDialog(QDialog):
         awaiting_only = dialog.awaiting_only.isChecked()
         reuse = dialog.reuse.isChecked()
         name = dialog.name.text().strip()
-        reviewer = self.reviewer_input.text().strip()
+        reviewer = self.reviewer
 
         def task():
             tickets, runs, results = self.collections()
@@ -774,39 +814,87 @@ class ABTestDialog(QDialog):
                 reuse_answers=reuse,
                 prices=prices,
             )
-            return run_id, len(ids)
+            run = runs.find_one({"_id": run_id})
+            return run, ab_test.estimate_calls(runs, results, run_id)
 
         if not self.run(task, "Creating an A/B run", self._run_created, None):
             self._busy()
 
-    def _run_created(self, created: Tuple[str, int]) -> None:
-        run_id, count = created
-        self.status_label.setText(f"Created A/B run {run_id} with {count} ticket(s).")
+    def _run_created(self, created: Tuple[dict, dict]) -> None:
+        run, estimate = created
+        skipped = run.get("skipped") or []
+        self.status_label.setText(
+            f"Created A/B run {run['_id']} with {run['ticket_count']} ticket(s)"
+            + (
+                f"; left out {len(skipped)} too large to store "
+                f"({', '.join(s['ticket_id'] for s in skipped)})"
+                if skipped
+                else ""
+            )
+            + "."
+        )
         answer = QMessageBox.question(
             self,
             "Classify Now?",
-            f"Classify the {count} ticket(s) with both configurations now? "
-            f"That is at least {count * 2} paid model calls.",
+            f"Classify the {run['ticket_count']} ticket(s) with both configurations now? "
+            + ab_test.describe_estimate(estimate),
         )
         if answer == QMessageBox.Yes:
-            self._classify(run_id)
+            self._classify(run["_id"])
         else:
             self.load_runs()
 
     def classify_selected(self) -> None:
+        """Works out what classifying would cost (off the GUI thread), then asks."""
         run = self._selected_run()
         if run is None or not self.ready():
+            return
+
+        def task():
+            _, runs, results = self.collections()
+            return ab_test.estimate_calls(runs, results, run["_id"])
+
+        if not self.run(
+            task,
+            "Checking what's left to classify",
+            lambda estimate: self._confirm_classify(run, estimate),
+            None,
+        ):
+            self._busy()
+
+    def _confirm_classify(self, run: dict, estimate: dict) -> None:
+        retry = False
+        if estimate["interrupted"]:
+            answer = QMessageBox.question(
+                self,
+                "Retry Interrupted Calls?",
+                f"{estimate['interrupted']} call(s) in “{run.get('name')}” were interrupted "
+                "(the app stopped mid-call) and may already have been charged. Retry them too?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            retry = answer == QMessageBox.Yes
+            if retry:
+                estimate = {
+                    **estimate,
+                    "answers": estimate["answers"] + estimate["interrupted"],
+                    "calls": estimate["calls"] + estimate["interrupted"],
+                }
+        if not estimate["answers"]:
+            QMessageBox.information(
+                self, "Nothing to Classify", ab_test.describe_estimate(estimate)
+            )
             return
         answer = QMessageBox.question(
             self,
             "Classify Pending Tickets?",
-            f"Classify the tickets in “{run.get('name')}” that are missing an answer? "
-            "Each one is a paid model call.",
+            f"Classify what's left in “{run.get('name')}”? "
+            + ab_test.describe_estimate(estimate),
         )
         if answer == QMessageBox.Yes:
-            self._classify(run["_id"])
+            self._classify(run["_id"], retry_interrupted=retry)
 
-    def _classify(self, run_id: str) -> None:
+    def _classify(self, run_id: str, retry_interrupted: bool = False) -> None:
         self._stop.clear()
         extra = {"classify": self.classify} if self.classify else {}
 
@@ -819,6 +907,7 @@ class ABTestDialog(QDialog):
                     results,
                     on_progress=self._relay.progress.emit,
                     should_stop=lambda: self._stop.is_set() or self.closing(),
+                    retry_interrupted=retry_interrupted,
                     **extra,
                 )
             except ab_test.Stopped as e:
@@ -1003,7 +1092,7 @@ class ABTestDialog(QDialog):
                 f"{self.current.get('name')}: ticket {self.position + 1} of {len(docs)} "
                 f"· {reviewed} of {len(self.docs)} reviewed"
             )
-        self.ticket_view.setPlainText(format_ticket(doc.get("ticket")) if doc else "")
+        self.ticket_view.setPlainText(format_ticket(doc) if doc else "")
         for side, view in enumerate(self.output_views, start=1):
             output = (
                 (doc.get("outputs") or {}).get(ab_test.blind_choice(doc, side))
@@ -1037,7 +1126,7 @@ class ABTestDialog(QDialog):
             return
         # Map the blind side back to its variant.
         choice = ab_test.blind_choice(doc, int(key)) if key in ("1", "2") else key
-        reviewer = self.reviewer_input.text().strip()
+        reviewer = self.reviewer
         note = self.note_input.text().strip()
         run_id = self.current["_id"]
 

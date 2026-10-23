@@ -90,6 +90,16 @@ SETTINGS: List[Setting] = [
         help="Re-checks manual-triage and low-confidence results. Leave blank to skip.",
     ),
     Setting(
+        "DECISION_MODELS",
+        "Decision models",
+        "Decision Engine (Cheaper Inference)",
+        help=(
+            "Comma-separated models to treat as decision models (classification only, "
+            "A/B tests only) even if Cheaper Inference's model list can't be read. "
+            "Usually blank: the list identifies them."
+        ),
+    ),
+    Setting(
         "TAG_NORMALIZER_MODEL",
         "Tag Normalizer model",
         "Decision Engine (Cheaper Inference)",

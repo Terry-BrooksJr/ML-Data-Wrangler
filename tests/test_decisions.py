@@ -216,3 +216,56 @@ def test_the_model_list_is_read_once_and_a_failure_is_not_cached(client):
     assert decisions.is_decision_model(fake, DECISION) is True
     assert decisions.is_decision_model(fake, "text-model") is False
     assert fake.listings == 2
+
+
+def test_the_rubric_is_the_engines_prompt_without_the_written_answer_parts():
+    from decision_engine.prompts import SYSTEM_INSTRUCTIONS
+
+    categories = SYSTEM_INSTRUCTIONS.split("\n## ")[1]
+    assert categories in decisions.INSTRUCTIONS  # verbatim, precedence included
+    assert "\n## Output format" not in decisions.INSTRUCTIONS
+    assert "\n## Leadership recipients" not in decisions.INSTRUCTIONS
+    assert "\n## Manual triage" in decisions.INSTRUCTIONS
+
+
+def test_a_refused_text_request_routes_the_model_as_a_decision_model(
+    client, monkeypatch
+):
+    import httpx2
+
+    request = httpx2.Request("POST", "https://test")
+    refusal = anthropic.BadRequestError(
+        "Model 'mystery' is a decision model, not a language model. Use POST /v1/decisions.",
+        response=httpx2.Response(400, request=request),
+        body=None,
+    )
+    fake = client(
+        decision=decision_reply("flag_solve"), models_error=RuntimeError("down")
+    )
+    fake.text = {"mystery": refusal}
+
+    def create(**kwargs):
+        fake.models.append(kwargs["model"])
+        raise fake.text[kwargs["model"]]
+
+    fake.messages.create = create
+    config = classify.EngineConfig("mystery")
+    result = classify.classify_ticket("p", config=config, allow_decision_models=True)
+    assert result["decision_only"] and fake.models == ["mystery", "mystery"]
+    # Learned: the next ticket goes straight to /v1/decisions.
+    classify.classify_ticket("p", config=config, allow_decision_models=True)
+    assert fake.models == ["mystery", "mystery", "mystery"]
+    with pytest.raises(decisions.DecisionModelNotAllowed):
+        classify.classify_ticket("p", config=config)
+
+
+def test_decision_models_can_be_named_when_the_list_is_unavailable(client, monkeypatch):
+    monkeypatch.setenv("DECISION_MODELS", "jev-9, other")
+    fake = client(
+        decision=decision_reply("flag_solve"), models_error=RuntimeError("down")
+    )
+    assert decisions.is_decision_model(fake, "jev-9")
+    result = classify.classify_ticket(
+        "p", config=classify.EngineConfig("jev-9"), allow_decision_models=True
+    )
+    assert result["decision_only"] and fake.posts

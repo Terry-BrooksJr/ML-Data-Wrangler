@@ -110,3 +110,27 @@ def test_live_prices_reads_the_list_fresh(monkeypatch):
     finally:
         decisions.reset()
     assert set(prices) == {"claude-opus-5.5"} and len(reads) == 2
+
+
+def test_a_call_with_no_usage_and_no_charge_has_an_unknown_cost():
+    prices = {"m": pricing.Price(input=1, output=2)}
+    failed = {"model": "m", "usage": {}, "latency_ms": 5}
+    assert pricing.calls_cost([failed], prices) == {
+        "cost_usd": None,
+        "cost_basis": None,
+    }
+    billed = {"model": "m", "usage": {}, "billed_usd": "0"}
+    assert pricing.calls_cost([billed], prices)["cost_usd"] == 0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_prices_must_be_finite_and_not_negative(bad):
+    with pytest.raises(ValueError, match="finite"):
+        pricing.Price(input=bad, output=1)
+    listing = [
+        {
+            "id": "m",
+            "pricing": {"input_per_million": str(bad), "output_per_million": "1"},
+        }
+    ]
+    assert pricing.parse_listing(listing) == {}

@@ -12,6 +12,7 @@ saves the prices it was created with, after the reviewer has had the
 chance to correct them, so its estimates don't move when prices do.
 """
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Dict, Iterable, Optional
 
@@ -51,6 +52,14 @@ class Price:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def __post_init__(self):
+        for name in ("input", "output", "cache_read", "cache_write"):
+            value = getattr(self, name)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(
+                    f"The {name} price must be a finite number of 0 or more, got {value}."
+                )
+
     @classmethod
     def from_dict(cls, values: dict) -> "Price":
         return cls(
@@ -76,22 +85,29 @@ class Price:
 
 
 def _number(value) -> Optional[float]:
+    """value as a finite float, or None (missing, not a number, nan or inf)."""
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def parse_listing(models: Iterable[dict]) -> Dict[str, Price]:
-    """Model ID -> Price for every listed model with input and output prices."""
+    """Model ID -> Price for every listed model with valid input and output
+    prices (finite and not negative)."""
     prices = {}
     for model in models:
         pricing = model.get("pricing") or {}
         values = {kind: _number(pricing.get(field)) for kind, field in _LISTED.items()}
-        if values["input"] is not None and values["output"] is not None:
+        if values["input"] is None or values["output"] is None:
+            continue
+        try:
             prices[model["id"]] = Price(**values)
+        except ValueError:  # a negative price: leave the model unpriced
+            continue
     return prices
 
 
@@ -111,8 +127,9 @@ def calls_cost(calls: Iterable[dict], prices: Dict[str, Price]) -> dict:
     """The cost of the model calls behind one answer.
 
     Each call counts its billed charge if the reply gave one, else an
-    estimate from prices. Returns {"cost_usd": float or None (a call had
-    neither), "cost_basis": BILLED, ESTIMATED or PARTLY_ESTIMATED}.
+    estimate from prices and its token usage. Returns {"cost_usd": float, or
+    None when a call has no charge and either no price or no usage,
+    "cost_basis": BILLED, ESTIMATED or PARTLY_ESTIMATED}.
     """
     total, bases = 0.0, set()
     for call in calls:
@@ -121,9 +138,12 @@ def calls_cost(calls: Iterable[dict], prices: Dict[str, Price]) -> dict:
             bases.add(BILLED)
         else:
             price = prices.get(call.get("model"))
-            if price is None:
+            usage = call.get("usage") or {}
+            # A call with no usage and no charge (a failed request, say) may
+            # still have been billed: its cost is unknown, not zero.
+            if price is None or not any(usage.get(key) for key in _USAGE.values()):
                 return {"cost_usd": None, "cost_basis": None}
-            charge = price.cost(call.get("usage") or {})
+            charge = price.cost(usage)
             bases.add(ESTIMATED)
         total += charge
     basis = (

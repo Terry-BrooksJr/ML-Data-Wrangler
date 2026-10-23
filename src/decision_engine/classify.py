@@ -279,7 +279,25 @@ def classify_ticket(
     def classify_with(model: str) -> dict:
         started = time.monotonic()
         try:
-            if decisions.is_decision_model(get_client(), model):
+            decision = decisions.is_decision_model(get_client(), model)
+            if not decision:
+                try:
+                    answer = _classify_with(
+                        model,
+                        ticket_payload,
+                        reengage_count,
+                        assignee,
+                        max_tokens=config.max_tokens,
+                        effort=config.effort,
+                    )
+                except anthropic.BadRequestError as refused:
+                    # A decision model the model list didn't identify (it
+                    # couldn't be read, or omits it): route it from now on.
+                    if not decisions.refuses_text(refused):
+                        raise
+                    decisions.learn_decision_model(model)
+                    decision = True
+            if decision:
                 if not allow_decision_models:
                     raise DecisionModelNotAllowed(
                         f"{model} is a decision model: it picks a category but can't write the "
@@ -287,15 +305,6 @@ def classify_ticket(
                     )
                 answer = decisions.decide(
                     get_client(), model, ticket_payload, reengage_count, assignee
-                )
-            else:
-                answer = _classify_with(
-                    model,
-                    ticket_payload,
-                    reengage_count,
-                    assignee,
-                    max_tokens=config.max_tokens,
-                    effort=config.effort,
                 )
         except (anthropic.APIError, EngineError) as e:
             audit = getattr(e, "audit", None) or {}

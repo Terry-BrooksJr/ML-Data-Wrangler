@@ -1060,7 +1060,8 @@ def test_ab_test_creates_classifies_and_reviews_blind(
     dialog.new_run()  # creates, asks "classify now?" (yes), classifies, opens it
     for _ in range(4):
         wait_until_idle(qapp, tab)
-    assert dialogs[-1][0] == "question" and "6 paid model calls" in dialogs[-1][1]
+    assert dialogs[-1][0] == "question"
+    assert "6 answer(s) to get: at least 6 paid model call(s)" in dialogs[-1][1]
     assert dialog.run_table.rowCount() == 1
     assert dialog.run_table.item(0, 3).text() == "complete"
     assert "ticket 1 of 3" in dialog.position_label.text()
@@ -1096,7 +1097,11 @@ def test_ab_test_creates_classifies_and_reviews_blind(
     # Output 1 on the first ticket is B's answer (order B, A).
     dialog.record("1")
     wait_until_idle(qapp, tab)
-    assert results.find_one({"ticket_id": ids[0]})["preference"]["choice"] == "B"
+    saved = results.find_one({"ticket_id": ids[0]})["preference"]
+    assert saved["choice"] == "B"
+    # Recorded as the computer login, not a typed-in name.
+    assert saved["reviewer"] == ab_test_dialog.reviewer_identity()
+    assert not hasattr(dialog, "reviewer_input")
     assert "ticket 2 of 3" in dialog.position_label.text()
     reviewed_column = ab_test_dialog.RUN_COLUMNS.index("Reviewed")
     assert dialog.run_table.item(0, reviewed_column).text() == "1"
@@ -1232,3 +1237,66 @@ def test_each_side_shows_its_cost():
         }
     )
     assert "reused from an earlier test, so nothing was spent here" in reused
+
+
+def test_entered_prices_must_be_finite(qapp, monkeypatch):
+    from decision_engine.classify import EngineConfig
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]))
+    dialog = ab_test_dialog.NewRunDialog(EngineConfig("gpt"), None, {})
+    dialog.b_form.primary.setText("other")  # A and B must differ
+    dialog.price_table.item(0, 1).setText("inf")
+    dialog.price_table.item(0, 2).setText("1")
+    dialog.accept()
+    assert shown and "finite" in shown[-1]
+
+
+def test_the_ticket_view_reads_the_payload_both_sides_were_sent():
+    from decision_engine.payload import build_ticket_payload
+
+    ticket = CATEGORY_FIXTURES["flag_reengage"]
+    result = {
+        "ticket_id": ticket["zendesk_id"],
+        "ticket": {"zendesk_id": ticket["zendesk_id"], "subject": "S", "status": "open"},
+        "payload": build_ticket_payload(ticket),
+    }
+    text = ab_test_dialog.format_ticket(result)
+    assert "S" in text and ticket["transcript"][0]["author"] in text
+    finalized = {"ticket_id": "1", "ticket": {"status": "open"}}
+    assert "removed when this test was finalized" in ab_test_dialog.format_ticket(finalized)
+
+
+def test_interrupted_calls_are_retried_only_when_asked(
+    qapp, configured, dialogs, ab_tickets, monkeypatch
+):
+    from decision_engine import ab_test
+
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    runs, results = ab_test.get_collections(ab_tickets.database)
+    ids = sorted(t["zendesk_id"] for t in ab_tickets.find())[:1]
+    run_id = ab_test.create_run(
+        ab_tickets,
+        runs,
+        results,
+        *(ab_test.EngineConfig(m) for m in ("test", "new-model")),
+        ids,
+    )
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    results.update_one(
+        {"run_id": run_id},
+        {"$set": {"started": {"B": {"worker": "x", "at": long_ago}}}},
+    )
+    dialog.load_runs()
+    wait_until_idle(qapp, tab)
+    dialog.run_table.selectRow(0)
+    retried = []
+    monkeypatch.setattr(
+        dialog, "_classify", lambda run_id, retry_interrupted=False: retried.append(retry_interrupted)
+    )
+    dialog.classify_selected()
+    wait_until_idle(qapp, tab)
+    questions = [text for kind, text in dialogs if kind == "question"]
+    assert "may already have been charged" in questions[-2]
+    assert retried == [True]  # the stub answers Yes
