@@ -1,0 +1,800 @@
+"""A/B testing of two decision-engine configurations, reviewed blind.
+
+A run classifies a sample of tickets with configuration A (the current
+engine by default) and configuration B (the one being considered); see
+decision_engine.ab_test. Here a reviewer creates and classifies runs, then
+reads each ticket's two answers side by side as "Output 1" and "Output 2",
+in an order shuffled per ticket, and records which is better. Show Results
+names the variants and tallies the verdicts.
+
+Every Mongo and model call goes through the Decision Engine tab's job
+runner, so it runs on a worker thread and never overlaps another tab job.
+Nothing is written to the tickets collection.
+"""
+
+import getpass
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from decision_engine import ab_test
+from decision_engine.classify import EFFORT_LEVELS, EngineConfig
+from loguru import logger
+from pymongo.collection import Collection
+from PyQt5 import QtCore
+from PyQt5.QtCore import pyqtSignal, QObject
+from PyQt5.QtGui import QFontDatabase
+from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from widgets import (
+    Button,
+    Card,
+    CheckBox,
+    hint,
+    LineEdit,
+    ProgressBar,
+    use_si_scrollbars,
+)
+
+# run(task, description, on_done, on_error) -> False if another job is running.
+Runner = Callable[
+    [Callable[[], Any], str, Callable[[Any], None], Optional[Callable[[str], None]]],
+    bool,
+]
+RUN_COLUMNS = ["Created (UTC)", "Name", "Tickets", "Status", "Reviewed"]
+DEFAULT_SAMPLE_SIZE = 30
+MAX_SAMPLE_SIZE = 1000
+# Room for thinking models; Claude's limit without streaming is far higher.
+MAX_TOKENS_LIMIT = 64000
+DEFAULT_EFFORT = "Model default"
+# Fields a reviewer reads for each ticket; the transcript can be long.
+TICKET_FIELDS = {"zendesk_id": 1, "subject": 1, "status": 1, "transcript": 1, "_id": 0}
+BUSY_MESSAGE = "Another Decision Engine job is running. Try again when it finishes."
+
+
+def _default_reviewer() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # no login name (some containers)
+        return ""
+
+
+def format_output(output: Optional[dict]) -> str:
+    """One variant's answer, without naming its models (the review is blind).
+
+    Plain text, not HTML: the reasoning and draft can quote customer text.
+    """
+    if not output:
+        return "Not classified yet."
+    if "error" in output:
+        return f"The engine failed on this ticket:\n{output['error']}"
+    lines = [
+        f"Classification: {output.get('classification')}",
+        f"Confidence: {output.get('confidence')}",
+    ]
+    if output.get("confirmed_from"):
+        first = output["confirmed_from"]
+        lines.append(
+            f"Re-checked: first answer was {first.get('classification')} "
+            f"(confidence {first.get('confidence')})"
+        )
+    if output.get("leadership_recipient"):
+        lines.append(f"Leadership recipient: {output['leadership_recipient']}")
+    lines += [
+        "",
+        "Signals matched:",
+        *[f"  - {signal}" for signal in output.get("signals_matched") or ["(none)"]],
+        "",
+        "Reasoning:",
+        output.get("reasoning") or "(none)",
+        "",
+        "Internal note:",
+        output.get("internal_note") or "(none)",
+    ]
+    if output.get("draft_message"):
+        lines += ["", "Draft message (unsent):", output["draft_message"]]
+    if output.get("guard_overrides"):
+        lines += [
+            "",
+            "Overridden by code checks:",
+            *[f"  - {o}" for o in output["guard_overrides"]],
+        ]
+    return "\n".join(lines)
+
+
+def format_ticket(ticket: Optional[dict]) -> str:
+    """The ticket's subject and transcript, oldest entry first."""
+    if not ticket:
+        return "This ticket is no longer in MongoDB."
+    lines = [
+        f"Ticket {ticket.get('zendesk_id')}: {ticket.get('subject') or '(no subject)'}",
+        f"Status: {ticket.get('status') or '-'}",
+    ]
+    for entry in ticket.get("transcript") or []:
+        kind = "Internal note" if entry.get("is_internal_note") else "Comment"
+        when = entry.get("timestamp")
+        lines += [
+            "",
+            f"— {kind} by {entry.get('author') or 'unknown'} ({entry.get('role') or '-'})"
+            + (f", {when:%Y-%m-%d %H:%M}" if hasattr(when, "strftime") else ""),
+            str(entry.get("body") or "").strip(),
+        ]
+    return "\n".join(lines)
+
+
+def ab_collections(tickets: Collection) -> Tuple[Collection, Collection, Collection]:
+    """(tickets, ab_tests, ab_results), the A/B collections beside tickets."""
+    return (tickets, *ab_test.get_collections(tickets.database))
+
+
+class ConfigForm(QWidget):
+    """The models and settings of one variant."""
+
+    def __init__(self, config: EngineConfig, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.primary = QLineEdit(config.primary)
+        self.secondary = QLineEdit(config.secondary or "")
+        self.secondary.setPlaceholderText("none")
+        self.confirmation = QLineEdit(config.confirmation or "")
+        self.confirmation.setPlaceholderText("none")
+        self.max_tokens = QSpinBox()
+        self.max_tokens.setRange(256, MAX_TOKENS_LIMIT)
+        self.max_tokens.setSingleStep(1024)
+        self.max_tokens.setValue(config.max_tokens)
+        self.effort = QComboBox()
+        self.effort.addItem(DEFAULT_EFFORT, None)
+        for level in EFFORT_LEVELS:
+            self.effort.addItem(level, level)
+        self.effort.setCurrentIndex(max(0, self.effort.findData(config.effort)))
+        self.effort.setToolTip(
+            "Sent as output_config.effort. Leave at the model default for models "
+            "other than Claude, which may reject it."
+        )
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Primary model", self.primary)
+        form.addRow("Secondary model", self.secondary)
+        form.addRow("Confirmation model", self.confirmation)
+        form.addRow("Max tokens", self.max_tokens)
+        form.addRow("Effort", self.effort)
+
+    def config(self) -> EngineConfig:
+        """Raises ValueError for an invalid configuration (no primary model)."""
+        return EngineConfig(
+            primary=self.primary.text().strip(),
+            secondary=self.secondary.text().strip() or None,
+            confirmation=self.confirmation.text().strip() or None,
+            max_tokens=self.max_tokens.value(),
+            effort=self.effort.currentData(),
+        )
+
+
+class NewRunDialog(QDialog):
+    """Asks for the two configurations, the sample size and a name."""
+
+    def __init__(self, current: EngineConfig, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New A/B Test")
+        self.a_form = ConfigForm(current)
+        self.b_form = ConfigForm(current)
+        a_card = Card("A: current engine")
+        a_card.body.addWidget(self.a_form)
+        b_card = Card("B: the configuration to try")
+        b_card.body.addWidget(self.b_form)
+        forms = QHBoxLayout()
+        forms.addWidget(a_card)
+        forms.addWidget(b_card)
+
+        self.size = QSpinBox()
+        self.size.setRange(1, MAX_SAMPLE_SIZE)
+        self.size.setValue(DEFAULT_SAMPLE_SIZE)
+        self.awaiting_only = CheckBox("Only tickets awaiting review")
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("e.g. Opus 5.5 primary, Fable confirmation")
+        sample = QFormLayout()
+        sample.addRow("Tickets", self.size)
+        sample.addRow("", self.awaiting_only)
+        sample.addRow("Name", self.name)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Create")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            hint(
+                "Each ticket in the sample is classified by both configurations: "
+                "two or more paid model calls per ticket. Nothing is saved to the tickets."
+            )
+        )
+        layout.addLayout(forms)
+        layout.addLayout(sample)
+        layout.addWidget(buttons)
+
+    def accept(self) -> None:
+        try:
+            a, b = self.configs()
+        except ValueError as e:
+            QMessageBox.warning(self, "Check the Settings", str(e))
+            return
+        if a == b:
+            QMessageBox.warning(
+                self, "Check the Settings", "A and B are the same; change B."
+            )
+            return
+        super().accept()
+
+    def configs(self) -> Tuple[EngineConfig, EngineConfig]:
+        return self.a_form.config(), self.b_form.config()
+
+
+class ProgressRelay(QObject):
+    """Carries classification progress from the worker thread (queued: it lives on the GUI thread)."""
+
+    progress = pyqtSignal(int, int)
+
+
+class ABTestDialog(QDialog):
+    """Lists A/B runs, classifies them, and records blind verdicts ticket by ticket.
+
+    Args:
+        run: The tab's job runner (TriageTab._run).
+        collections: Returns (tickets, ab_tests, ab_results); called on the worker thread.
+        closing: Returns True once the app is closing; a classification
+            then stops at the next ticket.
+        ready: Returns True if the model settings are present, warning the
+            user if not; checked before anything that calls a model.
+        classify: Classifies one ticket, as decision_engine.classify_ticket (tests replace it).
+    """
+
+    def __init__(
+        self,
+        run: Runner,
+        collections: Callable[[], Tuple[Collection, Collection, Collection]],
+        closing: Callable[[], bool] = lambda: False,
+        parent: Optional[QWidget] = None,
+        ready: Callable[[], bool] = lambda: True,
+        classify: Optional[Callable[..., dict]] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.run = run
+        self.collections = collections
+        self.closing = closing
+        self.ready = ready
+        self.classify = classify
+        self._stop = threading.Event()
+        self._relay = ProgressRelay(self)
+        self._relay.progress.connect(self._on_progress)
+        self.runs: List[dict] = []
+        self.current: Optional[dict] = None  # the run being reviewed
+        self.docs: List[dict] = []
+        self.tickets: Dict[str, dict] = {}
+        self.position = 0  # index into visible()
+        self.classifying = False
+        self.setWindowTitle("A/B Test")
+        self.resize(1100, 820)
+        self._build_ui()
+        self.load_runs()
+
+    # --- layout ---------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        self.run_table = use_si_scrollbars(QTableWidget(0, len(RUN_COLUMNS)))
+        self.run_table.setHorizontalHeaderLabels(RUN_COLUMNS)
+        self.run_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.run_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.run_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.run_table.verticalHeader().setVisible(False)
+        self.run_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.run_table.setMaximumHeight(170)
+        self.run_table.itemSelectionChanged.connect(self._update_buttons)
+        self.run_table.itemDoubleClicked.connect(lambda _: self.open_selected())
+
+        self.new_button = Button("New Test…", primary=True)
+        self.new_button.clicked.connect(self.new_run)
+        self.open_button = Button("Review")
+        self.open_button.clicked.connect(self.open_selected)
+        self.classify_button = Button("Classify Pending")
+        self.classify_button.setToolTip(
+            "Classify the selected run's tickets that are missing an answer (paid calls)."
+        )
+        self.classify_button.clicked.connect(self.classify_selected)
+        self.results_button = Button("Show Results")
+        self.results_button.setToolTip("Reveals which output was A and which was B.")
+        self.results_button.clicked.connect(self.show_results)
+        self.refresh_button = Button("Refresh")
+        self.refresh_button.clicked.connect(self.load_runs)
+        run_buttons = QHBoxLayout()
+        for button in (self.new_button, self.open_button, self.classify_button):
+            run_buttons.addWidget(button)
+        run_buttons.addStretch()
+        run_buttons.addWidget(self.results_button)
+        run_buttons.addWidget(self.refresh_button)
+
+        self.progress_bar = ProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_label = hint("")
+        self.progress_label.setVisible(False)
+        self.stop_button = Button("Stop After This Ticket")
+        self.stop_button.clicked.connect(self.stop)
+        self.stop_button.setVisible(False)
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.progress_label, stretch=1)
+        progress_row.addWidget(self.stop_button)
+
+        runs_card = Card("Runs")
+        runs_card.body.addWidget(self.run_table)
+        runs_card.body.addLayout(run_buttons)
+        runs_card.body.addWidget(self.progress_bar)
+        runs_card.body.addLayout(progress_row)
+
+        self.position_label = QLabel("Open a run to review it.")
+        self.only_differences = CheckBox("Only where they disagree")
+        self.only_differences.toggled.connect(self._filter_changed)
+        self.only_unreviewed = CheckBox("Only unreviewed")
+        self.only_unreviewed.toggled.connect(self._filter_changed)
+        self.prev_button = Button("◀ Previous")
+        self.prev_button.clicked.connect(lambda: self._move(-1))
+        self.next_button = Button("Next ▶")
+        self.next_button.clicked.connect(lambda: self._move(1))
+        nav = QHBoxLayout()
+        nav.addWidget(self.position_label, stretch=1)
+        nav.addWidget(self.only_differences)
+        nav.addWidget(self.only_unreviewed)
+        nav.addWidget(self.prev_button)
+        nav.addWidget(self.next_button)
+
+        mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        self.ticket_view = self._text_view("The ticket appears here.")
+        self.output_views = []
+        outputs = QSplitter(QtCore.Qt.Horizontal)
+        for side in (1, 2):
+            view = self._text_view(f"Output {side} appears here.")
+            box = Card(f"Output {side}")
+            box.body.addWidget(view)
+            outputs.addWidget(box)
+            self.output_views.append(view)
+        splitter = QSplitter(QtCore.Qt.Vertical)
+        splitter.addWidget(self.ticket_view)
+        splitter.addWidget(outputs)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        self.ticket_view.document().setDefaultFont(mono)
+
+        self.verdict_label = hint("")
+        self.note_input = LineEdit("Note", "")
+        self.note_input.setPlaceholderText("Why (optional)")
+        self.reviewer_input = LineEdit("Reviewer", _default_reviewer())
+        self.reviewer_input.setMinimumWidth(220)
+        self.choice_buttons = {
+            "1": Button("Output 1 Better"),
+            "2": Button("Output 2 Better"),
+            "tie": Button("Equally Good"),
+            "both_bad": Button("Both Wrong"),
+        }
+        for key, button in self.choice_buttons.items():
+            button.clicked.connect(lambda _=False, key=key: self.record(key))
+        verdict_row = QHBoxLayout()
+        for button in self.choice_buttons.values():
+            verdict_row.addWidget(button)
+        verdict_row.addStretch()
+        verdict_row.addWidget(self.reviewer_input)
+        review_card = Card("Blind Review")
+        review_card.body.addLayout(nav)
+        review_card.body.addWidget(splitter, stretch=1)
+        review_card.body.addWidget(self.verdict_label)
+        review_card.body.addWidget(self.note_input)
+        review_card.body.addLayout(verdict_row)
+
+        self.status_label = hint("")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(runs_card)
+        layout.addWidget(self.status_label)
+        layout.addWidget(review_card, stretch=1)
+        self._update_buttons()
+
+    @staticmethod
+    def _text_view(placeholder: str) -> QTextEdit:
+        view = use_si_scrollbars(QTextEdit())
+        view.setReadOnly(True)
+        view.setPlaceholderText(placeholder)
+        return view
+
+    # --- state ------------------------------------------------------------------
+
+    def _selected_run(self) -> Optional[dict]:
+        rows = {index.row() for index in self.run_table.selectedIndexes()}
+        return self.runs[rows.pop()] if len(rows) == 1 else None
+
+    def visible(self) -> List[dict]:
+        """The current run's tickets that pass the filters."""
+        docs = self.docs
+        if self.only_differences.isChecked():
+            docs = [d for d in docs if ab_test.differs(d)]
+        if self.only_unreviewed.isChecked():
+            docs = [d for d in docs if not d.get("preference")]
+        return docs
+
+    def _current_doc(self) -> Optional[dict]:
+        docs = self.visible()
+        return docs[self.position] if 0 <= self.position < len(docs) else None
+
+    def _update_buttons(self) -> None:
+        selected = self._selected_run() is not None
+        idle = not self.classifying
+        self.new_button.setEnabled(idle)
+        self.refresh_button.setEnabled(idle)
+        for button in (self.open_button, self.classify_button, self.results_button):
+            button.setEnabled(idle and selected)
+        docs = self.visible()
+        doc = self._current_doc()
+        self.prev_button.setEnabled(self.position > 0)
+        self.next_button.setEnabled(self.position < len(docs) - 1)
+        can_judge = doc is not None and ab_test.answered(doc) and idle
+        for button in self.choice_buttons.values():
+            button.setEnabled(can_judge)
+
+    def _busy(self) -> None:
+        if not self.closing():  # closing: say nothing
+            self.status_label.setText(BUSY_MESSAGE)
+
+    # --- runs -------------------------------------------------------------------
+
+    def load_runs(self) -> None:
+        def task():
+            tickets, runs, results = self.collections()
+            listed = ab_test.list_runs(runs)
+            reviewed = {
+                row["_id"]: row["count"]
+                for row in results.aggregate(
+                    [
+                        {"$match": {"preference": {"$ne": None}}},
+                        {"$group": {"_id": "$run_id", "count": {"$sum": 1}}},
+                    ]
+                )
+            }
+            for run in listed:
+                run["reviewed"] = reviewed.get(run["_id"], 0)
+            return listed
+
+        if not self.run(task, "Loading A/B runs", self._show_runs, None):
+            self._busy()
+
+    def _show_runs(self, runs: List[dict]) -> None:
+        selected = self._selected_run()
+        self.runs = runs
+        self.run_table.setRowCount(len(runs))
+        for row, run in enumerate(runs):
+            created = run.get("created_at")
+            cells = [
+                f"{created:%Y-%m-%d %H:%M}" if created else "",
+                run.get("name", ""),
+                str(run.get("ticket_count", "")),
+                run.get("status", ""),
+                str(run.get("reviewed", 0)),
+            ]
+            for column, text in enumerate(cells):
+                self.run_table.setItem(row, column, QTableWidgetItem(text))
+            if selected and run["_id"] == selected["_id"]:
+                self.run_table.selectRow(row)
+        if runs and self._selected_run() is None:
+            self.run_table.selectRow(0)
+        self.status_label.setText(f"{len(runs)} A/B run(s).")
+        self._update_buttons()
+
+    def new_run(self) -> None:
+        if not self.ready():
+            return
+        dialog = NewRunDialog(EngineConfig.from_env(), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        a, b = dialog.configs()
+        size = dialog.size.value()
+        awaiting_only = dialog.awaiting_only.isChecked()
+        name = dialog.name.text().strip()
+        reviewer = self.reviewer_input.text().strip()
+
+        def task():
+            tickets, runs, results = self.collections()
+            ids = ab_test.sample_ticket_ids(tickets, size, awaiting_only=awaiting_only)
+            return ab_test.create_run(runs, results, a, b, ids, name, reviewer), len(
+                ids
+            )
+
+        if not self.run(task, "Creating an A/B run", self._run_created, None):
+            self._busy()
+
+    def _run_created(self, created: Tuple[str, int]) -> None:
+        run_id, count = created
+        self.status_label.setText(f"Created A/B run {run_id} with {count} ticket(s).")
+        answer = QMessageBox.question(
+            self,
+            "Classify Now?",
+            f"Classify the {count} ticket(s) with both configurations now? "
+            f"That is at least {count * 2} paid model calls.",
+        )
+        if answer == QMessageBox.Yes:
+            self._classify(run_id)
+        else:
+            self.load_runs()
+
+    def classify_selected(self) -> None:
+        run = self._selected_run()
+        if run is None or not self.ready():
+            return
+        answer = QMessageBox.question(
+            self,
+            "Classify Pending Tickets?",
+            f"Classify the tickets in “{run.get('name')}” that are missing an answer? "
+            "Each one is a paid model call.",
+        )
+        if answer == QMessageBox.Yes:
+            self._classify(run["_id"])
+
+    def _classify(self, run_id: str) -> None:
+        self._stop.clear()
+        extra = {"classify": self.classify} if self.classify else {}
+
+        def task():
+            tickets, runs, results = self.collections()
+            try:
+                return ab_test.run_ab_test(
+                    run_id,
+                    tickets,
+                    runs,
+                    results,
+                    on_progress=self._relay.progress.emit,
+                    should_stop=lambda: self._stop.is_set() or self.closing(),
+                    **extra,
+                )
+            except ab_test.Stopped as e:
+                logger.info(f"A/B run {run_id}: {e}")
+                return None
+
+        started = self.run(
+            task,
+            "Classifying an A/B run",
+            lambda summary: self._classified(run_id, summary),
+            lambda _: self._classified(run_id, None, failed=True),
+        )
+        if not started:
+            self._busy()
+            return
+        self.classifying = True
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
+        self.progress_label.setText("Starting…")
+        self.progress_label.setVisible(True)
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+        self._update_buttons()
+
+    def _on_progress(self, done: int, total: int) -> None:
+        if not self.classifying:  # a late signal after the run ended
+            return
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
+        text = f"{done} of {total} ticket(s) classified by both"
+        if self._stop.is_set():
+            text += " · stopping after this ticket…"
+        self.progress_label.setText(text)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.stop_button.setEnabled(False)
+        self.progress_label.setText(
+            self.progress_label.text() + " · stopping after this ticket…"
+        )
+
+    def _classified(
+        self, run_id: str, summary: Optional[dict], failed: bool = False
+    ) -> None:
+        self.classifying = False
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+        self.stop_button.setVisible(False)
+        if failed:
+            self.status_label.setText(
+                "Classification stopped on an error; what finished is saved."
+            )
+        elif summary is None:
+            self.status_label.setText(
+                "Stopped. Classify Pending carries on where it left off."
+            )
+        else:
+            self.status_label.setText(
+                f"Classified {summary['classified']} of {summary['tickets']} ticket(s) with both."
+            )
+        self.load_runs_then_open(run_id)
+
+    def load_runs_then_open(self, run_id: str) -> None:
+        """Refreshes the run list, then opens run_id for review."""
+
+        def opened(runs: List[dict]) -> None:
+            self._show_runs(runs)
+            for row, run in enumerate(runs):
+                if run["_id"] == run_id:
+                    self.run_table.selectRow(row)
+                    self.open_selected()
+                    return
+
+        task = lambda: ab_test.list_runs(self.collections()[1])
+        if not self.run(task, "Loading A/B runs", opened, None):
+            self._busy()
+
+    # --- review -----------------------------------------------------------------
+
+    def open_selected(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
+
+        def task():
+            tickets, runs, results = self.collections()
+            docs = list(results.find({"run_id": run["_id"]}).sort("ticket_id", 1))
+            found = {
+                str(t["zendesk_id"]): t
+                for t in tickets.find(
+                    {"zendesk_id": {"$in": [d["ticket_id"] for d in docs]}},
+                    TICKET_FIELDS,
+                )
+            }
+            return docs, found
+
+        if not self.run(
+            task, "Loading the run's tickets", lambda r: self._show_run(run, *r), None
+        ):
+            self._busy()
+
+    def _show_run(self, run: dict, docs: List[dict], tickets: Dict[str, dict]) -> None:
+        self.current, self.docs, self.tickets = run, docs, tickets
+        unreviewed = [
+            i for i, d in enumerate(self.visible()) if not d.get("preference")
+        ]
+        self.position = unreviewed[0] if unreviewed else 0
+        self._show_current()
+
+    def _filter_changed(self) -> None:
+        self.position = 0
+        self._show_current()
+
+    def _move(self, step: int) -> None:
+        self.position = max(0, min(self.position + step, len(self.visible()) - 1))
+        self._show_current()
+
+    def _show_current(self) -> None:
+        docs = self.visible()
+        doc = self._current_doc()
+        if self.current is None:
+            self.position_label.setText("Open a run to review it.")
+        elif doc is None:
+            self.position_label.setText(
+                f"{self.current.get('name')}: no tickets match the filters."
+            )
+        else:
+            reviewed = sum(1 for d in self.docs if d.get("preference"))
+            self.position_label.setText(
+                f"{self.current.get('name')}: ticket {self.position + 1} of {len(docs)} "
+                f"· {reviewed} of {len(self.docs)} reviewed"
+            )
+        self.ticket_view.setPlainText(
+            format_ticket(self.tickets.get(doc["ticket_id"])) if doc else ""
+        )
+        for side, view in enumerate(self.output_views, start=1):
+            output = (
+                (doc.get("outputs") or {}).get(ab_test.blind_choice(doc, side))
+                if doc
+                else None
+            )
+            view.setPlainText(format_output(output) if doc else "")
+        preference = (doc or {}).get("preference")
+        self.verdict_label.setText(self._describe_verdict(doc, preference))
+        self.note_input.setText((preference or {}).get("note", ""))
+        self._update_buttons()
+
+    @staticmethod
+    def _describe_verdict(doc: Optional[dict], preference: Optional[dict]) -> str:
+        if not preference:
+            return "No verdict yet."
+        choice = preference["choice"]
+        if choice in ab_test.VARIANTS:
+            side = doc["order"].index(choice) + 1
+            text = f"Your verdict: Output {side} better"
+        else:
+            text = f"Your verdict: {ab_test.PREFERENCES[choice]}"
+        return text + (
+            f" ({preference['reviewer']})" if preference.get("reviewer") else ""
+        )
+
+    def record(self, key: str) -> None:
+        """Saves the verdict for the ticket shown, then moves to the next one."""
+        doc = self._current_doc()
+        if doc is None or self.current is None:
+            return
+        # Map the blind side back to its variant.
+        choice = ab_test.blind_choice(doc, int(key)) if key in ("1", "2") else key
+        reviewer = self.reviewer_input.text().strip()
+        note = self.note_input.text().strip()
+        run_id = self.current["_id"]
+
+        def task():
+            results = self.collections()[2]
+            ab_test.record_preference(
+                results, run_id, doc["ticket_id"], choice, reviewer, note
+            )
+            return results.find_one({"run_id": run_id, "ticket_id": doc["ticket_id"]})
+
+        if not self.run(
+            task, "Saving the verdict", lambda saved: self._recorded(doc, saved), None
+        ):
+            self._busy()
+
+    def _recorded(self, doc: dict, saved: Optional[dict]) -> None:
+        if saved is not None:
+            index = next(i for i, d in enumerate(self.docs) if d["_id"] == doc["_id"])
+            self.docs[index] = saved
+        docs = self.visible()
+        if saved in docs:
+            # Unfiltered (or still matching): move on to the next ticket.
+            self.position = min(docs.index(saved) + 1, max(len(docs) - 1, 0))
+        else:
+            # It left the "only unreviewed" list; the next one is now at this position.
+            self.position = min(self.position, max(len(docs) - 1, 0))
+        self.status_label.setText(f"Saved the verdict on ticket {doc['ticket_id']}.")
+        self._show_current()
+
+    def show_results(self) -> None:
+        run = self._selected_run()
+        if run is None:
+            return
+
+        def task():
+            results = self.collections()[2]
+            return ab_test.format_summary(
+                ab_test.summarize(run, list(results.find({"run_id": run["_id"]})))
+            )
+
+        if not self.run(task, "Summarising the run", self._show_summary, None):
+            self._busy()
+
+    def _show_summary(self, text: str) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("A/B Results")
+        dialog.resize(760, 640)
+        view = self._text_view("")
+        view.document().setDefaultFont(
+            QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        )
+        view.setPlainText(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(view)
+        layout.addWidget(buttons)
+        self.summary_dialog = dialog  # kept so it isn't garbage-collected
+        dialog.show()
+
+    def closeEvent(self, event) -> None:
+        # The classification thread belongs to the tab; ask it to stop at the
+        # next ticket rather than running on with the window closed.
+        if self.classifying:
+            self._stop.set()
+        super().closeEvent(event)

@@ -230,6 +230,20 @@ SETTINGS: List[Setting] = [
         "Storage",
         default="lessons_learned",
     ),
+    Setting(
+        "AB_TEST_COLLECTION",
+        "A/B runs collection",
+        "Storage",
+        default="ab_tests",
+        help="One document per A/B test: its two engine configurations.",
+    ),
+    Setting(
+        "AB_RESULT_COLLECTION",
+        "A/B results collection",
+        "Storage",
+        default="ab_results",
+        help="One document per ticket in an A/B test: both answers and the verdict.",
+    ),
 ]
 
 

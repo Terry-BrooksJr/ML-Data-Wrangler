@@ -982,3 +982,116 @@ def test_format_duration(seconds, text):
 def test_batch_status_has_no_estimate_before_the_first_ticket():
     counts = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0}
     assert triage_tab.batch_status({"done": 0, "total": 5, "summary": counts}, 3.0) == "0 of 5 done"
+
+
+# --- A/B test: two configurations, reviewed blind ------------------------------------
+
+
+@pytest.fixture
+def ab_tickets(tickets):
+    tickets.insert_many([copy.deepcopy(t) for t in CATEGORY_FIXTURES.values()])
+    return tickets
+
+
+def ab_engine(payload, reengage_count=0, assignee=None, config=None):
+    """B solves every ticket; A sends every ticket to manual triage."""
+    classification = "flag_solve" if config.primary == "new-model" else "manual_triage"
+    return {
+        "classification": classification,
+        "confidence": 80,
+        "signals_matched": [],
+        "reasoning": f"picked {classification}",
+        "internal_note": "",
+        "model_version": config.primary,
+        "audit": {"usage": {"output_tokens": 5}},
+    }
+
+
+def open_ab_test(qapp, tab, monkeypatch, b_primary="new-model"):
+    import ab_test_dialog
+
+    class Accepting(ab_test_dialog.NewRunDialog):
+        def exec_(self):
+            self.b_form.primary.setText(b_primary)
+            self.size.setValue(3)
+            return ab_test_dialog.QDialog.Accepted if self.configs()[0] != self.configs()[1] else 0
+
+    monkeypatch.setattr(ab_test_dialog, "NewRunDialog", Accepting)
+    tab.open_ab_test()
+    dialog = tab.ab_test_dialog
+    dialog.classify = ab_engine
+    wait_until_idle(qapp, tab)
+    return dialog
+
+
+def test_ab_test_creates_classifies_and_reviews_blind(
+    qapp, configured, dialogs, ab_tickets, monkeypatch
+):
+    from decision_engine import ab_test
+
+    before = list(ab_tickets.find())
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    assert dialog.run_table.rowCount() == 0
+
+    dialog.new_run()  # creates, asks "classify now?" (yes), classifies, opens it
+    for _ in range(4):
+        wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "question" and "6 paid model calls" in dialogs[-1][1]
+    assert dialog.run_table.rowCount() == 1
+    assert dialog.run_table.item(0, 3).text() == "complete"
+    assert "ticket 1 of 3" in dialog.position_label.text()
+    assert list(ab_tickets.find()) == before  # the tickets are untouched
+
+    # The two sides show the two answers without naming the models.
+    doc = dialog._current_doc()
+    texts = [view.toPlainText() for view in dialog.output_views]
+    assert sorted(t.splitlines()[0] for t in texts) == [
+        "Classification: flag_solve",
+        "Classification: manual_triage",
+    ]
+    assert not any("new-model" in t or "current" in t for t in texts)
+    assert doc["ticket_id"] in dialog.ticket_view.toPlainText()
+
+    # Choosing the side that shows B's answer records B, then moves on.
+    b_side = doc["order"].index("B") + 1
+    dialog.record(str(b_side))
+    wait_until_idle(qapp, tab)
+    _, results = ab_test.get_collections(ab_tickets.database)
+    assert results.find_one({"ticket_id": doc["ticket_id"]})["preference"]["choice"] == "B"
+    assert "ticket 2 of 3" in dialog.position_label.text()
+
+    dialog.only_unreviewed.setChecked(True)
+    assert len(dialog.visible()) == 2
+    dialog.record("tie")
+    wait_until_idle(qapp, tab)
+    assert len(dialog.visible()) == 1
+
+    dialog.show_results()
+    wait_until_idle(qapp, tab)
+    summary = dialog.summary_dialog.findChild(triage_tab.QTextEdit).toPlainText()
+    assert "B better" in summary and "B: primary new-model" in summary
+
+
+def test_ab_test_waits_for_another_job(qapp, configured, dialogs, ab_tickets, monkeypatch):
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    tab._thread = object()  # another job running
+    try:
+        dialog.load_runs()
+        assert "Another Decision Engine job" in dialog.status_label.text()
+    finally:
+        tab._thread = None
+
+
+def test_ab_test_needs_the_model_settings_to_classify(
+    qapp, monkeypatch, dialogs, ab_tickets
+):
+    for name in triage_tab.REVIEW_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MONGO_URI", "mongodb://test")
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    dialog.new_run()
+    assert dialogs[-1][0] == "warning" and "Not configured" in dialogs[-1][1]
+    assert dialog.run_table.rowCount() == 0

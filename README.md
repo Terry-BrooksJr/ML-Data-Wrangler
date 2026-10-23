@@ -504,6 +504,38 @@ them for you to edit, and **Save Draft** stores it, unapproved, in
 built on. Select a draft and **Approve Selected** to record who approved it.
 Approved lessons aren't fed back into the prompt yet.
 
+### A/B testing engine configurations
+
+**A/B Test…** on the Decision Engine tab compares the current engine (A)
+with a configuration you're considering (B) on the same tickets:
+
+1. **New Test…** sets each side's primary, secondary and confirmation models,
+   max tokens and effort (B starts as a copy of A), and how many tickets to
+   sample. Effort is sent only when set; leave it at the model default for
+   models other than Claude.
+2. Each sampled ticket is classified by both configurations: at least two
+   paid model calls per ticket. **Stop After This Ticket** keeps what
+   finished, and **Classify Pending** carries on later.
+3. **Blind Review** shows the ticket and the two answers as Output 1 and
+   Output 2, in an order shuffled per ticket, without model names. Choose
+   **Output 1 Better**, **Output 2 Better**, **Equally Good** or **Both
+   Wrong**, with an optional note. **Only where they disagree** skips the
+   tickets where both chose the same classification.
+4. **Show Results** names A and B and reports the verdicts (overall and
+   where they disagreed), how often they agreed, errors, mean confidence,
+   latency and token use for each.
+
+Runs are stored in `ab_tests` and `ab_results` (`AB_TEST_COLLECTION`,
+`AB_RESULT_COLLECTION`). An A/B run never writes to the tickets: no review is
+added and nothing leaves the awaiting-review queue. From the command line:
+
+```bash
+cd src
+python -m decision_engine.ab_test create --size 30 --b-primary claude-opus-5.5 --b-confirmation claude-fable-5.1 --b-max-tokens 16000
+python -m decision_engine.ab_test run RUN_ID      # paid model calls
+python -m decision_engine.ab_test report RUN_ID
+```
+
 ### Ticket embeddings (Voyage AI)
 
 **Embed Tickets (Voyage AI)…** on the Decision Engine tab stores a Voyage

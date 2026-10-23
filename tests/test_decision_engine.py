@@ -1496,3 +1496,51 @@ def test_a_failing_progress_callback_never_stops_the_batch(monkeypatch, tickets)
         raise RuntimeError("display gone")
 
     assert persistence.run_review_batch(tickets, on_progress=broken)["classified"] == 3
+
+
+# --- per-run configuration (A/B tests) ---------------------------------------------
+
+
+def test_config_replaces_the_environment_models(routed_model):
+    client = routed_model(
+        other=model_reply("manual_triage", confidence=40),
+        checker=model_reply("flag_solve", confidence=90),
+    )
+    config = classify.EngineConfig("other", confirmation="checker")
+    result = classify.classify_ticket("payload", config=config)
+    assert client.models == ["other", "checker"]
+    assert result["classification"] == "flag_solve"
+
+
+def test_config_sends_max_tokens_and_effort_only_when_set(fake_model):
+    client = fake_model(model_reply("flag_solve"))
+    classify.classify_ticket(
+        "payload", config=classify.EngineConfig("m", max_tokens=16000, effort="high")
+    )
+    classify.classify_ticket("payload", config=classify.EngineConfig("m"))
+    assert client.calls[0]["max_tokens"] == 16000
+    assert client.calls[0]["output_config"] == {"effort": "high"}
+    assert client.calls[1]["max_tokens"] == classify.MAX_TOKENS
+    assert "output_config" not in client.calls[1]
+
+
+def test_config_from_env_matches_the_engine_defaults(routed_model):
+    assert classify.EngineConfig.from_env() == classify.EngineConfig(
+        "primary", "secondary", "confirmation"
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs, problem",
+    [({"primary": " "}, "primary"), ({"primary": "m", "effort": "huge"}, "effort"),
+     ({"primary": "m", "max_tokens": 0}, "max_tokens")],
+)
+def test_config_rejects_invalid_settings(kwargs, problem):
+    with pytest.raises(ValueError, match=problem):
+        classify.EngineConfig(**kwargs)
+
+
+def test_config_round_trips_through_a_dict():
+    config = classify.EngineConfig("m", None, "c", 9000, "max")
+    assert classify.EngineConfig.from_dict(config.to_dict()) == config
+    assert "effort max" in config.describe() and "secondary" not in config.describe()
