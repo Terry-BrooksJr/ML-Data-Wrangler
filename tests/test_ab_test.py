@@ -1,4 +1,6 @@
+import argparse
 import copy
+from datetime import datetime, timedelta, timezone
 
 import mongomock
 import pytest
@@ -46,12 +48,15 @@ def answer(classification, confidence=90, **extra):
 class FakeEngine:
     """Answers by model: B solves everything, A sends everything to manual triage."""
 
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, during=None):
         self.calls = []
         self.fail = fail or {}  # (ticket subject, primary) -> exception
+        self.during = during  # called before answering, to simulate other workers
 
     def __call__(self, payload, reengage_count=0, assignee=None, config=None):
         self.calls.append((payload, config))
+        if self.during:
+            self.during()
         for (subject, primary), error in self.fail.items():
             if subject in payload and primary == config.primary:
                 raise error
@@ -64,7 +69,43 @@ class FakeEngine:
 def new_run(collections, size=3, seed=1):
     tickets, runs, results = collections
     ids = ab_test.sample_ticket_ids(tickets, size, seed=seed)
-    return ab_test.create_run(runs, results, A, B, ids, "test run", seed=seed)
+    return ab_test.create_run(tickets, runs, results, A, B, ids, "test run", seed=seed)
+
+
+def run(collections, run_id, **kwargs):
+    _, runs, results = collections
+    kwargs.setdefault("classify", FakeEngine())
+    return ab_test.run_ab_test(run_id, runs, results, **kwargs)
+
+
+def status(collections, run_id):
+    return collections[1].find_one({"_id": run_id})["status"]
+
+
+def ticket_ids(collections, run_id):
+    return sorted(d["ticket_id"] for d in collections[2].find({"run_id": run_id}))
+
+
+# --- collections ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env, clash",
+    [
+        ({"AB_TEST_COLLECTION": "tickets"}, "same as the tickets"),
+        (
+            {"AB_RESULT_COLLECTION": "my_tickets", "MONGO_COLLECTION": "my_tickets"},
+            "same as the tickets",
+        ),
+        ({"AB_TEST_COLLECTION": "ab", "AB_RESULT_COLLECTION": "ab"}, "both named"),
+    ],
+)
+def test_collection_names_that_clash_are_refused(db, monkeypatch, env, clash):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=clash):
+        ab_test.get_collections(db)
+    assert db.tickets.count_documents({}) == len(CATEGORY_FIXTURES)
 
 
 # --- creating ------------------------------------------------------------------
@@ -82,24 +123,65 @@ def test_sample_is_repeatable_and_can_be_limited_to_awaiting(db):
     assert len(ab_test.sample_ticket_ids(db.tickets, 100)) == len(awaiting) + 1
 
 
-def test_create_run_records_variants_and_a_blind_order(collections):
+def test_duplicate_ticket_documents_are_a_clear_error(collections):
+    tickets, runs, results = collections
+    duplicate = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    tickets.insert_one(duplicate)
+    with pytest.raises(ValueError, match="more than one document"):
+        ab_test.sample_ticket_ids(tickets, 3)
+    with pytest.raises(ValueError, match="more than one document"):
+        ab_test.create_run(tickets, runs, results, A, B, [duplicate["zendesk_id"]])
+    with pytest.raises(ValueError, match="listed more than once"):
+        ab_test.create_run(tickets, runs, results, A, B, ["1", "1"])
+    assert runs.count_documents({}) == 0
+
+
+def test_create_run_records_variants_snapshots_and_a_mixed_blind_order(collections):
     tickets, runs, results = collections
     run_id = new_run(collections, size=5)
-    run = runs.find_one({"_id": run_id})
-    assert run["variants"]["B"]["effort"] == "high"
-    assert run["status"] == "pending" and run["ticket_count"] == 5
+    run_doc = runs.find_one({"_id": run_id})
+    assert run_doc["variants"]["B"]["effort"] == "high"
+    assert run_doc["status"] == "pending" and run_doc["ticket_count"] == 5
     docs = list(results.find({"run_id": run_id}))
     assert len(docs) == 5
-    assert all(sorted(d["order"]) == ["A", "B"] for d in docs)
+    # Seeded, so this exact mix of orders repeats: both orders occur.
+    assert {tuple(d["order"]) for d in docs} == {("A", "B"), ("B", "A")}
     assert all(d["outputs"] == {} and d["preference"] is None for d in docs)
+    doc = docs[0]
+    assert doc["ticket"]["subject"] in doc["payload"]
+    assert doc["ticket"]["zendesk_id"] == doc["ticket_id"]
 
 
-def test_create_run_rejects_the_same_configuration_twice(collections):
-    _, runs, results = collections
+def test_create_run_refuses_bad_input(collections):
+    tickets, runs, results = collections
+    same = EngineConfig.from_dict(A.to_dict())
     with pytest.raises(ValueError, match="same configuration"):
-        ab_test.create_run(runs, results, A, EngineConfig.from_dict(A.to_dict()), ["1"])
+        ab_test.create_run(tickets, runs, results, A, same, ["1"])
     with pytest.raises(ValueError, match="No tickets"):
-        ab_test.create_run(runs, results, A, B, [])
+        ab_test.create_run(tickets, runs, results, A, B, [])
+    with pytest.raises(ValueError, match="not found"):
+        ab_test.create_run(tickets, runs, results, A, B, ["no-such-ticket"])
+    assert runs.count_documents({}) == 0
+
+
+def test_a_failed_result_insert_leaves_no_run(collections, monkeypatch):
+    tickets, runs, results = collections
+
+    def interrupted(docs, *args, **kwargs):
+        results.insert_one(docs[0])  # part of the batch got in
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(results, "insert_many", interrupted)
+    with pytest.raises(RuntimeError):
+        new_run(collections)
+    assert runs.count_documents({}) == 0 and results.count_documents({}) == 0
+
+
+def test_a_run_whose_creation_was_interrupted_is_not_classified(collections):
+    run_id = new_run(collections)
+    collections[1].update_one({"_id": run_id}, {"$set": {"status": "creating"}})
+    with pytest.raises(ValueError, match="wasn't created completely"):
+        run(collections, run_id)
 
 
 # --- running ---------------------------------------------------------------------
@@ -110,7 +192,7 @@ def test_run_classifies_each_ticket_with_both_configurations(collections):
     before = list(tickets.find())
     run_id = new_run(collections)
     engine = FakeEngine()
-    summary = ab_test.run_ab_test(run_id, tickets, runs, results, classify=engine)
+    summary = run(collections, run_id, classify=engine)
 
     assert (
         sorted(c.primary for _, c in engine.calls)
@@ -120,107 +202,217 @@ def test_run_classifies_each_ticket_with_both_configurations(collections):
     doc = results.find_one({"run_id": run_id})
     assert doc["outputs"]["A"]["classification"] == "manual_triage"
     assert doc["outputs"]["B"]["usage"] == {"input_tokens": 10, "output_tokens": 5}
-    assert "audit" not in doc["outputs"]["B"]
-    assert runs.find_one({"_id": run_id})["status"] == "complete"
+    assert "audit" not in doc["outputs"]["B"] and doc["claim"] is None
+    assert status(collections, run_id) == "complete"
     assert summary["classified"] == 3 and summary["agreement"] == 0
     # An A/B run never changes the tickets themselves.
     assert list(tickets.find()) == before
 
 
-def test_run_saves_a_failure_and_carries_on(collections):
+def test_both_variants_get_the_snapshot_not_the_live_ticket(collections):
+    tickets, runs, results = collections
+    run_id = new_run(collections, size=1)
+    ticket_id = ticket_ids(collections, run_id)[0]
+    original = tickets.find_one({"zendesk_id": ticket_id})["subject"]
+    tickets.update_one(
+        {"zendesk_id": ticket_id}, {"$set": {"subject": "Changed after the run began"}}
+    )
+
+    engine = FakeEngine()
+    run(collections, run_id, classify=engine)
+    payloads = [payload for payload, _ in engine.calls]
+    assert len(payloads) == 2 and payloads[0] == payloads[1]
+    assert original in payloads[0] and "Changed after" not in payloads[0]
+    assert results.find_one({"run_id": run_id})["ticket"]["subject"] == original
+
+
+def test_a_failure_is_saved_and_retried_by_the_next_run(collections):
     tickets, runs, results = collections
     run_id = new_run(collections, size=len(CATEGORY_FIXTURES))
     subject = CATEGORY_FIXTURES["flag_solve"]["subject"]
-    engine = FakeEngine(
-        fail={(subject, "new-model"): EngineError("bad reply", "new-model")}
+    error = EngineError("bad reply", "new-model", {"usage": {"output_tokens": 9}})
+    summary = run(
+        collections, run_id, classify=FakeEngine(fail={(subject, "new-model"): error})
     )
-    summary = ab_test.run_ab_test(run_id, tickets, runs, results, classify=engine)
 
     assert summary["variants"]["B"]["errors"] == 1
     assert summary["variants"]["A"]["errors"] == 0
     assert summary["classified"] == len(CATEGORY_FIXTURES) - 1
+    assert status(collections, run_id) == "partial"
     failed = results.find_one({"outputs.B.error": {"$exists": True}})
     assert "bad reply" in failed["outputs"]["B"]["error"]
+    assert failed["outputs"]["B"]["usage"] == {"output_tokens": 9}
     assert not ab_test.answered(failed) and not ab_test.differs(failed)
+
+    retry = FakeEngine()
+    run(collections, run_id, classify=retry)
+    assert [c.primary for _, c in retry.calls] == ["new-model"]
+    assert ab_test.answered(results.find_one({"_id": failed["_id"]}))
+    assert status(collections, run_id) == "complete"
 
 
 def test_a_fatal_error_stops_the_run_and_it_resumes(collections):
     tickets, runs, results = collections
     run_id = new_run(collections, size=3)
-    first = sorted(d["ticket_id"] for d in results.find({"run_id": run_id}))[1]
-    subject = tickets.find_one({"zendesk_id": first})["subject"]
+    second = ticket_ids(collections, run_id)[1]
+    subject = tickets.find_one({"zendesk_id": second})["subject"]
     engine = FakeEngine(fail={(subject, "new-model"): status_error(401)})
     with pytest.raises(Exception, match="401"):
-        ab_test.run_ab_test(run_id, tickets, runs, results, classify=engine)
-    assert runs.find_one({"_id": run_id})["status"] == "partial"
+        run(collections, run_id, classify=engine)
+    assert status(collections, run_id) == "partial"
     assert len(engine.calls) == 4  # ticket 1 both, ticket 2 A then B (fails)
+    assert results.count_documents({"claim": {"$ne": None}}) == 0
 
     resumed = FakeEngine()
-    ab_test.run_ab_test(run_id, tickets, runs, results, classify=resumed)
+    run(collections, run_id, classify=resumed)
     # Only what was missing: ticket 2's B and ticket 3's A and B.
     assert len(resumed.calls) == 3
-    assert runs.find_one({"_id": run_id})["status"] == "complete"
+    assert status(collections, run_id) == "complete"
 
 
 def test_stop_saves_what_finished(collections):
-    tickets, runs, results = collections
     run_id = new_run(collections, size=3)
     engine = FakeEngine()
     with pytest.raises(ab_test.Stopped):
-        ab_test.run_ab_test(
+        run(
+            collections,
             run_id,
-            tickets,
-            runs,
-            results,
             classify=engine,
             should_stop=lambda: len(engine.calls) >= 2,
         )
     assert len(engine.calls) == 2
     assert (
-        results.count_documents({"run_id": run_id, "outputs.B": {"$exists": True}}) == 1
+        collections[2].count_documents(
+            {"run_id": run_id, "outputs.B": {"$exists": True}}
+        )
+        == 1
     )
-    assert runs.find_one({"_id": run_id})["status"] == "partial"
+    assert status(collections, run_id) == "partial"
 
 
-def test_a_missing_ticket_is_an_error_not_a_crash(collections):
-    tickets, runs, results = collections
-    run_id = ab_test.create_run(runs, results, A, B, ["no-such-ticket"])
-    summary = ab_test.run_ab_test(run_id, tickets, runs, results, classify=FakeEngine())
-    assert summary["variants"]["A"]["errors"] == summary["variants"]["B"]["errors"] == 1
+def test_an_unexpected_failure_never_leaves_the_run_running(collections):
+    run_id = new_run(collections, size=3)
+
+    def broken(done, total):
+        raise RuntimeError("progress display failed")
+
+    with pytest.raises(RuntimeError):
+        run(collections, run_id, on_progress=broken)
+    assert status(collections, run_id) == "partial"
+    assert collections[2].count_documents({"claim": {"$ne": None}}) == 0
 
 
-def test_a_confirmation_keeps_the_answer_it_replaced_and_both_costs():
+def test_a_ticket_claimed_by_another_worker_is_skipped(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=2)
+    first, second = ticket_ids(collections, run_id)
+    now = datetime.now(timezone.utc)
+    results.update_one(
+        {"ticket_id": first}, {"$set": {"claim": {"worker": "other", "at": now}}}
+    )
+    results.update_one(
+        {"ticket_id": second},
+        {"$set": {"claim": {"worker": "crashed", "at": now - timedelta(hours=1)}}},
+    )
+    engine = FakeEngine()
+    run(collections, run_id, classify=engine, worker="me")
+
+    # The live claim is left alone; the abandoned one is taken over.
+    assert len(engine.calls) == 2
+    assert results.find_one({"ticket_id": first})["outputs"] == {}
+    assert ab_test.answered(results.find_one({"ticket_id": second}))
+    assert results.find_one({"ticket_id": first})["claim"]["worker"] == "other"
+    assert status(collections, run_id) == "partial"
+
+
+def test_an_output_is_not_saved_over_a_worker_that_took_the_ticket(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+
+    def taken_over():
+        results.update_one(
+            {"run_id": run_id},
+            {"$set": {"claim": {"worker": "other", "at": datetime.now(timezone.utc)}}},
+        )
+
+    engine = FakeEngine(during=taken_over)
+    run(collections, run_id, classify=engine, worker="me")
+    assert len(engine.calls) == 1  # stopped at the first lost save
+    doc = results.find_one({"run_id": run_id})
+    assert doc["outputs"] == {} and doc["claim"]["worker"] == "other"
+
+
+def test_a_changed_prompt_stops_a_resume_but_not_a_fresh_run(collections, monkeypatch):
+    _, runs, results = collections
+    started = new_run(collections, size=2)
+    first = ticket_ids(collections, started)[0]
+    results.update_one(
+        {"ticket_id": first, "run_id": started},
+        {"$set": {"outputs.A": ab_test._output(answer("flag_solve"))}},
+    )
+    fresh = new_run(collections, size=2, seed=2)
+    monkeypatch.setattr(ab_test, "PROMPT_VERSION", "new-prompt")
+
+    with pytest.raises(ab_test.PromptChanged, match="create a new run"):
+        run(collections, started)
+    run(collections, fresh)
+    assert runs.find_one({"_id": fresh})["prompt_version"] == "new-prompt"
+    assert status(collections, fresh) == "complete"
+
+
+def test_cost_covers_every_model_call():
+    calls = [
+        {
+            "model": "p",
+            "usage": {"output_tokens": 4},
+            "latency_ms": 100,
+            "error": "EngineError",
+        },
+        {"model": "s", "usage": {"output_tokens": 6}, "latency_ms": 300, "error": None},
+        {
+            "model": "c",
+            "usage": {"output_tokens": 10},
+            "latency_ms": 900,
+            "error": None,
+        },
+    ]
     output = ab_test._output(
         answer(
             "flag_solve",
+            model_calls=calls,
             confirmation_of={
-                "model_version": "first",
+                "model_version": "s",
                 "classification": "manual_triage",
                 "confidence": 40,
-                "audit": {"usage": {"input_tokens": 7, "output_tokens": 3}},
             },
         )
     )
     assert output["confirmed_from"] == {
-        "model_version": "first",
+        "model_version": "s",
         "classification": "manual_triage",
         "confidence": 40,
     }
-    assert output["usage"] == {"input_tokens": 17, "output_tokens": 8}
+    assert output["usage"] == {"output_tokens": 20}
+    assert output["latency_ms"] == 1300 and output["model_calls"] == 3
+
+    error = EngineError("bad reply", "s")
+    error.model_calls = calls[:2]
+    failed = ab_test._error_output(error)
+    assert failed["usage"] == {"output_tokens": 10} and failed["latency_ms"] == 400
 
 
 # --- reviewing -----------------------------------------------------------------------
 
 
 def test_preferences_are_tallied_overall_and_where_the_variants_disagree(collections):
-    tickets, runs, results = collections
+    _, runs, results = collections
     run_id = new_run(collections, size=3)
-    ab_test.run_ab_test(run_id, tickets, runs, results, classify=FakeEngine())
-    ids = sorted(d["ticket_id"] for d in results.find({"run_id": run_id}))
-    ab_test.record_preference(results, run_id, ids[0], "B", "lead", "B solved it")
-    ab_test.record_preference(results, run_id, ids[1], "tie")
-    ab_test.record_preference(results, run_id, ids[2], "A")
-    ab_test.record_preference(results, run_id, ids[2], None)  # cleared
+    run(collections, run_id)
+    ids = ticket_ids(collections, run_id)
+    ab_test.record_preference(results, run_id, ids[0], "B", 0, "lead", "B solved it")
+    ab_test.record_preference(results, run_id, ids[1], "tie", 0)
+    version = ab_test.record_preference(results, run_id, ids[2], "A", 0)
+    ab_test.record_preference(results, run_id, ids[2], None, version)  # cleared
 
     summary = ab_test.summarize(runs.find_one({"_id": run_id}), list(results.find()))
     assert summary["reviewed"] == 2
@@ -235,14 +427,27 @@ def test_preferences_are_tallied_overall_and_where_the_variants_disagree(collect
     assert "Same classification: 0 of 3" in text
 
 
+def test_a_second_reviewer_cannot_silently_replace_a_verdict(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    ticket_id = ticket_ids(collections, run_id)[0]
+    # Both reviewers loaded the ticket at version 0.
+    ab_test.record_preference(results, run_id, ticket_id, "A", 0, "first", "A is right")
+    with pytest.raises(ab_test.VerdictConflict, match="changed by first"):
+        ab_test.record_preference(results, run_id, ticket_id, "B", 0, "second")
+    saved = results.find_one({"ticket_id": ticket_id})
+    assert saved["preference"]["note"] == "A is right"
+    assert saved["preference_version"] == 1
+
+
 def test_record_preference_rejects_unknown_choices_and_tickets(collections):
     _, runs, results = collections
     run_id = new_run(collections, size=1)
     ticket_id = results.find_one()["ticket_id"]
     with pytest.raises(ValueError, match="choice"):
-        ab_test.record_preference(results, run_id, ticket_id, "C")
+        ab_test.record_preference(results, run_id, ticket_id, "C", 0)
     with pytest.raises(ValueError, match="isn't in"):
-        ab_test.record_preference(results, run_id, "no-such-ticket", "A")
+        ab_test.record_preference(results, run_id, "no-such-ticket", "A", 0)
 
 
 def test_blind_choice_follows_the_ticket_order():
@@ -254,8 +459,6 @@ def test_blind_choice_follows_the_ticket_order():
 
 
 def test_b_starts_from_a_and_overrides_only_what_is_given():
-    import argparse
-
     parser = argparse.ArgumentParser()
     ab_test._config_args(parser, "A")
     ab_test._config_args(parser, "B")
@@ -264,3 +467,11 @@ def test_b_starts_from_a_and_overrides_only_what_is_given():
     b = ab_test._config_from(args, "B", a)
     assert a == A
     assert b == EngineConfig("new-model", confirmation=None)
+
+
+def test_a_zero_token_limit_is_refused_not_replaced():
+    parser = argparse.ArgumentParser()
+    ab_test._config_args(parser, "B")
+    args = parser.parse_args(["--b-max-tokens", "0"])
+    with pytest.raises(ValueError, match="max_tokens"):
+        ab_test._config_from(args, "B", A)

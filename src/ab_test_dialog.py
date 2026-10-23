@@ -14,7 +14,7 @@ Nothing is written to the tickets collection.
 
 import getpass
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from decision_engine import ab_test
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
@@ -64,7 +64,6 @@ MAX_SAMPLE_SIZE = 1000
 MAX_TOKENS_LIMIT = 64000
 DEFAULT_EFFORT = "Model default"
 # Fields a reviewer reads for each ticket; the transcript can be long.
-TICKET_FIELDS = {"zendesk_id": 1, "subject": 1, "status": 1, "transcript": 1, "_id": 0}
 BUSY_MESSAGE = "Another Decision Engine job is running. Try again when it finishes."
 
 
@@ -136,6 +135,23 @@ def format_ticket(ticket: Optional[dict]) -> str:
             str(entry.get("body") or "").strip(),
         ]
     return "\n".join(lines)
+
+
+def runs_with_counts(runs: Collection, results: Collection) -> List[dict]:
+    """The newest runs, each with "reviewed": how many of its tickets have a verdict."""
+    listed = ab_test.list_runs(runs)
+    reviewed = {
+        row["_id"]: row["count"]
+        for row in results.aggregate(
+            [
+                {"$match": {"preference": {"$ne": None}}},
+                {"$group": {"_id": "$run_id", "count": {"$sum": 1}}},
+            ]
+        )
+    }
+    for run in listed:
+        run["reviewed"] = reviewed.get(run["_id"], 0)
+    return listed
 
 
 def ab_collections(tickets: Collection) -> Tuple[Collection, Collection, Collection]:
@@ -284,7 +300,6 @@ class ABTestDialog(QDialog):
         self.runs: List[dict] = []
         self.current: Optional[dict] = None  # the run being reviewed
         self.docs: List[dict] = []
-        self.tickets: Dict[str, dict] = {}
         self.position = 0  # index into visible()
         self.classifying = False
         self.setWindowTitle("A/B Test")
@@ -460,20 +475,8 @@ class ABTestDialog(QDialog):
 
     def load_runs(self) -> None:
         def task():
-            tickets, runs, results = self.collections()
-            listed = ab_test.list_runs(runs)
-            reviewed = {
-                row["_id"]: row["count"]
-                for row in results.aggregate(
-                    [
-                        {"$match": {"preference": {"$ne": None}}},
-                        {"$group": {"_id": "$run_id", "count": {"$sum": 1}}},
-                    ]
-                )
-            }
-            for run in listed:
-                run["reviewed"] = reviewed.get(run["_id"], 0)
-            return listed
+            _, runs, results = self.collections()
+            return runs_with_counts(runs, results)
 
         if not self.run(task, "Loading A/B runs", self._show_runs, None):
             self._busy()
@@ -515,9 +518,10 @@ class ABTestDialog(QDialog):
         def task():
             tickets, runs, results = self.collections()
             ids = ab_test.sample_ticket_ids(tickets, size, awaiting_only=awaiting_only)
-            return ab_test.create_run(runs, results, a, b, ids, name, reviewer), len(
-                ids
+            run_id = ab_test.create_run(
+                tickets, runs, results, a, b, ids, name, reviewer
             )
+            return run_id, len(ids)
 
         if not self.run(task, "Creating an A/B run", self._run_created, None):
             self._busy()
@@ -554,11 +558,10 @@ class ABTestDialog(QDialog):
         extra = {"classify": self.classify} if self.classify else {}
 
         def task():
-            tickets, runs, results = self.collections()
+            _, runs, results = self.collections()
             try:
                 return ab_test.run_ab_test(
                     run_id,
-                    tickets,
                     runs,
                     results,
                     on_progress=self._relay.progress.emit,
@@ -636,7 +639,7 @@ class ABTestDialog(QDialog):
                     self.open_selected()
                     return
 
-        task = lambda: ab_test.list_runs(self.collections()[1])
+        task = lambda: runs_with_counts(*self.collections()[1:])
         if not self.run(task, "Loading A/B runs", opened, None):
             self._busy()
 
@@ -647,25 +650,19 @@ class ABTestDialog(QDialog):
         if run is None:
             return
 
+        # Each result holds the ticket as it was when the run was created:
+        # what both variants were sent, not the ticket as it is now.
         def task():
-            tickets, runs, results = self.collections()
-            docs = list(results.find({"run_id": run["_id"]}).sort("ticket_id", 1))
-            found = {
-                str(t["zendesk_id"]): t
-                for t in tickets.find(
-                    {"zendesk_id": {"$in": [d["ticket_id"] for d in docs]}},
-                    TICKET_FIELDS,
-                )
-            }
-            return docs, found
+            results = self.collections()[2]
+            return list(results.find({"run_id": run["_id"]}).sort("ticket_id", 1))
 
         if not self.run(
-            task, "Loading the run's tickets", lambda r: self._show_run(run, *r), None
+            task, "Loading the run's tickets", lambda d: self._show_run(run, d), None
         ):
             self._busy()
 
-    def _show_run(self, run: dict, docs: List[dict], tickets: Dict[str, dict]) -> None:
-        self.current, self.docs, self.tickets = run, docs, tickets
+    def _show_run(self, run: dict, docs: List[dict]) -> None:
+        self.current, self.docs = run, docs
         unreviewed = [
             i for i, d in enumerate(self.visible()) if not d.get("preference")
         ]
@@ -695,9 +692,7 @@ class ABTestDialog(QDialog):
                 f"{self.current.get('name')}: ticket {self.position + 1} of {len(docs)} "
                 f"· {reviewed} of {len(self.docs)} reviewed"
             )
-        self.ticket_view.setPlainText(
-            format_ticket(self.tickets.get(doc["ticket_id"])) if doc else ""
-        )
+        self.ticket_view.setPlainText(format_ticket(doc.get("ticket")) if doc else "")
         for side, view in enumerate(self.output_views, start=1):
             output = (
                 (doc.get("outputs") or {}).get(ab_test.blind_choice(doc, side))
@@ -735,17 +730,57 @@ class ABTestDialog(QDialog):
         note = self.note_input.text().strip()
         run_id = self.current["_id"]
 
+        version = doc.get("preference_version") or 0
+
         def task():
             results = self.collections()[2]
             ab_test.record_preference(
-                results, run_id, doc["ticket_id"], choice, reviewer, note
+                results, run_id, doc["ticket_id"], choice, version, reviewer, note
             )
             return results.find_one({"run_id": run_id, "ticket_id": doc["ticket_id"]})
 
+        # A conflict (another reviewer saved first) is shown by the tab's error
+        # dialog; reloading then shows their verdict.
         if not self.run(
-            task, "Saving the verdict", lambda saved: self._recorded(doc, saved), None
+            task,
+            "Saving the verdict",
+            lambda saved: self._recorded(doc, saved),
+            lambda _: self._reload_current(),
         ):
             self._busy()
+
+    def _reload_current(self) -> None:
+        """Reloads the run being reviewed, keeping the ticket shown."""
+        if self.current is None:
+            return
+        run, shown = self.current, self._current_doc()
+
+        def reloaded(docs: List[dict]) -> None:
+            self.current, self.docs = run, docs
+            visible = self.visible()
+            ids = [d["_id"] for d in visible]
+            self.position = (
+                ids.index(shown["_id"]) if shown and shown["_id"] in ids else 0
+            )
+            self._update_reviewed_count()
+            self._show_current()
+
+        task = lambda: list(
+            self.collections()[2].find({"run_id": run["_id"]}).sort("ticket_id", 1)
+        )
+        if not self.run(task, "Reloading the run", reloaded, None):
+            self._busy()
+
+    def _update_reviewed_count(self) -> None:
+        """Shows the open run's reviewed count in the run table."""
+        if self.current is None:
+            return
+        count = sum(1 for d in self.docs if d.get("preference"))
+        column = RUN_COLUMNS.index("Reviewed")
+        for row, run in enumerate(self.runs):
+            if run["_id"] == self.current["_id"]:
+                run["reviewed"] = count
+                self.run_table.setItem(row, column, QTableWidgetItem(str(count)))
 
     def _recorded(self, doc: dict, saved: Optional[dict]) -> None:
         if saved is not None:
@@ -759,6 +794,7 @@ class ABTestDialog(QDialog):
             # It left the "only unreviewed" list; the next one is now at this position.
             self.position = min(self.position, max(len(docs) - 1, 0))
         self.status_label.setText(f"Saved the verdict on ticket {doc['ticket_id']}.")
+        self._update_reviewed_count()
         self._show_current()
 
     def show_results(self) -> None:

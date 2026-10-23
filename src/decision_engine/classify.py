@@ -117,7 +117,12 @@ class EngineConfig:
             primary=values["primary"],
             secondary=values.get("secondary") or None,
             confirmation=values.get("confirmation") or None,
-            max_tokens=int(values.get("max_tokens") or MAX_TOKENS),
+            # Only a missing value takes the default; 0 reaches validation.
+            max_tokens=(
+                MAX_TOKENS
+                if values.get("max_tokens") is None
+                else int(values["max_tokens"])
+            ),
             effort=values.get("effort") or None,
         )
 
@@ -139,6 +144,20 @@ class EngineConfig:
 
 class InsecureApiUrl(ValueError):
     """CHEAPER_INFERENCE_API_URL would send the API key and tickets unencrypted."""
+
+
+# Status codes that will fail every ticket the same way: stop the batch.
+FATAL_STATUS_CODES = (401, 402)
+
+
+def is_fatal(error: Exception) -> bool:
+    """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
+    if isinstance(error, InsecureApiUrl):
+        return True
+    return (
+        isinstance(error, anthropic.APIStatusError)
+        and error.status_code in FATAL_STATUS_CODES
+    )
 
 
 def is_loopback_url(url: str) -> bool:
@@ -227,6 +246,12 @@ def classify_ticket(
     A ticket is never sent twice to the same model: an unset secondary or
     confirmation model, or one naming the model that already answered, skips
     that step (the primary error is re-raised, or the first answer is kept).
+    An error that will hit every ticket (is_fatal: a bad key, no credit) is
+    always raised, from any step, so a batch stops rather than carrying on.
+
+    Every model call, failed ones included, is listed in the result's
+    "model_calls" ({"model", "usage", "latency_ms", "error"}); when no model
+    answers, the raised error carries the same list as `model_calls`.
 
     Args:
         ticket_payload: The output of build_ticket_payload.
@@ -242,21 +267,49 @@ def classify_ticket(
     """
     config = config or EngineConfig.from_env()
     primary = config.primary
+    calls = []
 
     def classify_with(model: str) -> dict:
-        return _classify_with(
-            model,
-            ticket_payload,
-            reengage_count,
-            assignee,
-            max_tokens=config.max_tokens,
-            effort=config.effort,
+        started = time.monotonic()
+        try:
+            answer = _classify_with(
+                model,
+                ticket_payload,
+                reengage_count,
+                assignee,
+                max_tokens=config.max_tokens,
+                effort=config.effort,
+            )
+        except (anthropic.APIError, EngineError) as e:
+            audit = getattr(e, "audit", None) or {}
+            calls.append(
+                {
+                    "model": model,
+                    "usage": audit.get("usage") or {},
+                    "latency_ms": audit.get("latency_ms")
+                    or int((time.monotonic() - started) * 1000),
+                    "error": type(e).__name__,
+                }
+            )
+            e.model_calls = calls
+            raise
+        calls.append(
+            {
+                "model": model,
+                "usage": answer["audit"]["usage"],
+                "latency_ms": answer["audit"]["latency_ms"],
+                "error": None,
+            }
         )
+        answer["model_calls"] = calls
+        return answer
 
     try:
         result = classify_with(primary)
     except (anthropic.APIError, EngineError) as e:
         secondary = config.secondary
+        if is_fatal(e):
+            raise
         if secondary in (None, primary):
             logger.error(
                 f"Primary model failed ({e}) and no distinct secondary model is set."
@@ -277,6 +330,8 @@ def classify_ticket(
     try:
         confirmed = classify_with(confirmation)
     except (anthropic.APIError, EngineError) as e:
+        if is_fatal(e):
+            raise
         logger.warning(f"Confirmation model failed ({e}); keeping the first result.")
         return result
     confirmed["confirmation_of"] = {

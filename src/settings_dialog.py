@@ -5,6 +5,7 @@ from typing import Dict
 from urllib.parse import urlsplit
 
 import settings
+from decision_engine.ab_test import collection_name_problem
 from decision_engine.classify import api_url_problem, is_loopback_url
 from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 from loguru import logger
@@ -133,6 +134,24 @@ class SettingsDialog(QDialog):
                     return False
         return True
 
+    def _collection_names_ok(self) -> bool:
+        """Refuses A/B collection names that collide with the tickets or each other."""
+        names = {
+            setting.name: self.fields[setting.name].text().strip() or setting.default
+            for setting in settings.SETTINGS
+            if setting.name
+            in ("MONGO_COLLECTION", "AB_TEST_COLLECTION", "AB_RESULT_COLLECTION")
+        }
+        problem = collection_name_problem(
+            names["MONGO_COLLECTION"] or "tickets",
+            names["AB_TEST_COLLECTION"],
+            names["AB_RESULT_COLLECTION"],
+        )
+        if problem:
+            QMessageBox.critical(self, "Collection Names Clash", problem)
+            return False
+        return True
+
     def _dimensions_ok(self) -> bool:
         """Refuses an embedding size Voyage doesn't offer."""
         value = self.fields["EMBEDDING_DIMENSIONS"].text().strip()
@@ -168,6 +187,7 @@ class SettingsDialog(QDialog):
             self._api_urls_ok()
             and self._dimensions_ok()
             and self._storage_endpoint_ok()
+            and self._collection_names_ok()
         ):
             return
         try:

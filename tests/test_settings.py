@@ -252,3 +252,39 @@ def test_storage_settings_are_not_required():
         "B2_APPLICATION_KEY",
         "B2_ENDPOINT_URL",
     }
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+
+    # Kept by the fixture: an application nobody holds is destroyed at once.
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.mark.parametrize(
+    "entered, saves",
+    [
+        ({}, True),  # the defaults: tickets, ab_tests, ab_results
+        ({"AB_TEST_COLLECTION": "tickets"}, False),
+        ({"MONGO_COLLECTION": "runs", "AB_TEST_COLLECTION": "runs"}, False),
+        ({"AB_TEST_COLLECTION": "ab", "AB_RESULT_COLLECTION": "ab"}, False),
+    ],
+)
+def test_settings_refuse_ab_collection_names_that_clash(
+    qapp, monkeypatch, entered, saves
+):
+    from PyQt5.QtWidgets import QMessageBox
+
+    import settings_dialog
+
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox, "critical", lambda *args, **kwargs: shown.append(args[2])
+    )
+    dialog = settings_dialog.SettingsDialog()
+    for name in ("MONGO_COLLECTION", "AB_TEST_COLLECTION", "AB_RESULT_COLLECTION"):
+        dialog.fields[name].setText(entered.get(name, ""))
+    assert dialog._collection_names_ok() is saves
+    assert bool(shown) is not saves

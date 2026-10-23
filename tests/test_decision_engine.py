@@ -1544,3 +1544,46 @@ def test_config_round_trips_through_a_dict():
     config = classify.EngineConfig("m", None, "c", 9000, "max")
     assert classify.EngineConfig.from_dict(config.to_dict()) == config
     assert "effort max" in config.describe() and "secondary" not in config.describe()
+
+
+def test_config_from_dict_refuses_a_zero_token_limit():
+    with pytest.raises(ValueError, match="max_tokens"):
+        classify.EngineConfig.from_dict({"primary": "m", "max_tokens": 0})
+    assert classify.EngineConfig.from_dict({"primary": "m"}).max_tokens == classify.MAX_TOKENS
+
+
+@pytest.mark.parametrize("code", [401, 402])
+def test_a_fatal_confirmation_error_is_raised_not_swallowed(routed_model, code):
+    routed_model(
+        primary=model_reply("manual_triage", confidence=40),
+        confirmation=status_error(code),
+    )
+    with pytest.raises(anthropic.APIStatusError):
+        classify.classify_ticket("payload")
+
+
+def test_a_fatal_primary_error_skips_the_secondary(routed_model):
+    client = routed_model(primary=status_error(401), secondary=model_reply("flag_solve"))
+    with pytest.raises(anthropic.APIStatusError):
+        classify.classify_ticket("payload")
+    assert client.models == ["primary"]
+
+
+def test_every_model_call_is_listed_with_its_cost(routed_model):
+    routed_model(
+        primary=api_error(),
+        secondary=model_reply("manual_triage", confidence=40),
+        confirmation=model_reply("flag_solve"),
+    )
+    result = classify.classify_ticket("payload")
+    calls = result["model_calls"]
+    assert [c["model"] for c in calls] == ["primary", "secondary", "confirmation"]
+    assert calls[0]["error"] == "APIConnectionError" and calls[0]["latency_ms"] >= 0
+    assert calls[1]["usage"]["output_tokens"] == 50 and calls[2]["error"] is None
+
+
+def test_a_failed_classification_carries_its_calls(routed_model):
+    routed_model(primary=api_error(), secondary=model_reply("x"))
+    with pytest.raises(classify.EngineError) as raised:
+        classify.classify_ticket("payload")
+    assert [c["model"] for c in raised.value.model_calls] == ["primary", "secondary"]

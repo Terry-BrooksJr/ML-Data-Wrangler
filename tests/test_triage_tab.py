@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import ab_test_dialog
 import mongomock
 import pytest
 import triage_tab
@@ -1008,7 +1009,6 @@ def ab_engine(payload, reengage_count=0, assignee=None, config=None):
 
 
 def open_ab_test(qapp, tab, monkeypatch, b_primary="new-model"):
-    import ab_test_dialog
 
     class Accepting(ab_test_dialog.NewRunDialog):
         def exec_(self):
@@ -1043,29 +1043,63 @@ def test_ab_test_creates_classifies_and_reviews_blind(
     assert "ticket 1 of 3" in dialog.position_label.text()
     assert list(ab_tickets.find()) == before  # the tickets are untouched
 
-    # The two sides show the two answers without naming the models.
-    doc = dialog._current_doc()
-    texts = [view.toPlainText() for view in dialog.output_views]
-    assert sorted(t.splitlines()[0] for t in texts) == [
-        "Classification: flag_solve",
-        "Classification: manual_triage",
-    ]
-    assert not any("new-model" in t or "current" in t for t in texts)
-    assert doc["ticket_id"] in dialog.ticket_view.toPlainText()
-
-    # Choosing the side that shows B's answer records B, then moves on.
-    b_side = doc["order"].index("B") + 1
-    dialog.record(str(b_side))
-    wait_until_idle(qapp, tab)
+    # A fixed mix of orders: each side must show the variant its ticket's
+    # stored order names, not always A first.
     _, results = ab_test.get_collections(ab_tickets.database)
-    assert results.find_one({"ticket_id": doc["ticket_id"]})["preference"]["choice"] == "B"
+    orders = [["B", "A"], ["A", "B"], ["B", "A"]]
+    ids = sorted(d["ticket_id"] for d in results.find())
+    for ticket_id, order in zip(ids, orders):
+        results.update_one({"ticket_id": ticket_id}, {"$set": {"order": order}})
+    # The review shows the snapshot taken at creation, not the live ticket.
+    first_subject = ab_tickets.find_one({"zendesk_id": ids[0]})["subject"]
+    ab_tickets.update_one({"zendesk_id": ids[0]}, {"$set": {"subject": "Edited later"}})
+    dialog.open_selected()
+    wait_until_idle(qapp, tab)
+
+    answers = {"A": "Classification: manual_triage", "B": "Classification: flag_solve"}
+    for position, order in enumerate(orders):
+        dialog.position = position
+        dialog._show_current()
+        texts = [view.toPlainText() for view in dialog.output_views]
+        assert [t.splitlines()[0] for t in texts] == [answers[v] for v in order]
+        assert not any("new-model" in t or "current" in t for t in texts)
+    dialog.position = 0
+    dialog._show_current()
+    assert first_subject in dialog.ticket_view.toPlainText()
+    assert "Edited later" not in dialog.ticket_view.toPlainText()
+
+    # Output 1 on the first ticket is B's answer (order B, A).
+    dialog.record("1")
+    wait_until_idle(qapp, tab)
+    assert results.find_one({"ticket_id": ids[0]})["preference"]["choice"] == "B"
     assert "ticket 2 of 3" in dialog.position_label.text()
+    reviewed_column = ab_test_dialog.RUN_COLUMNS.index("Reviewed")
+    assert dialog.run_table.item(0, reviewed_column).text() == "1"
+
+    # Another reviewer saved a verdict on ticket 2 meanwhile: ours is refused
+    # with a message, and the reload shows theirs.
+    results.update_one(
+        {"ticket_id": ids[1]},
+        {
+            "$set": {
+                "preference": {"choice": "tie", "reviewer": "other", "note": ""},
+                "preference_version": 1,
+            }
+        },
+    )
+    dialog.record("2")
+    for _ in range(2):
+        wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "critical" and "changed by other" in dialogs[-1][1]
+    assert results.find_one({"ticket_id": ids[1]})["preference"]["reviewer"] == "other"
+    assert dialog.verdict_label.text() == "Your verdict: Both equally good (other)"
+    assert dialog.run_table.item(0, reviewed_column).text() == "2"
 
     dialog.only_unreviewed.setChecked(True)
-    assert len(dialog.visible()) == 2
+    assert len(dialog.visible()) == 1
     dialog.record("tie")
     wait_until_idle(qapp, tab)
-    assert len(dialog.visible()) == 1
+    assert len(dialog.visible()) == 0
 
     dialog.show_results()
     wait_until_idle(qapp, tab)

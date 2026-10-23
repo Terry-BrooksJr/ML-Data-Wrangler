@@ -514,20 +514,30 @@ with a configuration you're considering (B) on the same tickets:
    sample. Effort is sent only when set; leave it at the model default for
    models other than Claude.
 2. Each sampled ticket is classified by both configurations: at least two
-   paid model calls per ticket. **Stop After This Ticket** keeps what
-   finished, and **Classify Pending** carries on later.
+   paid model calls per ticket. Both are sent the same snapshot of the
+   ticket, taken when the test was created, so later edits to the ticket
+   don't skew the comparison. **Stop After This Ticket** keeps what
+   finished, and **Classify Pending** carries on later and retries any
+   answer that failed. A test whose answers were saved under an older system
+   prompt can't be resumed; create a new one.
 3. **Blind Review** shows the ticket and the two answers as Output 1 and
    Output 2, in an order shuffled per ticket, without model names. Choose
    **Output 1 Better**, **Output 2 Better**, **Equally Good** or **Both
    Wrong**, with an optional note. **Only where they disagree** skips the
-   tickets where both chose the same classification.
+   tickets where both chose the same classification. If someone else saved
+   a verdict on the ticket after you opened it, yours is refused and theirs
+   is shown.
 4. **Show Results** names A and B and reports the verdicts (overall and
    where they disagreed), how often they agreed, errors, mean confidence,
-   latency and token use for each.
+   latency and token use for each, counting every model call (fallback
+   and confirmation calls, failed ones too).
 
 Runs are stored in `ab_tests` and `ab_results` (`AB_TEST_COLLECTION`,
-`AB_RESULT_COLLECTION`). An A/B run never writes to the tickets: no review is
-added and nothing leaves the awaiting-review queue. From the command line:
+`AB_RESULT_COLLECTION`); Settings refuses names that match the tickets
+collection or each other. An A/B run never writes to the tickets: no review
+is added and nothing leaves the awaiting-review queue. Two people can
+classify the same test at once: each ticket is claimed while it's
+classified, so none is paid for twice. From the command line:
 
 ```bash
 cd src

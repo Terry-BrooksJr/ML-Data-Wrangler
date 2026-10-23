@@ -8,7 +8,9 @@ side by side, blind (each ticket shows them in a random order, as "Output
 preferences, how often the two agree, and what each cost in tokens.
 
 Nothing here writes to the tickets collection: an A/B run never adds an
-agent review, claims a ticket or changes awaiting_review.
+agent review, claims a ticket or changes awaiting_review. Each result keeps
+a snapshot of its ticket taken when the run was created, so both variants,
+and the reviewer, see the same ticket however it changes afterwards.
 
     python -m decision_engine.ab_test create --size 30 --b-primary claude-opus-5.5
     python -m decision_engine.ab_test run RUN_ID      # paid model calls
@@ -18,16 +20,18 @@ agent review, claims a ticket or changes awaiting_review.
 import argparse
 import os
 import random
+import socket
 import sys
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from loguru import logger
+from pymongo import ReturnDocument
 from pymongo.collection import Collection
 
-from .classify import classify_ticket, EFFORT_LEVELS, EngineConfig
+from .classify import classify_ticket, EFFORT_LEVELS, EngineConfig, is_fatal
 from .guards import CLASSIFICATIONS
 from .payload import build_ticket_payload
 from .prompts import PROMPT_VERSION
@@ -54,21 +58,87 @@ _KEPT_FIELDS = (
     "guard_overrides",
     "model_version",
 )
+# The ticket fields kept for the reviewer; the model gets the saved payload.
+_SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status", "assignee", "transcript")
+# A claim older than this is treated as abandoned (its worker crashed). Long
+# enough for both variants of one ticket, confirmation calls included.
+CLAIM_TTL = timedelta(minutes=30)
+# Run statuses. "creating" is only ever seen if creation was interrupted.
+CREATING, PENDING, RUNNING, PARTIAL, COMPLETE = (
+    "creating",
+    "pending",
+    "running",
+    "partial",
+    "complete",
+)
 
 
 class Stopped(Exception):
     """The run was asked to stop; what finished is saved and it can resume."""
 
 
+class PromptChanged(ValueError):
+    """The system prompt changed after the run started classifying."""
+
+
+class VerdictConflict(ValueError):
+    """Someone else saved a verdict on the ticket since it was loaded."""
+
+
+def collection_name_problem(
+    tickets_name: str, runs_name: str, results_name: str
+) -> Optional[str]:
+    """Why these collection names can't be used together, or None.
+
+    A/B documents written into the tickets collection, or runs and results
+    sharing one collection, would corrupt both.
+    """
+    if runs_name == results_name:
+        return f"The A/B runs and A/B results collections are both named {runs_name!r}; give them different names."
+    for label, name in (("runs", runs_name), ("results", results_name)):
+        if name == tickets_name:
+            return f"The A/B {label} collection is named {name!r}, the same as the tickets collection; give it a different name."
+    return None
+
+
+def collection_names() -> Tuple[str, str, str]:
+    """(tickets, ab_tests, ab_results) collection names, from the settings."""
+    return (
+        os.environ.get("MONGO_COLLECTION") or "tickets",
+        os.environ.get("AB_TEST_COLLECTION") or "ab_tests",
+        os.environ.get("AB_RESULT_COLLECTION") or "ab_results",
+    )
+
+
 def get_collections(database) -> Tuple[Collection, Collection]:
     """(ab_tests, ab_results) in the given database.
 
     The names are read here, not at import, so a saved setting applies at once.
+
+    Raises:
+        ValueError: The names collide with each other or with the tickets
+            collection (collection_name_problem).
     """
-    runs = database[os.environ.get("AB_TEST_COLLECTION", "ab_tests")]
-    results = database[os.environ.get("AB_RESULT_COLLECTION", "ab_results")]
+    tickets_name, runs_name, results_name = collection_names()
+    problem = collection_name_problem(tickets_name, runs_name, results_name)
+    if problem:
+        raise ValueError(problem)
+    runs = database[runs_name]
+    results = database[results_name]
     results.create_index([("run_id", 1), ("ticket_id", 1)], unique=True)
     return runs, results
+
+
+def _duplicates(ids: Iterable[str]) -> List[str]:
+    return sorted(i for i, n in Counter(ids).items() if n > 1)
+
+
+def _duplicate_error(duplicates: List[str]) -> ValueError:
+    shown = ", ".join(duplicates[:10]) + (" …" if len(duplicates) > 10 else "")
+    return ValueError(
+        f"The tickets collection has more than one document for ticket(s) {shown}. "
+        "Remove the duplicates (and give zendesk_id a unique index) before A/B testing."
+    )
 
 
 def sample_ticket_ids(
@@ -83,6 +153,9 @@ def sample_ticket_ids(
         size: How many to pick; fewer if fewer tickets qualify.
         seed: Makes the sample repeatable.
         awaiting_only: Only tickets currently awaiting review.
+
+    Raises:
+        ValueError: A ticket ID appears on more than one document.
     """
     query = {"transcript.0": {"$exists": True}}
     if awaiting_only:
@@ -90,10 +163,25 @@ def sample_ticket_ids(
     ids = sorted(
         str(doc["zendesk_id"]) for doc in tickets.find(query, {"zendesk_id": 1})
     )
+    duplicates = _duplicates(ids)
+    if duplicates:
+        raise _duplicate_error(duplicates)
     return random.Random(seed).sample(ids, min(size, len(ids)))
 
 
+def _snapshot(ticket: dict, as_of: datetime) -> dict:
+    """What a result keeps of its ticket: the exact payload both variants
+    are sent, and the fields the reviewer reads."""
+    return {
+        "payload": build_ticket_payload(ticket, as_of=as_of),
+        "reengage_count": len(ticket.get("reengage_attempts") or []),
+        "assignee": ticket.get("assignee"),
+        "ticket": {key: ticket.get(key) for key in _SNAPSHOT_FIELDS},
+    }
+
+
 def create_run(
+    tickets: Collection,
     runs: Collection,
     results: Collection,
     a: EngineConfig,
@@ -105,46 +193,76 @@ def create_run(
 ) -> str:
     """Records a new run and one pending result per ticket; classifies nothing.
 
-    Each ticket gets a random display order, so a reviewer can't tell which
-    side is A.
+    Each result keeps a snapshot of its ticket, including the payload built
+    once (as of the run's creation), so A and B are sent exactly the same
+    input and the reviewer reads what they were sent, even if the ticket
+    changes later. Each ticket gets a random display order, so a reviewer
+    can't tell which side is A.
+
+    If saving the results fails part way, the run and its results are
+    removed, so no partial sample is left behind.
 
     Returns:
         The run's ID.
 
     Raises:
-        ValueError: A and B are the same configuration, or there are no tickets.
+        ValueError: A and B are the same configuration, there are no
+            tickets, a ticket is missing, or a ticket ID is duplicated.
     """
     if a == b:
         raise ValueError("A and B are the same configuration; change one of them.")
-    ticket_ids = list(dict.fromkeys(str(t) for t in ticket_ids))
+    ticket_ids = [str(t) for t in ticket_ids]
     if not ticket_ids:
         raise ValueError("No tickets to test.")
+    duplicates = _duplicates(ticket_ids)
+    if duplicates:
+        raise ValueError(f"Ticket(s) listed more than once: {', '.join(duplicates)}.")
+    found: Dict[str, List[dict]] = {}
+    for ticket in tickets.find({"zendesk_id": {"$in": ticket_ids}}):
+        found.setdefault(str(ticket["zendesk_id"]), []).append(ticket)
+    duplicates = sorted(i for i, docs in found.items() if len(docs) > 1)
+    if duplicates:
+        raise _duplicate_error(duplicates)
+    missing = [i for i in ticket_ids if i not in found]
+    if missing:
+        raise ValueError(f"Ticket(s) not found: {', '.join(missing[:10])}.")
+
     run_id = uuid.uuid4().hex[:12]
     shuffle = random.Random(seed)
+    created_at = datetime.now(timezone.utc)
     runs.insert_one(
         {
             "_id": run_id,
             "name": name or f"{a.primary} vs {b.primary}",
-            "created_at": datetime.now(timezone.utc),
+            "created_at": created_at,
             "created_by": created_by,
             "variants": {"A": a.to_dict(), "B": b.to_dict()},
             "prompt_version": PROMPT_VERSION,
             "ticket_count": len(ticket_ids),
-            "status": "pending",
+            "status": CREATING,
         }
     )
-    results.insert_many(
-        [
-            {
-                "run_id": run_id,
-                "ticket_id": ticket_id,
-                "order": shuffle.sample(VARIANTS, 2),
-                "outputs": {},
-                "preference": None,
-            }
-            for ticket_id in ticket_ids
-        ]
-    )
+    try:
+        results.insert_many(
+            [
+                {
+                    "run_id": run_id,
+                    "ticket_id": ticket_id,
+                    "order": shuffle.sample(VARIANTS, 2),
+                    "outputs": {},
+                    "preference": None,
+                    "preference_version": 0,
+                    "claim": None,
+                    **_snapshot(found[ticket_id][0], created_at),
+                }
+                for ticket_id in ticket_ids
+            ]
+        )
+        runs.update_one({"_id": run_id}, {"$set": {"status": PENDING}})
+    except BaseException:
+        results.delete_many({"run_id": run_id})
+        runs.delete_one({"_id": run_id})
+        raise
     return run_id
 
 
@@ -152,23 +270,42 @@ def configs(run: dict) -> Dict[str, EngineConfig]:
     return {v: EngineConfig.from_dict(run["variants"][v]) for v in VARIANTS}
 
 
+def _cost(calls: List[dict]) -> dict:
+    """Tokens and time across every model call one classification made."""
+    return {
+        "usage": _sum_usage(call.get("usage") for call in calls),
+        "latency_ms": sum(call.get("latency_ms") or 0 for call in calls),
+        "model_calls": len(calls),
+    }
+
+
 def _output(result: dict) -> dict:
-    """What an A/B result keeps of a classification."""
+    """What an A/B result keeps of a classification.
+
+    Usage and latency cover every model call behind the answer: a failed
+    primary call, the secondary that replaced it, and a confirmation.
+    """
     kept = {key: result.get(key) for key in _KEPT_FIELDS}
     audit = result.get("audit") or {}
-    kept["usage"] = audit.get("usage") or {}
-    kept["latency_ms"] = audit.get("latency_ms")
+    calls = result.get("model_calls") or [
+        {"usage": audit.get("usage"), "latency_ms": audit.get("latency_ms")}
+    ]
+    kept.update(_cost(calls))
     confirmed = result.get("confirmation_of")
     if confirmed:
         kept["confirmed_from"] = {
             key: confirmed.get(key)
             for key in ("model_version", "classification", "confidence")
         }
-        # The confirmation replaced an answer that was paid for too.
-        kept["usage"] = _sum_usage(
-            [kept["usage"], (confirmed.get("audit") or {}).get("usage") or {}]
-        )
     return kept
+
+
+def _error_output(error: Exception) -> dict:
+    audit = getattr(error, "audit", None) or {}
+    calls = getattr(error, "model_calls", None) or [
+        {"usage": audit.get("usage"), "latency_ms": audit.get("latency_ms")}
+    ]
+    return {"error": f"{type(error).__name__}: {error}"[:1000], **_cost(calls)}
 
 
 def _sum_usage(usages: Iterable[dict]) -> dict:
@@ -179,85 +316,159 @@ def _sum_usage(usages: Iterable[dict]) -> dict:
     return dict(total)
 
 
+def pending_variants(doc: dict) -> List[str]:
+    """The variants still to classify: never tried, or tried and failed."""
+    outputs = doc.get("outputs") or {}
+    return [v for v in VARIANTS if v not in outputs or "error" in outputs[v]]
+
+
+def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
+    """Takes a result for this worker, so two workers never pay for the same
+    ticket; returns the claimed document, or None if another worker has it."""
+    now = datetime.now(timezone.utc)
+    return results.find_one_and_update(
+        {
+            "_id": doc_id,
+            "$or": [
+                {"claim": None},
+                {"claim.at": {"$lt": now - CLAIM_TTL}},
+                {"claim.worker": worker},
+            ],
+        },
+        {"$set": {"claim": {"worker": worker, "at": now}}},
+        return_document=ReturnDocument.AFTER,
+    )
+
+
+def _finish(runs: Collection, results: Collection, run_id: str) -> str:
+    """Records the run's status from what is saved: complete only when every
+    ticket has both answers."""
+    unfinished = sum(
+        1 for doc in results.find({"run_id": run_id}) if pending_variants(doc)
+    )
+    status = PARTIAL if unfinished else COMPLETE
+    update = {"status": status}
+    if status == COMPLETE:
+        update["completed_at"] = datetime.now(timezone.utc)
+    runs.update_one({"_id": run_id}, {"$set": update})
+    return status
+
+
 def run_ab_test(
     run_id: str,
-    tickets: Collection,
     runs: Collection,
     results: Collection,
     classify: Callable[..., dict] = classify_ticket,
     on_progress: Optional[Callable[[int, int], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    worker: Optional[str] = None,
 ) -> dict:
     """Classifies every pending ticket of a run with both configurations.
 
-    Resumable: a ticket's output for a variant is saved as soon as it
-    arrives, and outputs already saved are skipped. A failed classification
-    is saved as that variant's error and the run continues; errors that will
-    hit every ticket (bad key, out of credit) stop it, as in a review batch.
+    Each ticket's saved payload is sent to both, so they see the same input.
+    Resumable: an output is saved as soon as it arrives and isn't asked for
+    again, but a failed one is retried by the next run. Errors that will
+    hit every ticket (bad key, out of credit) stop the run, as in a review
+    batch. Each ticket is claimed while it is classified, so two workers on
+    one run never classify the same ticket. However the call ends, the run
+    is left "complete" or "partial", never "running".
 
     Args:
         on_progress: Called with (done, total) after each ticket.
         should_stop: Checked between tickets; True stops the run (Stopped).
+        worker: Identifies this worker's claims; defaults to a fresh ID.
 
     Returns:
         The run's summary (summarize).
-    """
-    from .persistence import is_fatal
 
+    Raises:
+        ValueError: No such run, or its creation didn't finish.
+        PromptChanged: Answers were saved under a different system prompt.
+    """
     run = runs.find_one({"_id": run_id})
     if run is None:
         raise ValueError(f"No A/B run {run_id}.")
+    if run.get("status") == CREATING:
+        raise ValueError(
+            f"A/B run {run_id} wasn't created completely; create a new run."
+        )
+    docs = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
+    if run.get("prompt_version") != PROMPT_VERSION:
+        if any(doc.get("outputs") for doc in docs):
+            raise PromptChanged(
+                f"A/B run {run_id} was classified with prompt {run.get('prompt_version')}, but the "
+                f"engine now uses {PROMPT_VERSION}. Answers from two prompts can't be compared; "
+                "create a new run."
+            )
+        runs.update_one({"_id": run_id}, {"$set": {"prompt_version": PROMPT_VERSION}})
     variant_configs = configs(run)
-    pending = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
-    runs.update_one({"_id": run_id}, {"$set": {"status": "running"}})
-    for done, doc in enumerate(pending, start=1):
-        if should_stop and should_stop():
-            runs.update_one({"_id": run_id}, {"$set": {"status": "partial"}})
-            raise Stopped(f"Stopped after {done - 1} of {len(pending)} tickets.")
-        missing = [v for v in VARIANTS if v not in (doc.get("outputs") or {})]
-        if missing:
-            ticket = tickets.find_one({"zendesk_id": doc["ticket_id"]})
-            for variant in missing:
-                if ticket is None:
-                    output = {"error": "Ticket not found."}
+    worker = worker or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    runs.update_one({"_id": run_id}, {"$set": {"status": RUNNING}})
+    try:
+        for done, doc in enumerate(docs, start=1):
+            if should_stop and should_stop():
+                raise Stopped(f"Stopped after {done - 1} of {len(docs)} tickets.")
+            if pending_variants(doc):
+                claimed = _claim(results, doc["_id"], worker)
+                if claimed is None:
+                    logger.info(
+                        f"A/B {run_id}: ticket {doc['ticket_id']} is being classified by another worker."
+                    )
                 else:
                     try:
-                        output = _output(
-                            classify(
-                                build_ticket_payload(ticket),
-                                reengage_count=len(
-                                    ticket.get("reengage_attempts") or []
-                                ),
-                                assignee=ticket.get("assignee"),
-                                config=variant_configs[variant],
-                            )
+                        _classify_pending(
+                            claimed, run_id, variant_configs, results, classify, worker
                         )
-                    except Exception as e:
-                        if is_fatal(e):
-                            runs.update_one(
-                                {"_id": run_id}, {"$set": {"status": "partial"}}
-                            )
-                            raise
-                        logger.warning(
-                            f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant}: {e}"
+                    finally:
+                        results.update_one(
+                            {"_id": doc["_id"], "claim.worker": worker},
+                            {"$set": {"claim": None}},
                         )
-                        output = {
-                            "error": f"{type(e).__name__}: {e}"[:1000],
-                            "usage": ((getattr(e, "audit", None) or {}).get("usage"))
-                            or {},
-                        }
-                results.update_one(
-                    {"_id": doc["_id"]}, {"$set": {f"outputs.{variant}": output}}
-                )
-        if on_progress:
-            on_progress(done, len(pending))
-    runs.update_one(
-        {"_id": run_id},
-        {"$set": {"status": "complete", "completed_at": datetime.now(timezone.utc)}},
-    )
+            if on_progress:
+                on_progress(done, len(docs))
+    finally:
+        _finish(runs, results, run_id)
     return summarize(
         runs.find_one({"_id": run_id}), list(results.find({"run_id": run_id}))
     )
+
+
+def _classify_pending(
+    doc: dict,
+    run_id: str,
+    variant_configs: Dict[str, EngineConfig],
+    results: Collection,
+    classify: Callable[..., dict],
+    worker: str,
+) -> None:
+    """Classifies a claimed ticket's pending variants and saves each output."""
+    for variant in pending_variants(doc):
+        try:
+            output = _output(
+                classify(
+                    doc["payload"],
+                    reengage_count=doc.get("reengage_count", 0),
+                    assignee=doc.get("assignee"),
+                    config=variant_configs[variant],
+                )
+            )
+        except Exception as e:
+            if is_fatal(e):
+                raise
+            logger.warning(
+                f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant}: {e}"
+            )
+            output = _error_output(e)
+        saved = results.update_one(
+            {"_id": doc["_id"], "claim.worker": worker},
+            {"$set": {f"outputs.{variant}": output}},
+        )
+        if saved.matched_count == 0:
+            # The claim expired and another worker took the ticket over.
+            logger.warning(
+                f"A/B {run_id}: lost the claim on ticket {doc['ticket_id']}; its output wasn't saved."
+            )
+            return
 
 
 def record_preference(
@@ -265,10 +476,23 @@ def record_preference(
     run_id: str,
     ticket_id: str,
     choice: Optional[str],
+    expected_version: int,
     reviewer: str = "",
     note: str = "",
-) -> None:
-    """Saves a reviewer's verdict on one ticket; None clears it."""
+) -> int:
+    """Saves a reviewer's verdict on one ticket; None clears it.
+
+    Args:
+        expected_version: The ticket's preference_version when the reviewer
+            loaded it. The save is refused if the verdict changed since.
+
+    Returns:
+        The new preference_version.
+
+    Raises:
+        VerdictConflict: Someone else saved a verdict on it since it was loaded.
+        ValueError: An unknown choice, or the ticket isn't in the run.
+    """
     if choice is not None and choice not in PREFERENCES:
         raise ValueError(
             f"choice must be one of {', '.join(PREFERENCES)}, got {choice!r}."
@@ -283,12 +507,22 @@ def record_preference(
             "at": datetime.now(timezone.utc),
         }
     )
+    # Results saved before versions existed have no preference_version: 0.
+    version = expected_version if expected_version else {"$in": [0, None]}
     outcome = results.update_one(
-        {"run_id": run_id, "ticket_id": str(ticket_id)},
-        {"$set": {"preference": preference}},
+        {"run_id": run_id, "ticket_id": str(ticket_id), "preference_version": version},
+        {"$set": {"preference": preference}, "$inc": {"preference_version": 1}},
     )
     if outcome.matched_count == 0:
-        raise ValueError(f"Ticket {ticket_id} isn't in A/B run {run_id}.")
+        current = results.find_one({"run_id": run_id, "ticket_id": str(ticket_id)})
+        if current is None:
+            raise ValueError(f"Ticket {ticket_id} isn't in A/B run {run_id}.")
+        by = ((current.get("preference") or {}).get("reviewer")) or "someone else"
+        raise VerdictConflict(
+            f"The verdict on ticket {ticket_id} was changed by {by} after you opened it. "
+            "Reload the run to see it before saving yours."
+        )
+    return expected_version + 1
 
 
 def blind_choice(doc: dict, side: int) -> str:
@@ -480,7 +714,9 @@ def main(argv: List[str]) -> int:
         a = _config_from(args, "A", EngineConfig.from_env())
         b = _config_from(args, "B", a)
         ids = sample_ticket_ids(tickets, args.size, args.seed, args.awaiting_only)
-        run_id = create_run(runs, results, a, b, ids, args.name, seed=args.seed)
+        run_id = create_run(
+            tickets, runs, results, a, b, ids, args.name, seed=args.seed
+        )
         print(f"Created A/B run {run_id} with {len(ids)} tickets.")
         print(f"  A: {a.describe()}\n  B: {b.describe()}")
         print(f"Classify them with: python -m decision_engine.ab_test run {run_id}")
@@ -488,7 +724,6 @@ def main(argv: List[str]) -> int:
     if args.command == "run":
         summary = run_ab_test(
             args.run_id,
-            tickets,
             runs,
             results,
             on_progress=lambda done, total: print(f"{done}/{total}", end="\r"),
