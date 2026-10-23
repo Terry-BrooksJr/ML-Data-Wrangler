@@ -116,7 +116,7 @@ jobs:
         run: packaging/build_pkg.sh
 
       - name: Upload the installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Lasso-macos-pkg
           path: dist/Lasso-*.pkg
@@ -132,7 +132,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Download the installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: Lasso-macos-pkg
           path: dist
