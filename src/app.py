@@ -121,6 +121,8 @@ class MainWindow(QMainWindow, QDialog):
         self.wrangler: DataWrangler = DataWrangler()
         self.allocator: LatentDirichletAllocator = None
         self.pdialog: QProgressDialog = None
+        # BERTopic training's own progress window (LDA uses self.pdialog).
+        self.bertopic_pdialog: QProgressDialog = None
         self._allocator_error: str = ""
         self.run_thread: QThread = None
         self._run_job_callbacks = None
@@ -1085,7 +1087,8 @@ class MainWindow(QMainWindow, QDialog):
     # --- BERTopic --------------------------------------------------------------
 
     def start_bertopic_training(self) -> None:
-        """Asks for BERTopic options, then trains and saves a run on run_thread."""
+        """Reads the tickets' outcomes, asks for BERTopic options, then trains and
+        saves a run on run_thread."""
         if not os.getenv("MONGO_URI"):
             QMessageBox.warning(
                 self,
@@ -1094,36 +1097,57 @@ class MainWindow(QMainWindow, QDialog):
                 "Set MONGO_URI in Settings (Preferences on macOS).",
             )
             return
+        if self._training_running():
+            QMessageBox.information(
+                self, "Busy", "Wait for the LDA model training to finish."
+            )
+            return
         if self.run_thread is not None:
             QMessageBox.information(
                 self, "Busy", "Wait for the current saved-run job to finish."
             )
             return
-        dialog = BertopicOptionsDialog(bertopic_runs.lda_runs(), self)
+        # The outcome counts come from Mongo, so read them off the GUI thread.
+        self._start_run_job(
+            lambda: bertopic_model.outcome_counts(self._tickets_collection()),
+            "Reading ticket outcomes",
+            self._ask_bertopic_options,
+        )
+
+    def _tickets_collection(self):
+        return get_database()[os.environ.get("MONGO_COLLECTION", "tickets")]
+
+    def _ask_bertopic_options(self, outcome_counts) -> None:
+        dialog = BertopicOptionsDialog(
+            bertopic_runs.lda_runs(), outcome_counts, parent=self
+        )
         if dialog.exec_() != QDialog.Accepted:
             return
-        options = dialog.options()
+        self._train_bertopic(dialog.options())
 
+    def _train_bertopic(self, options: bertopic_runs.TrainOptions) -> None:
         self.bertopic_button.setEnabled(False)
-        # No cancel: a fit in progress can't be interrupted.
-        self.pdialog = QProgressDialog("Training BERTopic model...", None, 0, 0, self)
-        self.pdialog.setWindowTitle("Progress")
-        self.pdialog.setWindowModality(QtCore.Qt.WindowModal)
-        self.pdialog.setMinimumDuration(0)
-        self.pdialog.show()
+        # Its own progress window and status target, apart from the LDA job's
+        # self.pdialog. No cancel: a fit in progress can't be interrupted.
+        self.bertopic_pdialog = QProgressDialog(
+            "Training BERTopic model...", None, 0, 0, self
+        )
+        self.bertopic_pdialog.setWindowTitle("Progress")
+        self.bertopic_pdialog.setWindowModality(QtCore.Qt.WindowModal)
+        self.bertopic_pdialog.setMinimumDuration(0)
+        self.bertopic_pdialog.show()
         self.bertopic_status = StatusRelay()
-        self.bertopic_status.message.connect(self.update_training_status)
+        self.bertopic_status.message.connect(self._update_bertopic_status)
 
         def done(run):
             self._end_bertopic_job()
             message = f"BERTopic training has finished.\n\nSaved as run {run['run_id']} in {run['model_dir']}."
             if run.get("storage"):
                 message += f"\nUploaded to {run['storage']['url']}."
-            if run.get("assignment"):
-                a = run["assignment"]
-                message += (
-                    f"\n`{bertopic_model.ASSIGNMENT_FIELD}` written to {a['assigned']} ticket(s)"
-                    f" ({a['outliers']} as outliers)."
+            if run.get("assignment") and run["assignment"].get("status") == "complete":
+                # Anything short of complete is already among the warnings.
+                message += "\n" + bertopic_model.describe_assignment(
+                    run["assignment"], run["run_id"]
                 )
             if run.get("warnings"):
                 message += "\n\nWarning:\n" + "\n".join(run["warnings"])
@@ -1137,7 +1161,7 @@ class MainWindow(QMainWindow, QDialog):
         # As LDA runs: saved here, uploaded when MODEL_BUCKET is set, recorded in bertopic_run_log.
         self._start_run_job(
             lambda: bertopic_runs.train_and_save(
-                get_database()[os.environ.get("MONGO_COLLECTION", "tickets")],
+                self._tickets_collection(),
                 nlp,
                 stop_words,
                 options,
@@ -1150,9 +1174,14 @@ class MainWindow(QMainWindow, QDialog):
             on_error=failed,
         )
 
+    def _update_bertopic_status(self, message: str) -> None:
+        if self.bertopic_pdialog is not None:
+            self.bertopic_pdialog.setLabelText(message)
+
     def _end_bertopic_job(self) -> None:
-        if self.pdialog is not None:
-            self.pdialog.close()
+        if self.bertopic_pdialog is not None:
+            self.bertopic_pdialog.close()
+            self.bertopic_pdialog = None
         self.bertopic_status.message.disconnect()
         self.bertopic_button.setEnabled(True)
 
@@ -1161,8 +1190,17 @@ class MainWindow(QMainWindow, QDialog):
         # This runs as a Qt slot, where an unhandled exception aborts the app.
         try:
             # Kept on self: a dialog with no reference is garbage-collected and closes.
+            subjects = None
+            if os.getenv("MONGO_URI"):
+                subjects = lambda r: bertopic_runs.example_subjects(
+                    self._tickets_collection(), r
+                )
+            previous = getattr(self, "bertopic_results_dialog", None)
+            if previous is not None:
+                # Replacing it frees it; a subject lookup in flight must finish first.
+                previous.wait_for_export()
             self.bertopic_results_dialog = BertopicResultsDialog(
-                run, bertopic_runs.chart_paths(run), self
+                run, bertopic_runs.chart_paths(run), self, subjects=subjects
             )
             self.bertopic_results_dialog.show()
         except Exception as e:
@@ -1299,6 +1337,8 @@ class MainWindow(QMainWindow, QDialog):
         """
         self.triage_tab.wait_for_job()
         self.tag_tab.wait_for_job()
+        if getattr(self, "bertopic_results_dialog", None) is not None:
+            self.bertopic_results_dialog.wait_for_export()
         for label, thread in self._app_threads():
             if thread.isRunning():
                 logger.warning(f"Waiting for {label} to finish before quitting…")

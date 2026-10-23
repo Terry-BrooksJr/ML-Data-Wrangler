@@ -50,12 +50,18 @@ def _corpus(seed=0):
 
 
 def _patch_corpus(monkeypatch, corpus, tokens):
-    monkeypatch.setattr(
-        bertopic_runs.bertopic_model, "load_corpus", lambda tickets: corpus
-    )
+    """Stubs the corpus and tokens; returns the outcome filters load_corpus was given."""
+    requested = []
+
+    def load_corpus(tickets, outcomes=None):
+        requested.append(outcomes)
+        return corpus
+
+    monkeypatch.setattr(bertopic_runs.bertopic_model, "load_corpus", load_corpus)
     monkeypatch.setattr(
         bertopic_runs, "tokenize", lambda nlp, stop_words, texts: tokens
     )
+    return requested
 
 
 def _lda_dir(base):
@@ -346,3 +352,318 @@ def test_results_dialog(qapp, monkeypatch, tmp_path):
     assert not dialog.chart_buttons["intertopic_html"].isEnabled()
     dialog.chart_buttons["barchart_html"].click()
     assert opened == [chart.resolve().as_uri()]
+
+
+# --- outcomes and the topic list --------------------------------------------------
+
+OUTCOMES = ["client_education", "learnosity_bug", "possible_feature_enhancement"]
+
+
+def _embedded_tickets(corpus):
+    """mongomock tickets whose stored embeddings load_corpus accepts: subject
+    text (no transcript), a matching text hash, and corpus.outcomes."""
+    import embeddings
+
+    tickets = mongomock.MongoClient().support_db.tickets
+    for zid, text, vector, outcome in zip(
+        corpus.ids, corpus.texts, corpus.vectors, corpus.outcomes
+    ):
+        tickets.insert_one(
+            {
+                "zendesk_id": zid,
+                "subject": text,
+                "transcript": [],
+                "historical_outcome": outcome,
+                "embedding": [float(x) for x in vector],
+                "embedding_meta": {
+                    "endpoint": "e",
+                    "model": "voyage-3.5",
+                    "dimensions": DIMS,
+                    "text_sha256": embeddings.text_hash(text),
+                },
+            }
+        )
+    return tickets
+
+
+def test_train_and_save_trains_only_on_the_chosen_outcomes(tmp_path, monkeypatch):
+    corpus, tokens = _corpus()
+    # Two of the three themes are client_education: one theme alone is a
+    # single cluster, which HDBSCAN doesn't report.
+    corpus.outcomes = [
+        "client_education" if i % 3 < 2 else "learnosity_bug"
+        for i in range(len(corpus.ids))
+    ]
+    tickets = _embedded_tickets(corpus)
+    chosen = {
+        zid for zid, o in zip(corpus.ids, corpus.outcomes) if o == "client_education"
+    }
+    by_text = dict(zip(corpus.texts, tokens))
+    seen = []
+
+    def tokenize(nlp, stop_words, texts):
+        seen.extend(texts)
+        return [by_text[t] for t in texts]
+
+    # load_corpus is real; only lemmatizing (spaCy) is stubbed.
+    monkeypatch.setattr(bertopic_runs, "tokenize", tokenize)
+    run = bertopic_runs.train_and_save(
+        tickets,
+        FakeNlp(),
+        ["the"],
+        bertopic_runs.TrainOptions(min_cluster_size=10, outcomes=["client_education"]),
+        base_dir=tmp_path,
+    )
+
+    assigned = json.loads(
+        (pathlib.Path(run["model_dir"]) / bertopic_model.ASSIGNMENTS_FILE).read_text()
+    )
+    assert (
+        set(assigned) == chosen
+        and len(seen) == len(chosen) == run["metrics"]["ticket_count"]
+    )
+    assert run["dataset"]["outcomes"] == ["client_education"]
+    for topic in run["topics"]:
+        assert topic["outcomes"] == {"client_education": topic["count"]}
+        assert set(topic["examples"]) <= chosen
+        assert len(topic["examples"]) == bertopic_model.EXAMPLES_PER_TOPIC
+    assert "Outcomes: client_education." in bertopic_runs.summary_text(run)
+
+
+def test_assignment_blocked_by_another_process_is_recorded(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    import embeddings
+
+    corpus, tokens = _corpus()
+    _patch_corpus(monkeypatch, corpus, tokens)
+    tickets = mongomock.MongoClient().support_db.tickets
+    tickets.insert_many([{"zendesk_id": i} for i in corpus.ids])
+    tickets.database[embeddings.LOCK_COLLECTION].insert_one(
+        {
+            "_id": bertopic_model.ASSIGNMENT_LOCK_ID,
+            "holder": "another-process",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+    )
+    run = bertopic_runs.train_and_save(
+        tickets,
+        FakeNlp(),
+        ["the"],
+        bertopic_runs.TrainOptions(min_cluster_size=10, assign=True),
+        base_dir=tmp_path,
+    )
+    assert run["assignment"]["status"] == "not_started"
+    assert any("--assign-run " + run["run_id"] in w for w in run["warnings"])
+    saved = json.loads((pathlib.Path(run["model_dir"]) / "run.json").read_text())
+    assert saved["assignment"]["status"] == "not_started"
+
+
+def test_train_and_save_explains_no_tickets_with_chosen_outcomes(tmp_path, monkeypatch):
+    empty = bertopic_model.Corpus([], [], np.empty((0, 0)), {})
+    _patch_corpus(monkeypatch, empty, [])
+    with pytest.raises(ValueError, match="chosen outcomes"):
+        bertopic_runs.train_and_save(
+            None,
+            FakeNlp(),
+            ["the"],
+            bertopic_runs.TrainOptions(outcomes=["x"]),
+            base_dir=tmp_path,
+        )
+
+
+DETAILED_RUN = {
+    **RUN,
+    "dataset": {"skipped": {}, "outcomes": ["client_education", None]},
+    "topics": [
+        {
+            "topic_id": 1,
+            "count": 80,
+            "share": 2 / 3,
+            "words": ["csv", "import"],
+            "outcomes": {"client_education": 60, "unset": 20},
+            "examples": ["11", "12"],
+        },
+        {
+            "topic_id": 0,
+            "count": 40,
+            "share": 1 / 3,
+            "words": ["login", "sso"],
+            "outcomes": {"client_education": 40},
+            "examples": ["21"],
+        },
+    ],
+}
+
+
+def test_summary_and_topics_show_outcomes_and_examples():
+    assert "Outcomes: client_education, unset." in bertopic_runs.summary_text(
+        DETAILED_RUN
+    )
+    assert "Outcomes: every ticket." in bertopic_runs.summary_text(RUN)
+    text = bertopic_runs.format_topics(DETAILED_RUN)
+    assert "Outcomes: client_education 60, unset 20" in text
+    assert "Example tickets: 11, 12" in text
+
+
+def test_topic_list_csv_with_and_without_subjects():
+    import csv
+    import io
+
+    tickets = mongomock.MongoClient().support_db.tickets
+    tickets.insert_many(
+        [
+            {"zendesk_id": "11", "subject": "CSV import fails"},
+            {"zendesk_id": "12", "subject": "Import row errors"},
+            {"zendesk_id": "21", "subject": "SSO loop"},
+            {"zendesk_id": "99", "subject": "not an example"},
+        ]
+    )
+    subjects = bertopic_runs.example_subjects(tickets, DETAILED_RUN)
+    assert subjects == {
+        "11": "CSV import fails",
+        "12": "Import row errors",
+        "21": "SSO loop",
+    }
+    assert bertopic_runs.example_subjects(None, DETAILED_RUN) == {}
+
+    rows = list(
+        csv.DictReader(
+            io.StringIO(bertopic_runs.topic_list_csv(DETAILED_RUN, subjects))
+        )
+    )
+    assert [r["rank"] for r in rows] == ["1", "2"]
+    first = rows[0]
+    assert first["outcomes"] == "client_education 60, unset 20"
+    assert first["top_words"] == "csv, import"
+    assert first["example_tickets"] == "11, 12"
+    assert first["example_subjects"] == "CSV import fails | Import row errors"
+    assert first["proposed_name"] == "" and first["decision"] == ""
+
+    bare = list(csv.DictReader(io.StringIO(bertopic_runs.topic_list_csv(DETAILED_RUN))))
+    assert bare[0]["example_subjects"] == ""
+
+
+def test_topic_list_neutralizes_formulas():
+    import csv
+    import io
+
+    run = {
+        **DETAILED_RUN,
+        "topics": [{**DETAILED_RUN["topics"][0], "words": ["-total", "import"]}],
+    }
+    subjects = {"11": '=HYPERLINK("http://x","click")', "12": "@SUM(A1)"}
+    row = next(csv.DictReader(io.StringIO(bertopic_runs.topic_list_csv(run, subjects))))
+    assert row["example_subjects"] == '\'=HYPERLINK("http://x","click") | \'@SUM(A1)'
+    assert row["top_words"] == "'-total, import"
+    for text in ("+1", "-1", "=1", "@x", "\tx", "\rx"):
+        assert bertopic_runs.spreadsheet_safe(text) == "'" + text
+    assert bertopic_runs.spreadsheet_safe("CSV import") == "CSV import"
+
+
+def test_options_dialog_outcome_choice(qapp):
+    dialog = bertopic_dialog.BertopicOptionsDialog(
+        [], [("learnosity_bug", 308), ("client_education", 76), (None, 42)]
+    )
+    labels = [box.text() for _, box in dialog.outcome_boxes]
+    assert labels == [
+        "learnosity_bug (308)",
+        "client_education (76)",
+        "No outcome set (42)",
+    ]
+    # All ticked: every ticket, no filter.
+    assert dialog.options().outcomes is None
+
+    dialog.outcome_boxes[0][1].setChecked(False)
+    assert dialog.options().outcomes == ["client_education", None]
+
+    for _, box in dialog.outcome_boxes:
+        box.setChecked(False)
+    train = dialog.buttons.button(bertopic_dialog.QDialogButtonBox.Ok)
+    assert not train.isEnabled()
+    dialog.outcome_boxes[1][1].setChecked(True)
+    assert train.isEnabled() and dialog.options().outcomes == ["client_education"]
+
+
+def _wait_for_export(qapp, dialog, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while dialog._export_thread is not None:
+        qapp.processEvents()
+        assert time.monotonic() < deadline, "subject lookup did not finish"
+        time.sleep(0.01)
+    qapp.processEvents()
+
+
+def test_results_dialog_exports_topic_list_off_the_gui_thread(
+    qapp, monkeypatch, tmp_path
+):
+    import threading
+
+    out = tmp_path / "topics.csv"
+    shown = []
+    monkeypatch.setattr(
+        bertopic_dialog.QFileDialog,
+        "getSaveFileName",
+        lambda *a: (str(out), "CSV (*.csv)"),
+    )
+    monkeypatch.setattr(
+        bertopic_dialog.QMessageBox, "information", lambda *a: shown.append(a[2])
+    )
+    release = threading.Event()
+    lookup_threads = []
+
+    def slow_subjects(run):
+        lookup_threads.append(threading.current_thread())
+        release.wait(5)
+        return {"11": "CSV import fails"}
+
+    dialog = bertopic_dialog.BertopicResultsDialog(
+        DETAILED_RUN, {}, subjects=slow_subjects
+    )
+    dialog.export_topic_list()
+    # The window stays responsive while MongoDB answers.
+    assert not dialog.export_button.isEnabled()
+    assert dialog.export_button.text() == "Reading subjects…"
+    assert not out.exists()
+    release.set()
+    _wait_for_export(qapp, dialog)
+    assert lookup_threads and lookup_threads[0] is not threading.main_thread()
+    assert "CSV import fails" in out.read_text()
+    assert "Wrote 2 topic(s)" in shown[-1]
+    assert dialog.export_button.isEnabled()
+    assert (
+        dialog.export_button.text()
+        == bertopic_dialog.BertopicResultsDialog.EXPORT_LABEL
+    )
+
+    def unreachable(run):
+        raise RuntimeError("no route to host")
+
+    dialog = bertopic_dialog.BertopicResultsDialog(
+        DETAILED_RUN, {}, subjects=unreachable
+    )
+    dialog.export_topic_list()
+    _wait_for_export(qapp, dialog)
+    assert "csv, import" in out.read_text()
+    assert "MongoDB could not be reached" in shown[-1]
+
+
+def test_closing_the_dialog_waits_for_the_lookup(qapp, monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setattr(
+        bertopic_dialog.QFileDialog,
+        "getSaveFileName",
+        lambda *a: (str(tmp_path / "t.csv"), "CSV (*.csv)"),
+    )
+    monkeypatch.setattr(bertopic_dialog.QMessageBox, "information", lambda *a: None)
+    release = threading.Event()
+    dialog = bertopic_dialog.BertopicResultsDialog(
+        DETAILED_RUN, {}, subjects=lambda run: release.wait(5) and {}
+    )
+    dialog.export_topic_list()
+    threading.Timer(0.2, release.set).start()
+    dialog.close()  # must not destroy a running thread
+    assert dialog._export_thread is None

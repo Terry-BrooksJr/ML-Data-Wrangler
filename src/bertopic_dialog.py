@@ -7,16 +7,19 @@ browser (they load Plotly from its CDN).
 
 import pathlib
 import webbrowser
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import bertopic_model
 import bertopic_runs
 import topic_store
+from loguru import logger
 from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHeaderView,
+    QMessageBox,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -24,6 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from utility import ThreadWorker, worker_thread
 from widgets import button_row, Button, CheckBox, ComboBox, heading, hint, use_si_scrollbars
 
 
@@ -32,9 +36,16 @@ class BertopicOptionsDialog(QDialog):
 
     Args:
         lda_runs: Saved LDA runs the new run can be compared with.
+        outcome_counts: (outcome, tickets) from bertopic_model.outcome_counts,
+            None for unset; one checkbox each. None hides the choice.
     """
 
-    def __init__(self, lda_runs: List[dict], parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        lda_runs: List[dict],
+        outcome_counts: Optional[Sequence[Tuple[Optional[str], int]]] = None,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Train BERTopic Model")
 
@@ -68,6 +79,15 @@ class BertopicOptionsDialog(QDialog):
         )
         self.assign.setToolTip("The LDA `topic` field is left alone.")
 
+        # Every outcome ticked trains on every ticket, as before; untick some to
+        # find the themes inside the rest (e.g. only client_education).
+        self.outcome_boxes: List[Tuple[Optional[str], CheckBox]] = []
+        for outcome, count in outcome_counts or []:
+            box = CheckBox(f"{outcome or 'No outcome set'} ({count})")
+            box.setChecked(True)
+            box.toggled.connect(self._outcomes_changed)
+            self.outcome_boxes.append((outcome, box))
+
         form = QFormLayout()
         form.addRow("Minimum topic size:", self.min_cluster_size)
         form.addRow("Number of topics:", self.nr_topics)
@@ -81,12 +101,33 @@ class BertopicOptionsDialog(QDialog):
         layout.addWidget(self.compare_lda)
         layout.addWidget(self.keep_outliers)
         layout.addWidget(self.assign)
+        if self.outcome_boxes:
+            layout.addWidget(heading("Tickets by Zendesk outcome"))
+            layout.addWidget(
+                hint(
+                    "Untick outcomes to leave their tickets out, e.g. keep only "
+                    "client_education to see the themes inside it."
+                )
+            )
+            for _, box in self.outcome_boxes:
+                layout.addWidget(box)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Train")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Train")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _outcomes_changed(self) -> None:
+        # Training on no tickets can't work.
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(
+            any(box.isChecked() for _, box in self.outcome_boxes)
+        )
+
+    def selected_outcomes(self) -> Optional[List[Optional[str]]]:
+        """The ticked outcomes, or None when all are (every ticket, no filter)."""
+        chosen = [o for o, box in self.outcome_boxes if box.isChecked()]
+        return None if len(chosen) == len(self.outcome_boxes) else chosen
 
     def options(self) -> bertopic_runs.TrainOptions:
         return bertopic_runs.TrainOptions(
@@ -95,6 +136,7 @@ class BertopicOptionsDialog(QDialog):
             keep_outliers=self.keep_outliers.isChecked(),
             compare_lda=self.compare_lda.currentData(),
             assign=self.assign.isChecked(),
+            outcomes=self.selected_outcomes(),
         )
 
 
@@ -105,13 +147,27 @@ class BertopicResultsDialog(QDialog):
     Args:
         run: A run from bertopic_runs.list_runs() or train_and_save().
         charts: bertopic_runs.chart_paths(run).
+        subjects: Looks up the run's example ticket subjects for Export Topic
+            List (bertopic_runs.example_subjects); None exports without them.
     """
 
+    EXPORT_LABEL = "Export Topic List…"
+
     def __init__(
-        self, run: dict, charts: dict, parent: Optional[QWidget] = None
+        self,
+        run: dict,
+        charts: dict,
+        parent: Optional[QWidget] = None,
+        subjects: Optional[Callable[[dict], Dict[str, str]]] = None,
     ) -> None:
         super().__init__(parent)
+        self.run = run
         self.charts = charts
+        self.subjects = subjects
+        # The subject lookup's worker, while one is running.
+        self._export_thread = None
+        self._export_worker = None
+        self._export_path = ""
         self.setWindowTitle(f"BERTopic Results · {bertopic_runs.describe_run(run)}")
         self.resize(760, 700)
 
@@ -158,6 +214,14 @@ class BertopicResultsDialog(QDialog):
                 )
             self.chart_buttons[name] = button
 
+        self.export_button = Button(self.EXPORT_LABEL)
+        self.export_button.setToolTip(
+            "A CSV of the topics, with each one's outcomes, words and example tickets, "
+            "and blank columns to name and keep, merge or drop it."
+        )
+        self.export_button.clicked.connect(self.export_topic_list)
+        self.export_button.setEnabled(bool(run.get("topics")))
+
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.close)
 
@@ -169,9 +233,86 @@ class BertopicResultsDialog(QDialog):
         layout.addWidget(note)
         layout.addWidget(heading("Topics, largest first"))
         layout.addWidget(self.topic_text, stretch=1)
-        layout.addLayout(button_row(*self.chart_buttons.values()))
+        layout.addLayout(button_row(*self.chart_buttons.values(), self.export_button))
         layout.addWidget(buttons)
 
     def open_chart(self, name: str) -> None:
         if self.charts.get(name):
             webbrowser.open(pathlib.Path(self.charts[name]).resolve().as_uri())
+
+    def export_topic_list(self) -> None:
+        """Asks where to save, then reads the example subjects on a worker
+        thread (MongoDB may be slow or unreachable) and writes the CSV."""
+        if self._export_thread is not None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Topic List",
+            f"topic_list_{self.run['run_id']}.csv",
+            "CSV (*.csv)",
+        )
+        if not path:
+            return
+        if self.subjects is None:
+            self._write_topic_list(path, {})
+            return
+        self._export_path = path
+        self.export_button.setEnabled(False)
+        self.export_button.setText("Reading subjects…")
+        lookup = self.subjects
+        self._export_thread = worker_thread(self)
+        self._export_worker = ThreadWorker(lambda: lookup(self.run), "Reading example subjects")
+        self._export_worker.moveToThread(self._export_thread)
+        self._export_worker.finished.connect(self._subjects_read)
+        self._export_worker.error.connect(self._subjects_failed)
+        self._export_thread.started.connect(self._export_worker.run)
+        self._export_thread.start()
+
+    def _subjects_read(self, subjects: Dict[str, str]) -> None:
+        path = self._end_lookup()
+        self._write_topic_list(path, subjects)
+
+    def _subjects_failed(self, message: str) -> None:
+        # Mongo unreachable: export the rest anyway.
+        path = self._end_lookup()
+        logger.warning(f"Could not read example subjects from MongoDB: {message}")
+        self._write_topic_list(
+            path, {}, "\n\nExample subjects are missing: MongoDB could not be reached."
+        )
+
+    def _end_lookup(self) -> str:
+        self.wait_for_export()
+        self.export_button.setText(self.EXPORT_LABEL)
+        self.export_button.setEnabled(bool(self.run.get("topics")))
+        return self._export_path
+
+    def wait_for_export(self) -> None:
+        """Blocks until a subject lookup in flight has finished. A running
+        QThread must not be destroyed, so this runs before the dialog goes."""
+        if self._export_thread is None:
+            return
+        self._export_thread.quit()
+        self._export_thread.wait()
+        self._export_thread = None
+        self._export_worker = None
+
+    def closeEvent(self, event) -> None:
+        self.wait_for_export()
+        super().closeEvent(event)
+
+    def _write_topic_list(self, path: str, subjects: Dict[str, str], note: str = "") -> None:
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(bertopic_runs.topic_list_csv(self.run, subjects))
+        except OSError as e:
+            QMessageBox.critical(self, "Could not save", f"{path}: {e}")
+            return
+        logger.info(
+            f"BERTopic: wrote the topic list for run {self.run['run_id']} to {path}"
+        )
+        QMessageBox.information(
+            self,
+            "Topic List Exported",
+            f"Wrote {len(self.run.get('topics') or [])} topic(s) to\n{path}\n\n"
+            "Fill in proposed_name and decision (keep, merge into N, drop)." + note,
+        )

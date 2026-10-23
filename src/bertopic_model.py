@@ -18,8 +18,15 @@ keeps topic_store.list_runs from loading one as an LDA model. The app trains
 and shows runs through bertopic_runs. With --assign, each ticket's topic is written to `embedding_topic`,
 never to `topic`, which holds the LDA assignment that feedback reports use.
 
+A run can be limited to tickets with chosen Zendesk outcomes (the
+`historical_outcome` the wrangler stores), e.g. only Client Education, to
+find the themes inside one outcome. Each saved topic lists how many of its
+tickets have each outcome, and the IDs of the tickets nearest its centre;
+no ticket text is saved with a run.
+
     cd src && python -m bertopic_model [--min-cluster-size N] [--nr-topics N]
         [--keep-outliers] [--seed N] [--compare-lda RUN_ID] [--assign]
+        [--outcome OUTCOME ...]   (--outcome none for tickets with no outcome)
 """
 
 import argparse
@@ -30,7 +37,7 @@ import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import embeddings
 import numpy as np
@@ -48,6 +55,14 @@ DEFAULT_N_NEIGHBORS = 15
 DEFAULT_N_COMPONENTS = 5
 # HDBSCAN's smallest topic: 1% of the tickets, but never below this.
 MIN_CLUSTER_SIZE_FLOOR = 10
+# The Zendesk ticket outcome, as the wrangler stores it on each ticket.
+OUTCOME_FIELD = "historical_outcome"
+# Tickets per topic listed as its examples: those nearest the topic's centre.
+EXAMPLES_PER_TOPIC = 5
+# Tickets per bulk write when assigning topics, and the lock (in
+# embeddings.LOCK_COLLECTION) that keeps two processes from assigning at once.
+ASSIGN_BATCH = 500
+ASSIGNMENT_LOCK_ID = "bertopic_assignment"
 
 
 def model_dir() -> pathlib.Path:
@@ -70,13 +85,46 @@ class Corpus:
     embedding: dict
     # Why the other tickets were left out: no_text, no_embedding, stale, other_model.
     skipped: Dict[str, int] = field(default_factory=dict)
+    # Each ticket's Zendesk outcome (None when unset), in the same order as ids.
+    outcomes: List[Optional[str]] = field(default_factory=list)
 
 
-def load_corpus(tickets: Collection) -> Corpus:
+def _outcome(doc: dict) -> Optional[str]:
+    """A ticket's outcome; missing, null and empty all mean unset (None)."""
+    return doc.get(OUTCOME_FIELD) or None
+
+
+def outcome_query(outcomes: Optional[Sequence[Optional[str]]]) -> dict:
+    """The Mongo filter for tickets with any of outcomes; None (or empty) means every ticket.
+
+    None in outcomes matches tickets whose outcome is unset: missing, null or "".
+    """
+    if not outcomes:
+        return {}
+    values = list(outcomes)
+    if None in values:
+        values.append("")
+    return {OUTCOME_FIELD: {"$in": values}}
+
+
+def outcome_counts(tickets: Collection) -> List[Tuple[Optional[str], int]]:
+    """(outcome, tickets) for every outcome in the collection, most tickets first;
+    None is unset (missing, null or "")."""
+    counts = Counter(_outcome(doc) for doc in tickets.find({}, {OUTCOME_FIELD: 1}))
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0] or ""))
+
+
+def load_corpus(
+    tickets: Collection, outcomes: Optional[Sequence[Optional[str]]] = None
+) -> Corpus:
     """Reads the tickets whose stored embedding was made from their current text.
 
     Vectors from different models (or dimensions) can't be clustered together,
     so only the model most tickets were embedded with is used.
+
+    Args:
+        outcomes: Only tickets with one of these outcomes (None for unset);
+            None or empty reads every ticket.
     """
     skipped: Counter = Counter()
     by_model: Dict[tuple, list] = {}
@@ -86,8 +134,9 @@ def load_corpus(tickets: Collection) -> Corpus:
         "transcript": 1,
         "embedding": 1,
         "embedding_meta": 1,
+        OUTCOME_FIELD: 1,
     }
-    for doc in tickets.find({}, projection):
+    for doc in tickets.find(outcome_query(outcomes), projection):
         text = embeddings.TICKET_TEXT(doc)
         meta = doc.get("embedding_meta") or {}
         vector = doc.get("embedding")
@@ -102,19 +151,20 @@ def load_corpus(tickets: Collection) -> Corpus:
         else:
             key = (meta.get("endpoint"), meta.get("model"), meta.get("dimensions"))
             by_model.setdefault(key, []).append(
-                (str(doc.get("zendesk_id")), text, vector)
+                (str(doc.get("zendesk_id")), text, vector, _outcome(doc))
             )
     if not by_model:
         return Corpus([], [], np.empty((0, 0), dtype=np.float32), {}, dict(skipped))
     key, rows = max(by_model.items(), key=lambda item: len(item[1]))
     skipped["other_model"] = sum(len(r) for k, r in by_model.items() if k != key)
-    ids, texts, vectors = zip(*rows)
+    ids, texts, vectors, ticket_outcomes = zip(*rows)
     return Corpus(
         ids=list(ids),
         texts=list(texts),
         vectors=np.asarray(vectors, dtype=np.float32),
         embedding=dict(zip(("endpoint", "model", "dimensions"), key)),
         skipped={k: v for k, v in skipped.items() if v},
+        outcomes=list(ticket_outcomes),
     )
 
 
@@ -249,6 +299,32 @@ def topic_summaries(result: Result) -> List[dict]:
     return sorted(summaries, key=lambda s: (-s["count"], s["topic_id"]))
 
 
+def add_topic_details(
+    summaries: List[dict], result: Result, corpus: Corpus, n: int = EXAMPLES_PER_TOPIC
+) -> List[dict]:
+    """Adds each topic's outcome counts and example ticket IDs to its summary.
+
+    `outcomes`: {outcome: tickets} for the topic, largest first, with an unset
+    outcome under "unset". `examples`: the IDs of up to n of the topic's
+    tickets whose embeddings are nearest its centre, nearest first; IDs only,
+    so a saved run holds no ticket text.
+    """
+    vectors = np.asarray(corpus.vectors, dtype=np.float64)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    unit = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
+    for summary in summaries:
+        rows = [i for i, t in enumerate(result.topics) if t == summary["topic_id"]]
+        counts = Counter(
+            (corpus.outcomes[i] if i < len(corpus.outcomes) else None) or "unset"
+            for i in rows
+        )
+        summary["outcomes"] = dict(counts.most_common())
+        centre = unit[rows].mean(axis=0)
+        nearest = sorted(rows, key=lambda i: -float(unit[i] @ centre))[:n]
+        summary["examples"] = [corpus.ids[i] for i in nearest]
+    return summaries
+
+
 # --- scoring ----------------------------------------------------------------------
 
 
@@ -344,8 +420,12 @@ def save_run(
     comparison: Optional[dict] = None,
     base_dir: Optional[pathlib.Path] = None,
     now: Optional[datetime] = None,
+    outcomes: Optional[Sequence[Optional[str]]] = None,
 ) -> dict:
     """Saves the model, per-ticket topics, charts and run.json; returns the run's details.
+
+    outcomes: the outcomes the corpus was limited to (None: every ticket),
+    recorded under dataset.outcomes.
 
     The model is pickled (BERTopic's other formats need PyTorch or
     safetensors). Load it only from a run directory you made.
@@ -377,10 +457,11 @@ def save_run(
         "dataset": {
             **topic_store.dataset_fingerprint(corpus.texts, corpus.ids),
             "skipped": corpus.skipped,
+            "outcomes": list(outcomes) if outcomes else None,
         },
         "metrics": scores,
         "comparison": comparison,
-        "topics": topic_summaries(result),
+        "topics": add_topic_details(topic_summaries(result), result, corpus),
         "model_dir": str(run_dir),
         "charts": save_charts(result, run_dir),
     }
@@ -413,39 +494,158 @@ def save_charts(result: Result, run_dir: pathlib.Path) -> Dict[str, Optional[str
     return charts
 
 
+class AssignmentRunning(RuntimeError):
+    """Another process is writing BERTopic assignments to the tickets."""
+
+
+def _as_datetime(value) -> datetime:
+    """A run's ran_at, which run.json holds as text."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    parsed = datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def assign_topics(
     tickets: Collection,
     run: dict,
     ids: Sequence[str],
     topics: Sequence[int],
     now: Optional[datetime] = None,
+    batch_size: int = ASSIGN_BATCH,
 ) -> dict:
     """Writes each ticket's topic under the run to `embedding_topic`.
 
     Outliers are written too (topic -1, no words), so it's clear the run
     looked at them. Only existing tickets are updated.
 
+    - Across processes, one assignment writes at a time (a MongoDB lock,
+      embeddings.job_lock), so two runs' writes never interleave.
+    - A ticket keeps the newest run's topic: one already assigned by a run
+      that ran later is left alone (counted as superseded), whichever run
+      writes last.
+    - Writes go in batches, one update_many per topic in each batch (every
+      ticket with that topic gets the same value). If one fails, assignment
+      stops and the summary
+      says so (status "partial", how many tickets were written, the error);
+      writing is idempotent, so assign_saved_run (CLI: --assign-run RUN_ID)
+      resumes it.
+
     Returns:
-        Counts: assigned, outliers, not_in_mongo.
+        status ("complete" or "partial"), total, written, assigned, outliers,
+        superseded, not_in_mongo, and error when partial.
+
+    Raises:
+        AssignmentRunning: another process holds the assignment lock.
     """
+    from pymongo.errors import PyMongoError
+
     now = now or datetime.now(timezone.utc)
+    ran_at = _as_datetime(run.get("ran_at") or now)
     words = {t["topic_id"]: t["words"][:5] for t in run["topics"]}
-    summary = {"assigned": 0, "outliers": 0, "not_in_mongo": 0}
-    for zendesk_id, topic in zip(ids, topics):
-        value = {
-            "run_id": run["run_id"],
-            "topic": int(topic),
-            "words": words.get(topic, []),
-            "assigned_at": now,
-        }
-        if not tickets.update_one(
-            {"zendesk_id": zendesk_id}, {"$set": {ASSIGNMENT_FIELD: value}}
-        ).matched_count:
-            summary["not_in_mongo"] += 1
-        else:
-            summary["outliers" if topic == OUTLIER else "assigned"] += 1
+    pairs = [(str(i), int(t)) for i, t in zip(ids, topics)]
+    summary = {
+        "status": "complete",
+        "total": len(pairs),
+        "written": 0,
+        "assigned": 0,
+        "outliers": 0,
+        "superseded": 0,
+        "not_in_mongo": 0,
+    }
+    # Write only where no newer run has assigned the ticket.
+    not_newer = {
+        "$or": [
+            {f"{ASSIGNMENT_FIELD}.ran_at": {"$lte": ran_at}},
+            {f"{ASSIGNMENT_FIELD}.ran_at": {"$exists": False}},
+        ]
+    }
+    with embeddings.job_lock(
+        tickets, ASSIGNMENT_LOCK_ID, AssignmentRunning, "BERTopic assignment"
+    ) as renew:
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start : start + batch_size]
+            try:
+                renew()
+                found = {
+                    str(doc["zendesk_id"]): (doc.get(ASSIGNMENT_FIELD) or {}).get(
+                        "ran_at"
+                    )
+                    for doc in tickets.find(
+                        {"zendesk_id": {"$in": [i for i, _ in batch]}},
+                        {"zendesk_id": 1, f"{ASSIGNMENT_FIELD}.ran_at": 1},
+                    )
+                }
+                by_topic: Dict[int, List[str]] = {}
+                for zendesk_id, topic in batch:
+                    if zendesk_id not in found:
+                        summary["not_in_mongo"] += 1
+                    elif (
+                        found[zendesk_id] is not None
+                        and _as_datetime(found[zendesk_id]) > ran_at
+                    ):
+                        summary["superseded"] += 1
+                    else:
+                        by_topic.setdefault(topic, []).append(zendesk_id)
+                for topic, topic_ids in by_topic.items():
+                    value = {
+                        "run_id": run["run_id"],
+                        "ran_at": ran_at,
+                        "topic": topic,
+                        "words": words.get(topic, []),
+                        "assigned_at": now,
+                    }
+                    done = tickets.update_many(
+                        {"zendesk_id": {"$in": topic_ids}, **not_newer},
+                        {"$set": {ASSIGNMENT_FIELD: value}},
+                    ).matched_count
+                    summary["written"] += done
+                    summary["outliers" if topic == OUTLIER else "assigned"] += done
+                    # A newer run that wrote since the read above keeps its topic.
+                    summary["superseded"] += len(topic_ids) - done
+            except (PyMongoError, AssignmentRunning) as e:
+                summary.update(status="partial", error=str(e)[:500])
+                logger.error(
+                    f"BERTopic assignment for run {run['run_id']} stopped after "
+                    f"{summary['written']} of {summary['total']} tickets: {e}"
+                )
+                break
     logger.info(f"BERTopic assignment for run {run['run_id']}: {summary}")
     return summary
+
+
+def assign_saved_run(tickets: Collection, run_dir: pathlib.Path) -> dict:
+    """Writes (or finishes writing) a saved run's assignments from its run
+    directory's run.json and assignments.json; see assign_topics."""
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assignments = json.loads((run_dir / ASSIGNMENTS_FILE).read_text(encoding="utf-8"))
+    return assign_topics(tickets, run, list(assignments), list(assignments.values()))
+
+
+def describe_assignment(summary: dict, run_id: str) -> str:
+    """One line on how assignment went, with how to resume a partial one."""
+    text = (
+        f"`{ASSIGNMENT_FIELD}` written to {summary['written']} of {summary['total']} ticket(s) "
+        f"({summary['outliers']} as outliers"
+        + (
+            f", {summary['superseded']} kept a newer run's topic"
+            if summary.get("superseded")
+            else ""
+        )
+        + (
+            f", {summary['not_in_mongo']} not in MongoDB"
+            if summary.get("not_in_mongo")
+            else ""
+        )
+        + ")."
+    )
+    if summary.get("status") != "complete":
+        how = "Stopped early" if summary.get("status") == "partial" else "Not started"
+        text += (
+            f" {how}: {summary.get('error')} Finish it with "
+            f"`cd src && python -m bertopic_model --assign-run {run_id}`."
+        )
+    return text
 
 
 # --- report -----------------------------------------------------------------------
@@ -458,6 +658,7 @@ def format_report(run: dict, top: int = 15) -> str:
         f"BERTopic run {run['run_id']}: {m['num_topics']} topics from {m['ticket_count']} tickets "
         f"({run['embedding'].get('model')} @ {run['embedding'].get('dimensions')})",
         f"Outliers: {m['outliers_before']} before reassignment, {m['outliers_after']} after",
+        f"Outcomes: {describe_outcomes((run.get('dataset') or {}).get('outcomes'))}",
         "",
         f"{'':<22}{'topics':>8}{'c_v':>8}{'diversity':>11}",
         f"{'BERTopic':<22}{m['num_topics']:>8}{fmt(m['coherence_c_v']):>8}{fmt(m['topic_diversity']):>11}",
@@ -474,11 +675,29 @@ def format_report(run: dict, top: int = 15) -> str:
         lines.append(
             f"{rank:>3}. {topic['share']:>4.0%}  ({topic['count']:>4})  {', '.join(topic['words'])}"
         )
+        if topic.get("outcomes"):
+            lines.append(f"{'':>7}outcomes: {format_outcome_counts(topic['outcomes'])}")
     if len(run["topics"]) > top:
         lines.append(
             f"     … {len(run['topics']) - top} more in {run['model_dir']}/run.json"
         )
     return "\n".join(lines)
+
+
+def describe_outcomes(outcomes: Optional[Sequence[Optional[str]]]) -> str:
+    """The outcomes a run was limited to, for display; every ticket when there's no limit."""
+    if not outcomes:
+        return "every ticket"
+    return ", ".join(o or "unset" for o in outcomes)
+
+
+def format_outcome_counts(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{outcome} {n}" for outcome, n in counts.items())
+
+
+def _outcome_arg(value: str) -> Optional[str]:
+    """--outcome value: "none" (any case) stands for tickets with no outcome."""
+    return None if value.strip().lower() in ("none", "unset") else value.strip()
 
 
 def _positive_int(value: str) -> int:
@@ -527,6 +746,19 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"write each ticket's topic to its `{ASSIGNMENT_FIELD}` field in Mongo",
     )
+    parser.add_argument(
+        "--assign-run",
+        metavar="RUN_ID",
+        help=f"don't train: write (or finish writing) a saved run's topics to `{ASSIGNMENT_FIELD}`",
+    )
+    parser.add_argument(
+        "--outcome",
+        dest="outcomes",
+        action="append",
+        type=_outcome_arg,
+        metavar="OUTCOME",
+        help="only tickets with this Zendesk outcome (repeatable; 'none' for no outcome)",
+    )
     return parser
 
 
@@ -540,7 +772,21 @@ def main(argv: List[str]) -> int:
     from wrangler import DataWrangler
 
     tickets = DataWrangler.get_tickets_collection()
-    corpus = load_corpus(tickets)
+    if args.assign_run:
+        try:
+            summary = assign_saved_run(tickets, model_dir() / args.assign_run)
+        except FileNotFoundError:
+            print(
+                f"error: no BERTopic run {args.assign_run!r} in {model_dir()}",
+                file=sys.stderr,
+            )
+            return 2
+        except AssignmentRunning as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(describe_assignment(summary, args.assign_run))
+        return 0 if summary["status"] == "complete" else 1
+    corpus = load_corpus(tickets, args.outcomes)
     skipped = (
         ", ".join(f"{n} {why.replace('_', ' ')}" for why, n in corpus.skipped.items())
         or "none"
@@ -580,12 +826,19 @@ def main(argv: List[str]) -> int:
         topic_store.preprocessing_info(nlp, stop_words),
         metrics(result, tokens),
         comparison,
+        outcomes=args.outcomes,
     )
     print()
     print(format_report(run))
     if args.assign:
-        summary = assign_topics(tickets, run, corpus.ids, result.topics)
-        print(f"\nWrote `{ASSIGNMENT_FIELD}`: {summary}")
+        try:
+            summary = assign_topics(tickets, run, corpus.ids, result.topics)
+        except AssignmentRunning as e:
+            print(f"\nNot assigned: {e} Retry with --assign-run {run['run_id']}.")
+            return 1
+        print("\n" + describe_assignment(summary, run["run_id"]))
+        if summary["status"] != "complete":
+            return 1
     return 0
 
 
