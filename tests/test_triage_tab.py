@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import ab_test_dialog
 import mongomock
 import pytest
 import triage_tab
+from decision_engine import pricing
 from fixtures import CATEGORY_FIXTURES
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5.QtWidgets import QApplication, QMessageBox
@@ -982,3 +984,319 @@ def test_format_duration(seconds, text):
 def test_batch_status_has_no_estimate_before_the_first_ticket():
     counts = {"classified": 0, "manual_fallback": 0, "skipped": 0, "errored": 0}
     assert triage_tab.batch_status({"done": 0, "total": 5, "summary": counts}, 3.0) == "0 of 5 done"
+
+
+# --- A/B test: two configurations, reviewed blind ------------------------------------
+
+
+def test_a_decision_answer_is_shown_blind_with_its_probabilities():
+    text = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 82,
+            "decision_only": True,
+            "probabilities": {"manual_triage": 0.18, "flag_solve": 0.82},
+            "reasoning": "Classification only.",
+            "model_version": "jev-1.13.0",
+            "guard_overrides": [],
+        }
+    )
+    assert text.splitlines()[:2] == ["Classification: flag_solve", "Confidence: 82"]
+    assert "Classification only" in text
+    assert text.index("flag_solve: 82%") < text.index("manual_triage: 18%")
+    assert "jev" not in text and "Reasoning:" not in text
+
+
+@pytest.fixture
+def ab_tickets(tickets):
+    tickets.insert_many([copy.deepcopy(t) for t in CATEGORY_FIXTURES.values()])
+    return tickets
+
+
+def ab_engine(payload, reengage_count=0, assignee=None, config=None, **kwargs):
+    """B solves every ticket; A sends every ticket to manual triage."""
+    classification = "flag_solve" if config.primary == "new-model" else "manual_triage"
+    return {
+        "classification": classification,
+        "confidence": 80,
+        "signals_matched": [],
+        "reasoning": f"picked {classification}",
+        "internal_note": "",
+        "model_version": config.primary,
+        "audit": {"usage": {"output_tokens": 5}},
+    }
+
+
+def open_ab_test(qapp, tab, monkeypatch, b_primary="new-model"):
+
+    class Accepting(ab_test_dialog.NewRunDialog):
+        def exec_(self):
+            self.b_form.primary.setText(b_primary)
+            self.size.setValue(3)
+            return ab_test_dialog.QDialog.Accepted if self.configs()[0] != self.configs()[1] else 0
+
+    monkeypatch.setattr(ab_test_dialog, "NewRunDialog", Accepting)
+    tab.open_ab_test()
+    dialog = tab.ab_test_dialog
+    dialog.classify = ab_engine
+    dialog.price_source = lambda: {
+        "new-model": pricing.Price(input=10, output=20),
+        "test": pricing.Price(input=1, output=2),
+    }
+    wait_until_idle(qapp, tab)
+    return dialog
+
+
+def test_ab_test_creates_classifies_and_reviews_blind(
+    qapp, configured, dialogs, ab_tickets, monkeypatch, tmp_path
+):
+    from decision_engine import ab_test
+
+    before = list(ab_tickets.find())
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    assert dialog.run_table.rowCount() == 0
+
+    dialog.new_run()  # creates, asks "classify now?" (yes), classifies, opens it
+    for _ in range(4):
+        wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "question"
+    assert "6 answer(s) to get: at least 6 paid model call(s)" in dialogs[-1][1]
+    assert dialog.run_table.rowCount() == 1
+    assert dialog.run_table.item(0, 3).text() == "complete"
+    assert "ticket 1 of 3" in dialog.position_label.text()
+    assert list(ab_tickets.find()) == before  # the tickets are untouched
+
+    # A fixed mix of orders: each side must show the variant its ticket's
+    # stored order names, not always A first.
+    runs, results = ab_test.get_collections(ab_tickets.database)
+    assert runs.find_one()["prices"]["new-model"]["input"] == 10.0
+    orders = [["B", "A"], ["A", "B"], ["B", "A"]]
+    ids = sorted(d["ticket_id"] for d in results.find())
+    for ticket_id, order in zip(ids, orders):
+        results.update_one({"ticket_id": ticket_id}, {"$set": {"order": order}})
+    # The review shows the snapshot taken at creation, not the live ticket.
+    first_subject = ab_tickets.find_one({"zendesk_id": ids[0]})["subject"]
+    ab_tickets.update_one({"zendesk_id": ids[0]}, {"$set": {"subject": "Edited later"}})
+    dialog.open_selected()
+    wait_until_idle(qapp, tab)
+
+    answers = {"A": "Classification: manual_triage", "B": "Classification: flag_solve"}
+    for position, order in enumerate(orders):
+        dialog.position = position
+        dialog._show_current()
+        texts = [view.toPlainText() for view in dialog.output_views]
+        assert [t.splitlines()[0] for t in texts] == [answers[v] for v in order]
+        assert all("Cost: " in t for t in texts)
+        assert not any("new-model" in t or "current" in t for t in texts)
+    dialog.position = 0
+    dialog._show_current()
+    assert first_subject in dialog.ticket_view.toPlainText()
+    assert "Edited later" not in dialog.ticket_view.toPlainText()
+
+    # Output 1 on the first ticket is B's answer (order B, A).
+    dialog.record("1")
+    wait_until_idle(qapp, tab)
+    saved = results.find_one({"ticket_id": ids[0]})["preference"]
+    assert saved["choice"] == "B"
+    # Recorded as the computer login, not a typed-in name.
+    assert saved["reviewer"] == ab_test_dialog.reviewer_identity()
+    assert not hasattr(dialog, "reviewer_input")
+    assert "ticket 2 of 3" in dialog.position_label.text()
+    reviewed_column = ab_test_dialog.RUN_COLUMNS.index("Reviewed")
+    assert dialog.run_table.item(0, reviewed_column).text() == "1"
+
+    # Another reviewer saved a verdict on ticket 2 meanwhile: ours is refused
+    # with a message, and the reload shows theirs.
+    results.update_one(
+        {"ticket_id": ids[1]},
+        {
+            "$set": {
+                "preference": {"choice": "tie", "reviewer": "other", "note": ""},
+                "preference_version": 1,
+            }
+        },
+    )
+    dialog.record("2")
+    for _ in range(2):
+        wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "critical" and "changed by other" in dialogs[-1][1]
+    assert results.find_one({"ticket_id": ids[1]})["preference"]["reviewer"] == "other"
+    assert dialog.verdict_label.text() == "Your verdict: Both equally good (other)"
+    assert dialog.run_table.item(0, reviewed_column).text() == "2"
+
+    dialog.only_unreviewed.setChecked(True)
+    assert len(dialog.visible()) == 1
+    dialog.record("tie")
+    wait_until_idle(qapp, tab)
+    assert len(dialog.visible()) == 0
+
+    # That was the last verdict: the test finalizes itself.
+    for _ in range(3):
+        wait_until_idle(qapp, tab)
+    assert "finalized" in dialog.status_label.text()
+    status_column = ab_test_dialog.RUN_COLUMNS.index("Status")
+    assert dialog.run_table.item(0, status_column).text() == "finalized"
+    verdicts = ab_tickets.find_one({"zendesk_id": ids[0]})["ab_test_verdicts"]
+    assert [v["choice"] for v in verdicts] == ["B"]
+    assert "payload" not in results.find_one({"ticket_id": ids[0]})
+    dialog.only_unreviewed.setChecked(False)  # every ticket is reviewed now
+    assert not any(b.isEnabled() for b in dialog.choice_buttons.values())
+    assert "removed when this test was finalized" in dialog.ticket_view.toPlainText()
+
+    dialog.show_results()
+    wait_until_idle(qapp, tab)
+    summary = dialog.summary_dialog.findChild(triage_tab.QTextEdit).toPlainText()
+    assert "B better" in summary and "B: primary new-model" in summary
+
+    export = tmp_path / "run.csv"
+    monkeypatch.setattr(
+        ab_test_dialog.QFileDialog,
+        "getSaveFileName",
+        lambda *args, **kwargs: (str(export), ""),
+    )
+    dialog.export_selected()
+    wait_until_idle(qapp, tab)
+    assert export.exists() and "B_classification" in export.read_text()
+    assert str(export) in dialog.status_label.text()
+
+
+def test_ab_test_waits_for_another_job(qapp, configured, dialogs, ab_tickets, monkeypatch):
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    tab._thread = object()  # another job running
+    try:
+        dialog.load_runs()
+        assert "Another Decision Engine job" in dialog.status_label.text()
+    finally:
+        tab._thread = None
+
+
+def test_ab_test_needs_the_model_settings_to_classify(
+    qapp, monkeypatch, dialogs, ab_tickets
+):
+    for name in triage_tab.REVIEW_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MONGO_URI", "mongodb://test")
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    dialog.new_run()
+    assert dialogs[-1][0] == "warning" and "Not configured" in dialogs[-1][1]
+    assert dialog.run_table.rowCount() == 0
+
+
+def test_the_price_table_starts_live_and_marks_edits(qapp, monkeypatch):
+    from decision_engine.classify import EngineConfig
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]))
+    live = {"opus": pricing.Price(input=2.9, output=14.5, cache_read=0.145)}
+    dialog = ab_test_dialog.NewRunDialog(EngineConfig("gpt"), None, live)
+    dialog.b_form.primary.setText("opus")
+    table = dialog.price_table
+    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["gpt", "opus"]
+    assert table.item(1, 1).text() == "2.9" and table.item(1, 5).text() == "live"
+    assert table.item(0, 5).text() == "not listed: enter it"
+    assert set(dialog.prices()) == {"opus"}
+
+    table.item(0, 1).setText("0.065")
+    table.item(0, 2).setText("0.325")
+    assert table.item(0, 5).text() == "entered"
+    prices = dialog.prices()
+    assert prices["gpt"] == pricing.Price(input=0.065, output=0.325, source="entered")
+    assert prices["opus"].source == "live"
+
+    # An edit survives the model list changing.
+    dialog.b_form.confirmation.setText("checker")
+    assert dialog.prices()["gpt"].input == 0.065
+
+    table.item(1, 2).setText("lots")
+    dialog.accept()
+    assert shown and "isn't a number" in shown[-1]
+
+
+def test_each_side_shows_its_cost():
+    text = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 90,
+            "cost_usd": 0.0123,
+            "cost_basis": "billed",
+            "model_calls": 2,
+        }
+    )
+    assert "Cost: $0.01 (billed, 2 model calls)" in text
+    reused = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 90,
+            "cost_usd": 0.0001,
+            "cost_basis": "estimated",
+            "model_calls": 1,
+            "reused_from": {"run_id": "x"},
+        }
+    )
+    assert "reused from an earlier test, so nothing was spent here" in reused
+
+
+def test_entered_prices_must_be_finite(qapp, monkeypatch):
+    from decision_engine.classify import EngineConfig
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]))
+    dialog = ab_test_dialog.NewRunDialog(EngineConfig("gpt"), None, {})
+    dialog.b_form.primary.setText("other")  # A and B must differ
+    dialog.price_table.item(0, 1).setText("inf")
+    dialog.price_table.item(0, 2).setText("1")
+    dialog.accept()
+    assert shown and "finite" in shown[-1]
+
+
+def test_the_ticket_view_reads_the_payload_both_sides_were_sent():
+    from decision_engine.payload import build_ticket_payload
+
+    ticket = CATEGORY_FIXTURES["flag_reengage"]
+    result = {
+        "ticket_id": ticket["zendesk_id"],
+        "ticket": {"zendesk_id": ticket["zendesk_id"], "subject": "S", "status": "open"},
+        "payload": build_ticket_payload(ticket),
+    }
+    text = ab_test_dialog.format_ticket(result)
+    assert "S" in text and ticket["transcript"][0]["author"] in text
+    finalized = {"ticket_id": "1", "ticket": {"status": "open"}}
+    assert "removed when this test was finalized" in ab_test_dialog.format_ticket(finalized)
+
+
+def test_interrupted_calls_are_retried_only_when_asked(
+    qapp, configured, dialogs, ab_tickets, monkeypatch
+):
+    from decision_engine import ab_test
+
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    runs, results = ab_test.get_collections(ab_tickets.database)
+    ids = sorted(t["zendesk_id"] for t in ab_tickets.find())[:1]
+    run_id = ab_test.create_run(
+        ab_tickets,
+        runs,
+        results,
+        *(ab_test.EngineConfig(m) for m in ("test", "new-model")),
+        ids,
+    )
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    results.update_one(
+        {"run_id": run_id},
+        {"$set": {"started": {"B": {"worker": "x", "at": long_ago}}}},
+    )
+    dialog.load_runs()
+    wait_until_idle(qapp, tab)
+    dialog.run_table.selectRow(0)
+    retried = []
+    monkeypatch.setattr(
+        dialog, "_classify", lambda run_id, retry_interrupted=False: retried.append(retry_interrupted)
+    )
+    dialog.classify_selected()
+    wait_until_idle(qapp, tab)
+    questions = [text for kind, text in dialogs if kind == "question"]
+    assert "may already have been charged" in questions[-2]
+    assert retried == [True]  # the stub answers Yes

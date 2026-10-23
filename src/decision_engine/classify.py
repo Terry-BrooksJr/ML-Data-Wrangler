@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import time
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Optional
 from urllib.parse import urlsplit
@@ -16,6 +17,8 @@ from urllib.parse import urlsplit
 import anthropic
 from loguru import logger
 
+from . import decisions
+from .decisions import DecisionModelNotAllowed
 from .guards import apply_guards, InvalidReply, SOLVE_CONFIDENCE_FLOOR, validate_reply
 from .prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
 
@@ -33,6 +36,8 @@ REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_RETRIES = 3  # the SDK retries only 408/409/429/5xx and connection errors
 CONFIRMATION_CONFIDENCE_FLOOR = SOLVE_CONFIDENCE_FLOOR  # below this, re-check
 # with the confirmation model
+# output_config.effort values; only Claude models take the parameter.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 class EngineError(Exception):
@@ -69,8 +74,93 @@ def confirmation_model() -> Optional[str]:
     return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
 
 
+@dataclass(frozen=True)
+class EngineConfig:
+    """Which models classify a ticket, and how much each may write.
+
+    The engine normally reads this from the environment (from_env); an A/B
+    test passes one per variant so two configurations can run side by side.
+
+    Attributes:
+        primary: Classifies every ticket.
+        secondary: Tried only when the primary call fails; None skips it.
+        confirmation: Re-classifies manual-triage and low-confidence results;
+            None skips it.
+        max_tokens: The reply limit. Thinking counts against it.
+        effort: Sent as output_config.effort when set; None sends nothing,
+            leaving the model's default (and keeping non-Claude models working).
+    """
+
+    primary: str
+    secondary: Optional[str] = None
+    confirmation: Optional[str] = None
+    max_tokens: int = MAX_TOKENS
+    effort: Optional[str] = None
+
+    def __post_init__(self):
+        if not (self.primary or "").strip():
+            raise ValueError("EngineConfig needs a primary model.")
+        if self.effort is not None and self.effort not in EFFORT_LEVELS:
+            raise ValueError(
+                f"effort must be one of {', '.join(EFFORT_LEVELS)}, got {self.effort!r}."
+            )
+        if self.max_tokens < 1:
+            raise ValueError(f"max_tokens must be positive, got {self.max_tokens}.")
+
+    @classmethod
+    def from_env(cls) -> "EngineConfig":
+        """The configuration the engine uses when none is given."""
+        return cls(primary_model(), secondary_model(), confirmation_model())
+
+    @classmethod
+    def from_dict(cls, values: dict) -> "EngineConfig":
+        """Rebuilds a stored configuration (the inverse of to_dict)."""
+        return cls(
+            primary=values["primary"],
+            secondary=values.get("secondary") or None,
+            confirmation=values.get("confirmation") or None,
+            # Only a missing value takes the default; 0 reaches validation.
+            max_tokens=(
+                MAX_TOKENS
+                if values.get("max_tokens") is None
+                else int(values["max_tokens"])
+            ),
+            effort=values.get("effort") or None,
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def describe(self) -> str:
+        """One line naming the models and settings, for logs and reports."""
+        parts = [f"primary {self.primary}"]
+        if self.secondary:
+            parts.append(f"secondary {self.secondary}")
+        if self.confirmation:
+            parts.append(f"confirmation {self.confirmation}")
+        parts.append(f"max_tokens {self.max_tokens}")
+        if self.effort:
+            parts.append(f"effort {self.effort}")
+        return ", ".join(parts)
+
+
 class InsecureApiUrl(ValueError):
     """CHEAPER_INFERENCE_API_URL would send the API key and tickets unencrypted."""
+
+
+# Status codes that will fail every ticket the same way: stop the batch.
+FATAL_STATUS_CODES = (401, 402)
+
+
+def is_fatal(error: Exception) -> bool:
+    """True for errors that will hit every ticket (bad key, out of credit,
+    insecure API URL, a decision model where full answers are needed)."""
+    if isinstance(error, (InsecureApiUrl, DecisionModelNotAllowed)):
+        return True
+    return (
+        isinstance(error, anthropic.APIStatusError)
+        and error.status_code in FATAL_STATUS_CODES
+    )
 
 
 def is_loopback_url(url: str) -> bool:
@@ -141,7 +231,11 @@ def get_client() -> anthropic.Anthropic:
 
 
 def classify_ticket(
-    ticket_payload: str, reengage_count: int = 0, assignee: Optional[str] = None
+    ticket_payload: str,
+    reengage_count: int = 0,
+    assignee: Optional[str] = None,
+    config: Optional[EngineConfig] = None,
+    allow_decision_models: bool = False,
 ) -> dict:
     """Classifies one ticket, escalating through the configured models.
 
@@ -156,6 +250,12 @@ def classify_ticket(
     A ticket is never sent twice to the same model: an unset secondary or
     confirmation model, or one naming the model that already answered, skips
     that step (the primary error is re-raised, or the first answer is kept).
+    An error that will hit every ticket (is_fatal: a bad key, no credit) is
+    always raised, from any step, so a batch stops rather than carrying on.
+
+    Every model call, failed ones included, is listed in the result's
+    "model_calls" ({"model", "usage", "latency_ms", "billed_usd", "error"}); when no model
+    answers, the raised error carries the same list as `model_calls`.
 
     Args:
         ticket_payload: The output of build_ticket_payload.
@@ -163,26 +263,92 @@ def classify_ticket(
             re-engage limit guard.
         assignee: The ticket's assignee (Zendesk user ID), which decides a
             leadership escalation's recipients (guards.apply_guards).
+        config: The models and settings to use; defaults to
+            EngineConfig.from_env().
+        allow_decision_models: Lets a decision model (decisions.py) answer,
+            with a classification and confidence only. Only A/B tests allow
+            it; otherwise one raises DecisionModelNotAllowed.
 
     Raises:
         anthropic.APIError or EngineError: when no model gave a usable answer.
     """
-    primary = primary_model()
+    config = config or EngineConfig.from_env()
+    primary = config.primary
+    calls = []
+
+    def classify_with(model: str) -> dict:
+        started = time.monotonic()
+        try:
+            decision = decisions.is_decision_model(get_client(), model)
+            if not decision:
+                try:
+                    answer = _classify_with(
+                        model,
+                        ticket_payload,
+                        reengage_count,
+                        assignee,
+                        max_tokens=config.max_tokens,
+                        effort=config.effort,
+                    )
+                except anthropic.BadRequestError as refused:
+                    # A decision model the model list didn't identify (it
+                    # couldn't be read, or omits it): route it from now on.
+                    if not decisions.refuses_text(refused):
+                        raise
+                    decisions.learn_decision_model(model)
+                    decision = True
+            if decision:
+                if not allow_decision_models:
+                    raise DecisionModelNotAllowed(
+                        f"{model} is a decision model: it picks a category but can't write the "
+                        "reasoning, note or draft the engine needs. Use it only in an A/B test."
+                    )
+                answer = decisions.decide(
+                    get_client(), model, ticket_payload, reengage_count, assignee
+                )
+        except (anthropic.APIError, EngineError) as e:
+            audit = getattr(e, "audit", None) or {}
+            calls.append(
+                {
+                    "model": model,
+                    "usage": audit.get("usage") or {},
+                    "latency_ms": audit.get("latency_ms")
+                    or int((time.monotonic() - started) * 1000),
+                    "billed_usd": audit.get("billed_cost_usd"),
+                    "error": type(e).__name__,
+                }
+            )
+            e.model_calls = calls
+            raise
+        calls.append(
+            {
+                "model": model,
+                "usage": answer["audit"]["usage"],
+                "latency_ms": answer["audit"]["latency_ms"],
+                "billed_usd": answer["audit"].get("billed_cost_usd"),
+                "error": None,
+            }
+        )
+        answer["model_calls"] = calls
+        return answer
+
     try:
-        result = _classify_with(primary, ticket_payload, reengage_count, assignee)
+        result = classify_with(primary)
     except (anthropic.APIError, EngineError) as e:
-        secondary = secondary_model()
+        secondary = config.secondary
+        if is_fatal(e):
+            raise
         if secondary in (None, primary):
             logger.error(
                 f"Primary model failed ({e}) and no distinct secondary model is set."
             )
             raise
         logger.warning(f"Primary model failed ({e}); retrying on secondary model.")
-        result = _classify_with(secondary, ticket_payload, reengage_count, assignee)
+        result = classify_with(secondary)
 
     if not needs_confirmation(result):
         return result
-    confirmation = confirmation_model()
+    confirmation = config.confirmation
     if confirmation in (None, result["model_version"]):
         logger.warning(
             f"Result needs confirmation ({result.get('classification')}, "
@@ -190,10 +356,10 @@ def classify_ticket(
         )
         return result
     try:
-        confirmed = _classify_with(
-            confirmation, ticket_payload, reengage_count, assignee
-        )
+        confirmed = classify_with(confirmation)
     except (anthropic.APIError, EngineError) as e:
+        if is_fatal(e):
+            raise
         logger.warning(f"Confirmation model failed ({e}); keeping the first result.")
         return result
     confirmed["confirmation_of"] = {
@@ -254,11 +420,15 @@ def _classify_with(
     ticket_payload: str,
     reengage_count: int = 0,
     assignee: Optional[str] = None,
+    max_tokens: int = MAX_TOKENS,
+    effort: Optional[str] = None,
 ) -> dict:
     started = time.monotonic()
+    # Sent only when set: models other than Claude may reject the parameter.
+    extra = {"output_config": {"effort": effort}} if effort else {}
     response = get_client().messages.create(
         model=model,
-        max_tokens=MAX_TOKENS,
+        max_tokens=max_tokens,
         system=[
             {
                 "type": "text",
@@ -268,6 +438,7 @@ def _classify_with(
             }
         ],
         messages=[{"role": "user", "content": ticket_payload}],
+        **extra,
     )
     # Take the first text block rather than content[0], which may be a
     # thinking block on models that think by default.
@@ -280,11 +451,15 @@ def _classify_with(
         "prompt_version": PROMPT_VERSION,
         "stop_reason": stop_reason,
         "raw_response": raw_text,
+        # Cheaper Inference's actual charge for the call, after its discount.
+        "billed_cost_usd": (getattr(response, "billing", None) or {}).get(
+            "billed_cost_usd"
+        ),
     }
 
     if stop_reason == "max_tokens":
-        logger.error(f"{model}: reply cut off at max_tokens ({MAX_TOKENS}).")
-        raise EngineError(f"Reply cut off at max_tokens ({MAX_TOKENS})", model, audit)
+        logger.error(f"{model}: reply cut off at max_tokens ({max_tokens}).")
+        raise EngineError(f"Reply cut off at max_tokens ({max_tokens})", model, audit)
     try:
         result = validate_reply(extract_json(raw_text))
     except ValueError as e:  # InvalidReply is a ValueError too

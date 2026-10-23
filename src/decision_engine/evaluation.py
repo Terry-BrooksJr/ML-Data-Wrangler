@@ -36,6 +36,7 @@ _DROPPED_FIELDS = (
     "last_engine_error",
     "embedding",
     "embedding_meta",
+    "ab_test_verdicts",
 )
 
 

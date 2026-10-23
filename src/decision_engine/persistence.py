@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional
 
-import anthropic
 from bson import ObjectId
 from loguru import logger
 from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from .classify import classify_ticket, EngineError, get_client, InsecureApiUrl
+from . import decisions
+from .classify import classify_ticket, EngineError, get_client, is_fatal
 from .payload import build_ticket_payload
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -20,8 +20,6 @@ from .payload import build_ticket_payload
 MAX_ENGINE_ATTEMPTS = 3
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
-# Status codes that will fail every ticket the same way: stop the batch.
-FATAL_STATUS_CODES = (401, 402)
 
 
 @lru_cache(maxsize=1)
@@ -44,6 +42,7 @@ def reset_clients() -> None:
     """
     get_database.cache_clear()
     get_client.cache_clear()
+    decisions.reset()
 
 
 def get_tickets_collection() -> Collection:
@@ -52,16 +51,6 @@ def get_tickets_collection() -> Collection:
 
 def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-
-
-def is_fatal(error: Exception) -> bool:
-    """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
-    if isinstance(error, InsecureApiUrl):
-        return True
-    return (
-        isinstance(error, anthropic.APIStatusError)
-        and error.status_code in FATAL_STATUS_CODES
-    )
 
 
 def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[dict]:

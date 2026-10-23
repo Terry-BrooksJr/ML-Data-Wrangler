@@ -134,7 +134,10 @@ def _route_leadership(result: dict, assignee: Optional[str]) -> None:
 
 
 def apply_guards(
-    result: dict, reengage_count: int = 0, assignee: Optional[str] = None
+    result: dict,
+    reengage_count: int = 0,
+    assignee: Optional[str] = None,
+    classification_only: bool = False,
 ) -> dict:
     """Overrides a validated reply that breaks a hard rule.
 
@@ -144,6 +147,9 @@ def apply_guards(
         assignee: The ticket's assignee (Zendesk user ID) the reply was made
             for; it decides a leadership escalation's recipients. None means
             the ticket has no assignee.
+        classification_only: The answer comes from a model that can't write
+            text (decisions.decide), so a flag_reengage without a draft
+            message is kept rather than downgraded.
 
     Returns:
         The same dict.
@@ -166,7 +172,8 @@ def apply_guards(
         )
 
     if (
-        result["classification"] == "flag_reengage"
+        not classification_only
+        and result["classification"] == "flag_reengage"
         and not (result.get("draft_message") or "").strip()
     ):
         result["classification"] = "manual_triage"
