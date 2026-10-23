@@ -11,6 +11,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
+from . import decisions
 from .classify import classify_ticket, EngineError, get_client, is_fatal
 from .payload import build_ticket_payload
 
@@ -41,6 +42,7 @@ def reset_clients() -> None:
     """
     get_database.cache_clear()
     get_client.cache_clear()
+    decisions.reset()
 
 
 def get_tickets_collection() -> Collection:

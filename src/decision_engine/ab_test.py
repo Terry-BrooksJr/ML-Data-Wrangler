@@ -31,6 +31,7 @@ from loguru import logger
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
 
+from . import decisions
 from .classify import classify_ticket, EFFORT_LEVELS, EngineConfig, is_fatal
 from .guards import CLASSIFICATIONS
 from .payload import build_ticket_payload
@@ -57,6 +58,10 @@ _KEPT_FIELDS = (
     "tag",
     "guard_overrides",
     "model_version",
+    # Set on answers from decision models: a classification and confidence,
+    # with each category's probability, and no text.
+    "decision_only",
+    "probabilities",
 )
 # The ticket fields kept for the reviewer; the model gets the saved payload.
 _SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status", "assignee", "transcript")
@@ -237,7 +242,7 @@ def create_run(
             "created_at": created_at,
             "created_by": created_by,
             "variants": {"A": a.to_dict(), "B": b.to_dict()},
-            "prompt_version": PROMPT_VERSION,
+            **_versions(),
             "ticket_count": len(ticket_ids),
             "status": CREATING,
         }
@@ -264,6 +269,15 @@ def create_run(
         runs.delete_one({"_id": run_id})
         raise
     return run_id
+
+
+def _versions() -> Dict[str, str]:
+    """The prompts a run's answers depend on: the engine's system prompt, and
+    the question decision models are asked (decisions.py)."""
+    return {
+        "prompt_version": PROMPT_VERSION,
+        "decision_instructions_version": decisions.INSTRUCTIONS_VERSION,
+    }
 
 
 def configs(run: dict) -> Dict[str, EngineConfig]:
@@ -393,14 +407,20 @@ def run_ab_test(
             f"A/B run {run_id} wasn't created completely; create a new run."
         )
     docs = list(results.find({"run_id": run_id}).sort("ticket_id", 1))
-    if run.get("prompt_version") != PROMPT_VERSION:
-        if any(doc.get("outputs") for doc in docs):
-            raise PromptChanged(
-                f"A/B run {run_id} was classified with prompt {run.get('prompt_version')}, but the "
-                f"engine now uses {PROMPT_VERSION}. Answers from two prompts can't be compared; "
-                "create a new run."
-            )
-        runs.update_one({"_id": run_id}, {"$set": {"prompt_version": PROMPT_VERSION}})
+    current = _versions()
+    changed = [
+        key
+        for key, version in current.items()
+        if run.get(key) is not None and run[key] != version
+    ]
+    if changed and any(doc.get("outputs") for doc in docs):
+        was = ", ".join(f"{run[key]} now {current[key]}" for key in changed)
+        raise PromptChanged(
+            f"A/B run {run_id} was classified with a different prompt ({was}). Answers from "
+            "two prompts can't be compared; create a new run."
+        )
+    if any(run.get(key) != version for key, version in current.items()):
+        runs.update_one({"_id": run_id}, {"$set": current})
     variant_configs = configs(run)
     worker = worker or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     runs.update_one({"_id": run_id}, {"$set": {"status": RUNNING}})
@@ -450,6 +470,7 @@ def _classify_pending(
                     reengage_count=doc.get("reengage_count", 0),
                     assignee=doc.get("assignee"),
                     config=variant_configs[variant],
+                    allow_decision_models=True,
                 )
             )
         except Exception as e:
@@ -557,7 +578,8 @@ def summarize(run: dict, docs: List[dict]) -> dict:
         {"run": run, "tickets": int, "classified": int (both variants done),
          "agreement": int (same classification), "variants": {variant:
          {"done", "errors", "classifications", "mean_confidence",
-         "confirmed", "usage", "mean_latency_ms"}}, "preferences":
+         "confirmed", "classification_only", "usage", "mean_latency_ms"}},
+         "preferences":
          Counter, "reviewed": int, "disagreement_preferences": Counter}
     """
     variants = {}
@@ -573,6 +595,7 @@ def summarize(run: dict, docs: List[dict]) -> dict:
                 sum(o["confidence"] for o in good) / len(good) if good else None
             ),
             "confirmed": sum(1 for o in good if o.get("confirmed_from")),
+            "classification_only": sum(1 for o in good if o.get("decision_only")),
             "usage": _sum_usage(o.get("usage") for o in outputs),
             "mean_latency_ms": sum(latencies) / len(latencies) if latencies else None,
         }
@@ -641,6 +664,7 @@ def format_summary(summary: dict) -> str:
         ),
     )
     row("Confirmed", lambda s: str(s["confirmed"]))
+    row("Classification only", lambda s: str(s["classification_only"]))
     row(
         "Mean latency (s)",
         lambda s: (

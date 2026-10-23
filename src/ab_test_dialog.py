@@ -87,6 +87,8 @@ def format_output(output: Optional[dict]) -> str:
         f"Classification: {output.get('classification')}",
         f"Confidence: {output.get('confidence')}",
     ]
+    if output.get("decision_only"):
+        return "\n".join(lines + _classification_only(output))
     if output.get("confirmed_from"):
         first = output["confirmed_from"]
         lines.append(
@@ -115,6 +117,34 @@ def format_output(output: Optional[dict]) -> str:
             *[f"  - {o}" for o in output["guard_overrides"]],
         ]
     return "\n".join(lines)
+
+
+def _classification_only(output: dict) -> List[str]:
+    """The rest of a decision model's answer: probabilities, and what the
+    code checks changed, since there is no reasoning, note or draft."""
+    lines = [
+        "",
+        "Classification only: this answer comes from a model that picks a "
+        "category without writing reasoning, a note or a draft.",
+    ]
+    probabilities = output.get("probabilities") or {}
+    if probabilities:
+        lines += ["", "Probabilities:"]
+        for name, probability in sorted(
+            probabilities.items(), key=lambda item: -(item[1] or 0)
+        ):
+            lines.append(f"  - {name}: {(probability or 0):.0%}")
+    if output.get("leadership_recipient"):
+        lines += ["", f"Leadership recipient: {output['leadership_recipient']}"]
+    if output.get("internal_note"):
+        lines += ["", "Internal note (added by code checks):", output["internal_note"]]
+    if output.get("guard_overrides"):
+        lines += [
+            "",
+            "Overridden by code checks:",
+            *[f"  - {o}" for o in output["guard_overrides"]],
+        ]
+    return lines
 
 
 def format_ticket(ticket: Optional[dict]) -> str:

@@ -53,7 +53,15 @@ class FakeEngine:
         self.fail = fail or {}  # (ticket subject, primary) -> exception
         self.during = during  # called before answering, to simulate other workers
 
-    def __call__(self, payload, reengage_count=0, assignee=None, config=None):
+    def __call__(
+        self,
+        payload,
+        reengage_count=0,
+        assignee=None,
+        config=None,
+        allow_decision_models=False,
+    ):
+        assert allow_decision_models  # A/B tests may compare decision models
         self.calls.append((payload, config))
         if self.during:
             self.during()
@@ -475,3 +483,40 @@ def test_a_zero_token_limit_is_refused_not_replaced():
     args = parser.parse_args(["--b-max-tokens", "0"])
     with pytest.raises(ValueError, match="max_tokens"):
         ab_test._config_from(args, "B", A)
+
+
+def test_decision_model_answers_are_kept_and_counted(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=2)
+
+    def engine(payload, config=None, **kwargs):
+        if config.primary == "new-model":
+            return answer(
+                "flag_solve",
+                confidence=82,
+                decision_only=True,
+                probabilities={"flag_solve": 0.82, "manual_triage": 0.18},
+                internal_note=None,
+                reasoning="Classification only.",
+            )
+        return answer("manual_triage")
+
+    summary = run(collections, run_id, classify=engine)
+    output = results.find_one({"run_id": run_id})["outputs"]["B"]
+    assert output["decision_only"] is True
+    assert output["probabilities"] == {"flag_solve": 0.82, "manual_triage": 0.18}
+    assert summary["variants"]["B"]["classification_only"] == 2
+    assert summary["variants"]["A"]["classification_only"] == 0
+    assert "Classification only" in ab_test.format_summary(summary)
+
+
+def test_a_changed_decision_question_stops_a_resume(collections, monkeypatch):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)
+    results.update_one(
+        {"run_id": run_id},
+        {"$set": {"outputs.A": ab_test._output(answer("flag_solve"))}},
+    )
+    monkeypatch.setattr(ab_test.decisions, "INSTRUCTIONS_VERSION", "new-question")
+    with pytest.raises(ab_test.PromptChanged, match="new-question"):
+        run(collections, run_id)

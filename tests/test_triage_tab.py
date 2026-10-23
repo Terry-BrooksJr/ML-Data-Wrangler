@@ -988,13 +988,31 @@ def test_batch_status_has_no_estimate_before_the_first_ticket():
 # --- A/B test: two configurations, reviewed blind ------------------------------------
 
 
+def test_a_decision_answer_is_shown_blind_with_its_probabilities():
+    text = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 82,
+            "decision_only": True,
+            "probabilities": {"manual_triage": 0.18, "flag_solve": 0.82},
+            "reasoning": "Classification only.",
+            "model_version": "jev-1.13.0",
+            "guard_overrides": [],
+        }
+    )
+    assert text.splitlines()[:2] == ["Classification: flag_solve", "Confidence: 82"]
+    assert "Classification only" in text
+    assert text.index("flag_solve: 82%") < text.index("manual_triage: 18%")
+    assert "jev" not in text and "Reasoning:" not in text
+
+
 @pytest.fixture
 def ab_tickets(tickets):
     tickets.insert_many([copy.deepcopy(t) for t in CATEGORY_FIXTURES.values()])
     return tickets
 
 
-def ab_engine(payload, reengage_count=0, assignee=None, config=None):
+def ab_engine(payload, reengage_count=0, assignee=None, config=None, **kwargs):
     """B solves every ticket; A sends every ticket to manual triage."""
     classification = "flag_solve" if config.primary == "new-model" else "manual_triage"
     return {

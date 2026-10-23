@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 import anthropic
 from loguru import logger
 
+from . import decisions
+from .decisions import DecisionModelNotAllowed
 from .guards import apply_guards, InvalidReply, SOLVE_CONFIDENCE_FLOOR, validate_reply
 from .prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
 
@@ -151,8 +153,9 @@ FATAL_STATUS_CODES = (401, 402)
 
 
 def is_fatal(error: Exception) -> bool:
-    """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
-    if isinstance(error, InsecureApiUrl):
+    """True for errors that will hit every ticket (bad key, out of credit,
+    insecure API URL, a decision model where full answers are needed)."""
+    if isinstance(error, (InsecureApiUrl, DecisionModelNotAllowed)):
         return True
     return (
         isinstance(error, anthropic.APIStatusError)
@@ -232,6 +235,7 @@ def classify_ticket(
     reengage_count: int = 0,
     assignee: Optional[str] = None,
     config: Optional[EngineConfig] = None,
+    allow_decision_models: bool = False,
 ) -> dict:
     """Classifies one ticket, escalating through the configured models.
 
@@ -261,6 +265,9 @@ def classify_ticket(
             leadership escalation's recipients (guards.apply_guards).
         config: The models and settings to use; defaults to
             EngineConfig.from_env().
+        allow_decision_models: Lets a decision model (decisions.py) answer,
+            with a classification and confidence only. Only A/B tests allow
+            it; otherwise one raises DecisionModelNotAllowed.
 
     Raises:
         anthropic.APIError or EngineError: when no model gave a usable answer.
@@ -272,14 +279,24 @@ def classify_ticket(
     def classify_with(model: str) -> dict:
         started = time.monotonic()
         try:
-            answer = _classify_with(
-                model,
-                ticket_payload,
-                reengage_count,
-                assignee,
-                max_tokens=config.max_tokens,
-                effort=config.effort,
-            )
+            if decisions.is_decision_model(get_client(), model):
+                if not allow_decision_models:
+                    raise DecisionModelNotAllowed(
+                        f"{model} is a decision model: it picks a category but can't write the "
+                        "reasoning, note or draft the engine needs. Use it only in an A/B test."
+                    )
+                answer = decisions.decide(
+                    get_client(), model, ticket_payload, reengage_count, assignee
+                )
+            else:
+                answer = _classify_with(
+                    model,
+                    ticket_payload,
+                    reengage_count,
+                    assignee,
+                    max_tokens=config.max_tokens,
+                    effort=config.effort,
+                )
         except (anthropic.APIError, EngineError) as e:
             audit = getattr(e, "audit", None) or {}
             calls.append(

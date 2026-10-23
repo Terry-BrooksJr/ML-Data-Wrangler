@@ -532,6 +532,18 @@ with a configuration you're considering (B) on the same tickets:
    latency and token use for each, counting every model call (fallback
    and confirmation calls, failed ones too).
 
+**Decision models.** Some Cheaper Inference models (type "decision" in its
+model list, such as `jev-1.13.0`) only pick from fixed answers on
+`/v1/decisions` and can't write text. An A/B side can still use one: it is
+asked which of the five categories fits and answers with a classification,
+a confidence (its probability for that category) and each category's
+probability, with no reasoning, note or draft. The code checks still apply,
+except that a re-engage isn't downgraded for having no draft. Such answers
+are marked "Classification only" in the review, which also tells you which
+side they're on, and counted in Show Results. Outside A/B tests the engine
+refuses decision models and stops the batch, since a real review needs the
+written parts. The question asked is in `src/decision_engine/decisions.py`.
+
 Runs are stored in `ab_tests` and `ab_results` (`AB_TEST_COLLECTION`,
 `AB_RESULT_COLLECTION`); Settings refuses names that match the tickets
 collection or each other. An A/B run never writes to the tickets: no review
