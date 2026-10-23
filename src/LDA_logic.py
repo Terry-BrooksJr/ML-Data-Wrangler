@@ -329,7 +329,9 @@ class LatentDirichletAllocator(QObject):
         weights = [0.0] * self.lda_model.num_topics
         for bow in self.corpus:
             for topic_id, probability in self.lda_model.get_document_topics(bow):
-                weights[topic_id] += probability
+                # gensim gives float32s; under numpy 2 the sum would stay one,
+                # and BSON can't store numpy scalars.
+                weights[topic_id] += float(probability)
         total = sum(weights) or 1.0
         topics = [
             (

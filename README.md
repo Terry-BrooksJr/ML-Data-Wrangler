@@ -10,8 +10,7 @@ The repo holds two separate pieces of work that read the same Zendesk ticket dat
 
 The two are **not** the same concern. LDA is unsupervised, offline topic
 modelling. The decision engine is a live classifier against a fixed taxonomy.
-No zero-shot or fine-tuning code exists yet. See
-[DISCOVERY_NOTES.md](DISCOVERY_NOTES.md) for the full repo survey.
+No zero-shot or fine-tuning code exists yet.
 
 ## Setup
 
@@ -151,6 +150,37 @@ Run…** lists runs from MongoDB and this computer, and downloads and verifies
 one whose files aren't here before showing its charts. Retry a failed upload
 with `cd src && python -m model_storage upload --bertopic [RUN_ID ...]`. The
 same can be run from the command line: `cd src && python -m bertopic_model --help`.
+
+#### Finding themes within an outcome
+
+The options window also lists each Zendesk ticket outcome (custom field
+27219391, stored on each ticket as `historical_outcome`) with its ticket
+count, all ticked. Untick outcomes to train on the rest only: for example,
+only `client_education`, to see what that catch-all bucket actually holds.
+The run records which outcomes it used.
+
+Each topic then shows how many of its tickets have each outcome and the five
+tickets nearest its centre (by ID; a saved run holds no ticket text). **Export
+Topic List…** in the results window writes a CSV with one row per topic
+(size, outcomes, top words, example tickets and, read from MongoDB, their
+subjects) and blank `proposed_name` and `decision` columns to curate the
+topics into a reporting list. From the command line:
+`cd src && python -m bertopic_model --outcome client_education` (repeat
+`--outcome` for several; `--outcome none` for tickets with no outcome).
+
+Writing each ticket's topic to `embedding_topic`:
+- **One process at a time.** It runs under a MongoDB lock, so two runs'
+  writes never interleave.
+- **The newest run wins.** A ticket keeps the topic from the run that ran
+  most recently, whichever run finishes writing last.
+- **Interruptions are recorded.** Writes go in batches. The run records
+  whether assignment completed (`assignment.status`, with counts) in
+  `run.json` and the run log. A partial or blocked assignment is finished
+  with `cd src && python -m bertopic_model --assign-run RUN_ID`.
+
+The exported topic list prefixes any cell that starts like a spreadsheet
+formula (`=`, `+`, `-`, `@`) with `'`, so opening it can't run a formula
+written into a ticket subject.
 
 ### Saving models to S3
 
@@ -474,6 +504,112 @@ them for you to edit, and **Save Draft** stores it, unapproved, in
 built on. Select a draft and **Approve Selected** to record who approved it.
 Approved lessons aren't fed back into the prompt yet.
 
+### A/B testing engine configurations
+
+**A/B Test…** on the Decision Engine tab compares the current engine (A)
+with a configuration you're considering (B) on the same tickets:
+
+1. **New Test…** sets each side's primary, secondary and confirmation models,
+   max tokens and effort (B starts as a copy of A), and how many tickets to
+   sample. **Prices** lists every model the two sides use with today's
+   prices from Cheaper Inference (per million tokens, its discounts
+   included); correct any that are wrong, or fill in a model it doesn't
+   list. They are saved with the test. Effort is sent only when set; leave it at the model default for
+   models other than Claude.
+2. Each sampled ticket is classified by both configurations. Before any
+   call, the confirmation says how many answers are needed, how many can be
+   copied from earlier tests at no cost, and so how many paid calls there
+   will be at least (more when a fallback or confirmation model is used).
+   Both sides are sent the same snapshot of the ticket, taken when the test
+   was created, so later edits to the ticket don't skew the comparison. A
+   ticket too large for MongoDB to store is left out and named. **Stop After This Ticket** keeps what
+   finished, and **Classify Pending** carries on later and retries an
+   answer that failed, up to 3 attempts per ticket and side. Every attempt
+   is kept, with its cost and, for a failure, the raw reply. If the app
+   stops in the middle of a call, that call isn't repeated automatically,
+   because it may already have been charged: **Classify Pending** asks
+   whether to retry it. With **Reuse answers saved in the last 24
+   hours** (on by default), an answer any earlier test got for the same
+   ticket content from the same models, settings and prompt is copied
+   instead of paying for the call again, and two tests running at once never
+   both pay for the same answer. The 24-hour limit is there because the
+   engine judges elapsed time, so an older answer may no longer hold. A test
+   is classified with one system prompt only: once it has answers (or is
+   running), another app version with a different prompt can't classify
+   it; create a new one.
+3. **Blind Review** shows the ticket and the two answers as Output 1 and
+   Output 2, in an order shuffled per ticket, without model names. Choose
+   **Output 1 Better**, **Output 2 Better**, **Equally Good** or **Both
+   Wrong**, with an optional note. Verdicts are recorded under your computer
+   login (user@computer), not a typed-in name. Each side shows what its answer cost:
+   the charge Cheaper Inference reported for each call (`billed`), or, where
+   a reply didn't report one, an estimate from the test's prices
+   (`estimated`), over every call behind the answer (fallback and
+   confirmation calls included). A reused answer shows its original cost and
+   notes that nothing was spent this time. **Only where they disagree** skips the
+   tickets where both chose the same classification. If someone else saved
+   a verdict on the ticket after you opened it, yours is refused and theirs
+   is shown.
+4. **Finalizing.** Once every answered ticket has a verdict, the test
+   finalizes itself: each verdict is added to its ticket in the tickets
+   collection (`ab_test_verdicts`: the test, both configurations and their
+   answers, the choice, reviewer and note), and the test's bulky working data
+   is removed (the subject, ticket text and model input copied at creation,
+   and raw replies). The compact answers and costs stay for reports, exports
+   and reuse. A test where no ticket could be answered finalizes too, so its
+   data doesn't linger. The
+   verdicts are then locked. A test closed before it finalized does so the
+   next time it's opened.
+5. **Show Results** names A and B and reports the verdicts (overall and
+   where they disagreed), how often they agreed, errors, mean confidence,
+   latency (failed answers included), token use and cost for each (total,
+   per answer, and what this test actually spent, which leaves out reused
+   answers), counting every model attempt (fallback and confirmation calls,
+   failed and retried ones too). Costs that can't be known (a failed call
+   with no reported charge or token count) are shown as unknown, never as
+   $0.
+
+**Decision models.** Some Cheaper Inference models (type "decision" in its
+model list, such as `jev-1.13.0`) only pick from fixed answers on
+`/v1/decisions` and can't write text. An A/B side can still use one: it is
+asked which of the five categories fits, under the same rules as the text
+models (the engine's prompt, minus the parts about writing the reply), and
+answers with a classification,
+a confidence (its probability for that category) and each category's
+probability, with no reasoning, note or draft. The code checks still apply,
+except that a re-engage isn't downgraded for having no draft. Such answers
+are marked "Classification only" in the review, which also tells you which
+side they're on, and counted in Show Results. Outside A/B tests the engine
+refuses decision models and stops the batch, since a real review needs the
+written parts. The question asked is in `src/decision_engine/decisions.py`.
+Decision models are recognised from Cheaper Inference's model list, from a
+refused text request, or from **Decision models** in Settings
+(`DECISION_MODELS`, for when the list can't be read).
+
+Runs are stored in `ab_tests` and `ab_results` (`AB_TEST_COLLECTION`,
+`AB_RESULT_COLLECTION`). **Export…** saves a test as CSV (one row per
+ticket, both sides named, spreadsheet-safe) or JSON (everything kept except
+the model input). Settings refuses names that match the tickets
+collection or each other. Until it is finalized, an A/B test never writes to
+the tickets: no review is added and nothing leaves the awaiting-review
+queue. Two people can classify the same test at once: each ticket is
+claimed while it's classified (and the claim is renewed before every call),
+so none is paid for twice. From the command line:
+
+```bash
+cd src
+python -m decision_engine.ab_test create --size 30 --b-primary claude-opus-5.5 --b-confirmation claude-fable-5.1 --b-max-tokens 16000
+python -m decision_engine.ab_test run RUN_ID      # paid model calls
+python -m decision_engine.ab_test report RUN_ID
+python -m decision_engine.ab_test export RUN_ID results.csv   # or .json
+python -m decision_engine.ab_test finalize RUN_ID   # once every verdict is in
+```
+
+`create --no-reuse` makes a test call the models even where a saved answer
+matches; `--b-effort none` gives B the model's default effort when A sets
+one; `run --retry-interrupted` retries calls a stopped worker left
+unfinished.
+
 ### Ticket embeddings (Voyage AI)
 
 **Embed Tickets (Voyage AI)…** on the Decision Engine tab stores a Voyage
@@ -576,5 +712,5 @@ These are unresolved by design. Nothing in the code invents a value for them.
 9. Whether `TicketOutcome` is usable ground truth. The discovery notes indicate **no**: it records root cause, and the export has no closed tickets.
 
 Two more items came out of the integration itself:
-- The model ID on Cheaper Inference is unconfirmed. It defaults to the brief's `claude-opus-4.8`.
+- The model ID on Cheaper Inference is unconfirmed. It defaults to `claude-opus-4.8` (`DECISION_ENGINE_MODEL`).
 - The Mongo database and collection names are unconfirmed. They default to `support_db.tickets`.

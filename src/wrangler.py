@@ -19,6 +19,19 @@ from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
 
 # Control characters that XML 1.0 cannot represent, even escaped.
+# Zendesk custom field IDs (ticket["fields"] is a list of {"id", "value"}).
+REQUEST_TYPE_FIELD_ID = 27124341
+OUTCOME_FIELD_ID = 27219391
+
+
+def custom_field(ticket: dict, field_id: int):
+    """A ticket's custom field value by its Zendesk ID, or None if it's absent."""
+    for field in ticket.get("fields") or []:
+        if field.get("id") == field_id:
+            return field.get("value")
+    return None
+
+
 XML_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
 
@@ -505,8 +518,8 @@ class DataWrangler(QObject):
                         ),
                         subject=ticket["subject"],
                         tags=ticket.get("tags", []),
-                        outcome=ticket["fields"][2]["value"],
-                        ticket_type=ticket["fields"][0]["value"],
+                        outcome=custom_field(ticket, OUTCOME_FIELD_ID),
+                        ticket_type=custom_field(ticket, REQUEST_TYPE_FIELD_ID),
                         status=TicketStatus[ticket["status"].upper()],
                     )
                     first_comment = Comment(
@@ -590,10 +603,6 @@ class DataWrangler(QObject):
                 return ""
             return XML_ILLEGAL_CHARS_RE.sub("", str(value))
 
-        def field_value(index: int):
-            fields = ticket.get("fields") or []
-            return fields[index]["value"] if len(fields) > index else None
-
         def add(parent, tag, value) -> ET.Element:
             element = ET.SubElement(parent, tag)
             element.text = text(value)
@@ -619,9 +628,8 @@ class DataWrangler(QObject):
         add(root, "Priority", ticket.get("priority"))
         add(root, "Group", ticket.get("group_id"))
         add(root, "Assignee", ticket.get("assignee_id"))
-        # Same custom-field positions tickets_reshaped uses for ticket_type and outcome.
-        add(root, "RequestType", field_value(0))
-        add(root, "TicketOutcome", field_value(2))
+        add(root, "RequestType", custom_field(ticket, REQUEST_TYPE_FIELD_ID))
+        add(root, "TicketOutcome", custom_field(ticket, OUTCOME_FIELD_ID))
 
         comments = ET.SubElement(root, "Comments")
         raw_comments = self._raw_comments_for(ticket["id"])
@@ -706,9 +714,8 @@ class DataWrangler(QObject):
     def ticket_to_document(self, ticket: Union[int, dict]) -> dict:
         """Maps a raw Zendesk ticket and its comments to a Mongo `tickets` document.
 
-        The shape follows the `tickets` collection in
-        AI_CODER_INTEGRATION_BRIEF.md (section 4.2), which the decision engine
-        reads. The subject and comment text go through clean_text (HTML
+        The shape is the `tickets` collection the decision engine reads
+        (decision_engine.payload builds the model's input from it). The subject and comment text go through clean_text (HTML
         entities decoded, control characters removed) but are not cleansed:
         no words are dropped, because the decision engine needs the real
         wording. raw_xml keeps the original text.
@@ -727,12 +734,6 @@ class DataWrangler(QObject):
             if not matches:
                 raise KeyError(f"Ticket {ticket} not found in {self.ticket_file}")
             ticket = matches[0]
-
-        fields = ticket.get("fields") or []
-
-        def field_value(index: int):
-            # Same custom-field positions tickets_reshaped and ticket_to_xml use.
-            return fields[index]["value"] if len(fields) > index else None
 
         def as_id(value) -> Optional[str]:
             return None if value is None else str(value)
@@ -783,8 +784,8 @@ class DataWrangler(QObject):
             "priority": ticket.get("priority"),
             "group": as_id(ticket.get("group_id")),
             "assignee": as_id(ticket.get("assignee_id")),
-            "request_type": field_value(0),
-            "historical_outcome": field_value(2),
+            "request_type": custom_field(ticket, REQUEST_TYPE_FIELD_ID),
+            "historical_outcome": custom_field(ticket, OUTCOME_FIELD_ID),
             "tags": ticket.get("tags") or [],
             "requester_id": requester_id,
             "organization_id": as_id(ticket.get("organization_id")),

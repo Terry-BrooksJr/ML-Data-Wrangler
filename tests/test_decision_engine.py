@@ -559,11 +559,67 @@ def test_leadership_recipient_cleared_outside_leadership(fake_model):
     assert "Cleared leadership_recipient" in result["reasoning"]
 
 
-def test_leadership_recipient_kept_for_leadership(fake_model):
-    fake_model(model_reply("escalate_leadership", leadership_recipient="VP of Support"))
-    assert (
-        classify.classify_ticket("payload")["leadership_recipient"] == "VP of Support"
+STEPHEN = "384720527257"  # engineer on Allain Dollete's team
+ALLAIN = "361165286529"  # Team Lead
+RICH = "1085778551"  # VP of Support
+
+
+@pytest.mark.parametrize(
+    "assignee, given, expected",
+    [
+        (STEPHEN, "Allain Dollete, Rich Shupe", "Allain Dollete, Rich Shupe"),
+        (STEPHEN, "Rich Shupe, Allain Dollete", "Allain Dollete, Rich Shupe"),
+        (STEPHEN, "VP of Support", "Allain Dollete, Rich Shupe"),
+        (STEPHEN, None, "Allain Dollete, Rich Shupe"),
+        (STEPHEN, "Horacio Balserio, Rich Shupe", "Allain Dollete, Rich Shupe"),
+        (ALLAIN, "Allain Dollete, Rich Shupe", "Rich Shupe"),
+        ("12289991012893", "Rich Shupe", "Horacio Balserio, Rich Shupe"),
+    ],
+)
+def test_leadership_recipients_follow_the_assignee(fake_model, assignee, given, expected):
+    fake_model(model_reply("escalate_leadership", leadership_recipient=given))
+    result = classify.classify_ticket("payload", assignee=assignee)
+    assert result["leadership_recipient"] == expected
+    changed = set(map(str.strip, (given or "").split(","))) - {""} != set(expected.split(", "))
+    overrides = [o for o in result.get("guard_overrides", []) if "leadership_recipient" in o]
+    assert bool(overrides) == changed
+    assert not result["internal_note"].startswith("Routing review needed:")
+
+
+@pytest.mark.parametrize(
+    "assignee, expected, reason",
+    [
+        ("999", "Rich Shupe", "(999) isn't in the leadership roster"),
+        (None, "Rich Shupe", "(none) isn't in the leadership roster"),
+        (RICH, None, "Rich Shupe owns the ticket"),
+    ],
+)
+def test_leadership_routing_reviews(fake_model, assignee, expected, reason):
+    fake_model(model_reply("escalate_leadership", leadership_recipient="Rich Shupe"))
+    result = classify.classify_ticket("payload", assignee=assignee)
+    assert result["leadership_recipient"] == expected
+    assert result["internal_note"].startswith("Routing review needed:")
+    assert reason in result["internal_note"]
+
+
+def test_routing_review_note_not_added_twice(fake_model):
+    fake_model(
+        model_reply(
+            "escalate_leadership",
+            leadership_recipient="Rich Shupe",
+            internal_note="Routing review needed: assignee 999 isn't listed.",
+        )
     )
+    result = classify.classify_ticket("payload", assignee="999")
+    assert result["internal_note"].count("Routing review needed:") == 1
+
+
+def test_prompt_roster_comes_from_leadership_module():
+    from decision_engine import leadership
+
+    assert leadership.roster_table() in SYSTEM_INSTRUCTIONS
+    for person in leadership.ROSTER:
+        assert person.user_id in SYSTEM_INSTRUCTIONS
 
 
 def test_mismatched_tag_is_corrected(fake_model):
@@ -748,7 +804,7 @@ def test_lost_claim_does_not_save(fake_model, tickets, monkeypatch):
     ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
     tickets.insert_one(ticket)
 
-    def steal(payload, reengage_count=0):
+    def steal(payload, reengage_count=0, assignee=None):
         tickets.update_one(
             {"zendesk_id": ticket["zendesk_id"]},
             {"$set": {"review_claim.worker": "other"}},
@@ -758,6 +814,42 @@ def test_lost_claim_does_not_save(fake_model, tickets, monkeypatch):
     monkeypatch.setattr(persistence, "classify_ticket", steal)
     persistence.process_one_ticket(ticket["zendesk_id"], tickets, worker="me")
     assert tickets.find_one({"zendesk_id": ticket["zendesk_id"]})["agent_reviews"] == []
+
+
+def test_reassigned_ticket_is_left_for_its_new_owner(fake_model, tickets, monkeypatch):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    ticket["assignee"] = STEPHEN
+    tickets.insert_one(ticket)
+    seen = []
+
+    def reassign_mid_call(payload, reengage_count=0, assignee=None):
+        seen.append(assignee)
+        # A Zendesk refresh lands while the model is answering.
+        tickets.update_one(
+            {"zendesk_id": ticket["zendesk_id"]}, {"$set": {"assignee": "387134954297"}}
+        )
+        reply = model_reply("escalate_leadership", leadership_recipient="Allain Dollete, Rich Shupe")
+        return {**json.loads(reply), "model_version": "m"}
+
+    monkeypatch.setattr(persistence, "classify_ticket", reassign_mid_call)
+    assert persistence.process_one_ticket(ticket["zendesk_id"], tickets, worker="me") is None
+    assert seen == [STEPHEN]
+    doc = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})
+    assert doc["agent_reviews"] == []
+    assert doc["awaiting_review"] is True
+    assert "review_claim" not in doc  # released, so the next batch can take it
+
+
+def test_unchanged_assignee_saves(fake_model, tickets):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    ticket["assignee"] = STEPHEN
+    tickets.insert_one(ticket)
+    fake_model(model_reply("escalate_leadership", leadership_recipient="Rich Shupe"))
+    result = persistence.process_one_ticket(ticket["zendesk_id"], tickets, worker="me")
+    assert result["leadership_recipient"] == "Allain Dollete, Rich Shupe"
+    doc = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})
+    assert doc["agent_reviews"][-1]["leadership_recipient"] == "Allain Dollete, Rich Shupe"
+    assert doc["awaiting_review"] is False
 
 
 # --- batch error handling (#11) ---------------------------------------------------
@@ -1404,3 +1496,94 @@ def test_a_failing_progress_callback_never_stops_the_batch(monkeypatch, tickets)
         raise RuntimeError("display gone")
 
     assert persistence.run_review_batch(tickets, on_progress=broken)["classified"] == 3
+
+
+# --- per-run configuration (A/B tests) ---------------------------------------------
+
+
+def test_config_replaces_the_environment_models(routed_model):
+    client = routed_model(
+        other=model_reply("manual_triage", confidence=40),
+        checker=model_reply("flag_solve", confidence=90),
+    )
+    config = classify.EngineConfig("other", confirmation="checker")
+    result = classify.classify_ticket("payload", config=config)
+    assert client.models == ["other", "checker"]
+    assert result["classification"] == "flag_solve"
+
+
+def test_config_sends_max_tokens_and_effort_only_when_set(fake_model):
+    client = fake_model(model_reply("flag_solve"))
+    classify.classify_ticket(
+        "payload", config=classify.EngineConfig("m", max_tokens=16000, effort="high")
+    )
+    classify.classify_ticket("payload", config=classify.EngineConfig("m"))
+    assert client.calls[0]["max_tokens"] == 16000
+    assert client.calls[0]["output_config"] == {"effort": "high"}
+    assert client.calls[1]["max_tokens"] == classify.MAX_TOKENS
+    assert "output_config" not in client.calls[1]
+
+
+def test_config_from_env_matches_the_engine_defaults(routed_model):
+    assert classify.EngineConfig.from_env() == classify.EngineConfig(
+        "primary", "secondary", "confirmation"
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs, problem",
+    [({"primary": " "}, "primary"), ({"primary": "m", "effort": "huge"}, "effort"),
+     ({"primary": "m", "max_tokens": 0}, "max_tokens")],
+)
+def test_config_rejects_invalid_settings(kwargs, problem):
+    with pytest.raises(ValueError, match=problem):
+        classify.EngineConfig(**kwargs)
+
+
+def test_config_round_trips_through_a_dict():
+    config = classify.EngineConfig("m", None, "c", 9000, "max")
+    assert classify.EngineConfig.from_dict(config.to_dict()) == config
+    assert "effort max" in config.describe() and "secondary" not in config.describe()
+
+
+def test_config_from_dict_refuses_a_zero_token_limit():
+    with pytest.raises(ValueError, match="max_tokens"):
+        classify.EngineConfig.from_dict({"primary": "m", "max_tokens": 0})
+    assert classify.EngineConfig.from_dict({"primary": "m"}).max_tokens == classify.MAX_TOKENS
+
+
+@pytest.mark.parametrize("code", [401, 402])
+def test_a_fatal_confirmation_error_is_raised_not_swallowed(routed_model, code):
+    routed_model(
+        primary=model_reply("manual_triage", confidence=40),
+        confirmation=status_error(code),
+    )
+    with pytest.raises(anthropic.APIStatusError):
+        classify.classify_ticket("payload")
+
+
+def test_a_fatal_primary_error_skips_the_secondary(routed_model):
+    client = routed_model(primary=status_error(401), secondary=model_reply("flag_solve"))
+    with pytest.raises(anthropic.APIStatusError):
+        classify.classify_ticket("payload")
+    assert client.models == ["primary"]
+
+
+def test_every_model_call_is_listed_with_its_cost(routed_model):
+    routed_model(
+        primary=api_error(),
+        secondary=model_reply("manual_triage", confidence=40),
+        confirmation=model_reply("flag_solve"),
+    )
+    result = classify.classify_ticket("payload")
+    calls = result["model_calls"]
+    assert [c["model"] for c in calls] == ["primary", "secondary", "confirmation"]
+    assert calls[0]["error"] == "APIConnectionError" and calls[0]["latency_ms"] >= 0
+    assert calls[1]["usage"]["output_tokens"] == 50 and calls[2]["error"] is None
+
+
+def test_a_failed_classification_carries_its_calls(routed_model):
+    routed_model(primary=api_error(), secondary=model_reply("x"))
+    with pytest.raises(classify.EngineError) as raised:
+        classify.classify_ticket("payload")
+    assert [c["model"] for c in raised.value.model_calls] == ["primary", "secondary"]

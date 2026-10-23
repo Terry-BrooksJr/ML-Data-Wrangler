@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional
 
-import anthropic
 from bson import ObjectId
 from loguru import logger
 from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from .classify import classify_ticket, EngineError, get_client, InsecureApiUrl
+from . import decisions
+from .classify import classify_ticket, EngineError, get_client, is_fatal
 from .payload import build_ticket_payload
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -20,15 +20,13 @@ from .payload import build_ticket_payload
 MAX_ENGINE_ATTEMPTS = 3
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
-# Status codes that will fail every ticket the same way: stop the batch.
-FATAL_STATUS_CODES = (401, 402)
 
 
 @lru_cache(maxsize=1)
 def get_database() -> Database:
     """Connects on first use so importing this module needs no Mongo access.
 
-    The database defaults to the brief's support_db until the real name is
+    The database defaults to support_db (MONGO_DB) until the real name is
     confirmed.
     """
     mongo = MongoClient(os.environ["MONGO_URI"])
@@ -44,6 +42,7 @@ def reset_clients() -> None:
     """
     get_database.cache_clear()
     get_client.cache_clear()
+    decisions.reset()
 
 
 def get_tickets_collection() -> Collection:
@@ -52,16 +51,6 @@ def get_tickets_collection() -> Collection:
 
 def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-
-
-def is_fatal(error: Exception) -> bool:
-    """True for errors that will hit every ticket (bad key, out of credit, insecure API URL)."""
-    if isinstance(error, InsecureApiUrl):
-        return True
-    return (
-        isinstance(error, anthropic.APIStatusError)
-        and error.status_code in FATAL_STATUS_CODES
-    )
 
 
 def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[dict]:
@@ -163,9 +152,14 @@ def process_one_ticket(
     `engine_error` is stored instead, and returned. Errors that will hit
     every ticket (401/402) don't count as an attempt.
 
+    The review is saved only if the ticket's assignee is still the one it was
+    classified for: a leadership escalation's recipients follow the assignee.
+    If ownership changed during the model call, the review is discarded and
+    the ticket stays awaiting review, to be classified again for its new owner.
+
     Returns:
         The result dict, or None if the ticket is missing, not awaiting
-        review, or claimed by another worker.
+        review, claimed by another worker, or reassigned while it was classified.
     """
     tickets = tickets if tickets is not None else get_tickets_collection()
     worker = worker or default_worker_id()
@@ -176,7 +170,9 @@ def process_one_ticket(
     try:
         payload = build_ticket_payload(ticket_doc)
         result = classify_ticket(
-            payload, reengage_count=len(ticket_doc.get("reengage_attempts") or [])
+            payload,
+            reengage_count=len(ticket_doc.get("reengage_attempts") or []),
+            assignee=ticket_doc.get("assignee"),
         )
     except Exception as e:
         if is_fatal(e):
@@ -221,8 +217,20 @@ def process_one_ticket(
         return result
 
     result["ticket_id"] = ticket_doc["zendesk_id"]  # don't trust the model's echo
-    _save_review(tickets, zendesk_id, worker, _review_entry(result))
+    saved = _save_review(
+        tickets,
+        zendesk_id,
+        worker,
+        _review_entry(result),
+        assignee=ticket_doc.get("assignee"),
+    )
+    if saved == REASSIGNED:
+        return None
     return result
+
+
+SAVED, CLAIM_LOST, REASSIGNED = "saved", "claim_lost", "reassigned"
+_NOT_GIVEN = object()
 
 
 def _save_review(
@@ -231,9 +239,26 @@ def _save_review(
     worker: str,
     entry: dict,
     extra_set: Optional[dict] = None,
-):
-    # Matching on the claim means a worker whose claim expired and was taken
-    # over can't append a second entry.
+    assignee=_NOT_GIVEN,
+) -> str:
+    """Appends entry to agent_reviews and clears awaiting_review.
+
+    Matching on the claim means a worker whose claim expired and was taken
+    over can't append a second entry. With assignee, the ticket must still
+    have that assignee (None: none); if Zendesk reassigned it meanwhile, the
+    review is discarded, the claim released, and the ticket stays awaiting
+    review.
+
+    Returns:
+        SAVED, CLAIM_LOST or REASSIGNED.
+    """
+    match = {
+        "zendesk_id": zendesk_id,
+        "awaiting_review": True,
+        "review_claim.worker": worker,
+    }
+    if assignee is not _NOT_GIVEN:
+        match["assignee"] = assignee
     update = {
         "$push": {"agent_reviews": entry},
         "$set": {"awaiting_review": False, **(extra_set or {})},
@@ -241,16 +266,21 @@ def _save_review(
     }
     if not extra_set:
         update["$unset"].update({"review_attempts": "", "last_engine_error": ""})
-    saved = tickets.update_one(
-        {
-            "zendesk_id": zendesk_id,
-            "awaiting_review": True,
-            "review_claim.worker": worker,
-        },
-        update,
-    )
-    if saved.modified_count == 0:
-        logger.warning(f"{zendesk_id}: claim lost before saving; review discarded.")
+    saved = tickets.update_one(match, update)
+    if saved.modified_count:
+        return SAVED
+    if assignee is not _NOT_GIVEN and tickets.find_one(
+        {"zendesk_id": zendesk_id, "review_claim.worker": worker}
+    ):
+        # Still ours, so the assignee is what changed.
+        _release_claim(tickets, zendesk_id, worker)
+        logger.warning(
+            f"{zendesk_id}: reassigned while it was being classified; review discarded, "
+            "left awaiting review for the new owner."
+        )
+        return REASSIGNED
+    logger.warning(f"{zendesk_id}: claim lost before saving; review discarded.")
+    return CLAIM_LOST
 
 
 def _add_usage(totals: dict, audit: Optional[dict]) -> None:

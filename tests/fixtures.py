@@ -1,8 +1,8 @@
 """Synthetic ticket documents, one per category plus a precedence conflict.
 
-Each fixture is shaped like a mapped Mongo `tickets` document (brief §4.2) and
-is written so that a correct reading of the system prompt lands on
-`expected`. They are synthetic: open item #2 (a real Escalate-to-Support-Owner
+Each fixture is shaped like a mapped Mongo `tickets` document (see
+wrangler.DataWrangler.ticket_to_document) and is written so that a correct
+reading of the system prompt lands on `expected`. They are synthetic: open item #2 (a real Escalate-to-Support-Owner
 edge case) is still outstanding.
 """
 

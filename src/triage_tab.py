@@ -14,6 +14,7 @@ from typing import Any, Callable, List, Optional
 import embeddings
 from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
+from ab_test_dialog import ab_collections, ABTestDialog
 from lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
@@ -330,6 +331,7 @@ class TriageTab(QWidget):
         self._on_done: Optional[Callable[[Any], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self.weekly_review_dialog = None
+        self.ab_test_dialog = None
         self._rows: List[dict] = []
         self._loaded = False
         self._build_ui()
@@ -416,10 +418,17 @@ class TriageTab(QWidget):
             "Review the week's misclassifications and write the lessons learned from them."
         )
         self.weekly_review_button.clicked.connect(self.open_weekly_review)
+        self.ab_test_button = Button("A/B Test…")
+        self.ab_test_button.setToolTip(
+            "Classify a sample of tickets with two engine configurations and "
+            "compare the answers blind. Nothing is saved to the tickets."
+        )
+        self.ab_test_button.clicked.connect(self.open_ab_test)
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
@@ -568,6 +577,7 @@ class TriageTab(QWidget):
             self.accuracy_button,
             self.embed_button,
             self.weekly_review_button,
+            self.ab_test_button,
         ):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
@@ -909,7 +919,10 @@ class TriageTab(QWidget):
             result: The engine's review dict, or None.
         """
         if result is None:
-            message = f"Ticket {zendesk_id} was not found, or is not awaiting review."
+            message = (
+                f"Ticket {zendesk_id} was not found, is not awaiting review, or was "
+                "reassigned while it was classified (it stays awaiting review)."
+            )
             logger.warning(message)
             QMessageBox.information(self, "Not Classified", message)
             return
@@ -1101,3 +1114,20 @@ class TriageTab(QWidget):
             self,
         )
         self.weekly_review_dialog.show()
+
+    def open_ab_test(self) -> None:
+        """Opens the A/B test window: two engine configurations compared blind."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        if self.ab_test_dialog is not None and self.ab_test_dialog.isVisible():
+            self.ab_test_dialog.raise_()
+            return
+        # Kept on self: a dialog with no reference is garbage-collected and closes.
+        self.ab_test_dialog = ABTestDialog(
+            self._run,
+            lambda: ab_collections(self.collection_factory()),
+            lambda: self._closing,
+            self,
+            ready=lambda: self._configured(REVIEW_ENV, notify=True),
+        )
+        self.ab_test_dialog.show()

@@ -211,7 +211,9 @@ def test_train_and_save_uploads_and_records(bert_dir, monkeypatch):
         ["101"], ["csv import"], np.zeros((1, 2), np.float32), {"model": "m"}
     )
     monkeypatch.setattr(
-        bertopic_runs.bertopic_model, "load_corpus", lambda tickets: corpus
+        bertopic_runs.bertopic_model,
+        "load_corpus",
+        lambda tickets, outcomes=None: corpus,
     )
     monkeypatch.setattr(
         bertopic_runs, "tokenize", lambda nlp, sw, texts: [["csv", "import"]]
