@@ -254,7 +254,7 @@ def classify_ticket(
     always raised, from any step, so a batch stops rather than carrying on.
 
     Every model call, failed ones included, is listed in the result's
-    "model_calls" ({"model", "usage", "latency_ms", "error"}); when no model
+    "model_calls" ({"model", "usage", "latency_ms", "billed_usd", "error"}); when no model
     answers, the raised error carries the same list as `model_calls`.
 
     Args:
@@ -305,6 +305,7 @@ def classify_ticket(
                     "usage": audit.get("usage") or {},
                     "latency_ms": audit.get("latency_ms")
                     or int((time.monotonic() - started) * 1000),
+                    "billed_usd": audit.get("billed_cost_usd"),
                     "error": type(e).__name__,
                 }
             )
@@ -315,6 +316,7 @@ def classify_ticket(
                 "model": model,
                 "usage": answer["audit"]["usage"],
                 "latency_ms": answer["audit"]["latency_ms"],
+                "billed_usd": answer["audit"].get("billed_cost_usd"),
                 "error": None,
             }
         )
@@ -440,6 +442,10 @@ def _classify_with(
         "prompt_version": PROMPT_VERSION,
         "stop_reason": stop_reason,
         "raw_response": raw_text,
+        # Cheaper Inference's actual charge for the call, after its discount.
+        "billed_cost_usd": (getattr(response, "billing", None) or {}).get(
+            "billed_cost_usd"
+        ),
     }
 
     if stop_reason == "max_tokens":

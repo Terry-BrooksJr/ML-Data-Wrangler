@@ -14,9 +14,9 @@ Nothing is written to the tickets collection.
 
 import getpass
 import threading
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from decision_engine import ab_test
+from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
 from loguru import logger
 from pymongo.collection import Collection
@@ -89,10 +89,14 @@ def format_output(output: Optional[dict]) -> str:
             if attempts >= ab_test.MAX_ATTEMPTS
             else f"Failed {attempts} time(s); Classify Pending tries again."
         )
-        return f"The engine failed on this ticket. {state}\n{output['error']}"
+        return (
+            f"The engine failed on this ticket. {state}\n{format_cost(output)}\n"
+            f"{output['error']}"
+        )
     lines = [
         f"Classification: {output.get('classification')}",
         f"Confidence: {output.get('confidence')}",
+        format_cost(output),
     ]
     if output.get("decision_only"):
         return "\n".join(lines + _classification_only(output))
@@ -124,6 +128,28 @@ def format_output(output: Optional[dict]) -> str:
             *[f"  - {o}" for o in output["guard_overrides"]],
         ]
     return "\n".join(lines)
+
+
+def format_cost(output: dict) -> str:
+    """One answer's cost: what was charged or estimated, over how many calls,
+    and whether it was reused (so cost nothing here)."""
+    if "cost_usd" not in output:
+        return "Cost: not recorded"
+    calls = output.get("model_calls") or 0
+    detail = ", ".join(
+        part
+        for part in (
+            output.get("cost_basis"),
+            f"{calls} model call{'s' if calls != 1 else ''}" if calls else None,
+        )
+        if part
+    )
+    text = f"Cost: {pricing.format_usd(output.get('cost_usd'))}" + (
+        f" ({detail})" if detail else ""
+    )
+    if output.get("reused_from"):
+        text += "; reused from an earlier test, so nothing was spent here"
+    return text
 
 
 def _classification_only(output: dict) -> List[str]:
@@ -178,6 +204,13 @@ def format_ticket(ticket: Optional[dict]) -> str:
             str(entry.get("body") or "").strip(),
         ]
     return "\n".join(lines)
+
+
+def _live_prices() -> Dict[str, pricing.Price]:
+    from decision_engine import decisions
+    from decision_engine.classify import get_client
+
+    return pricing.parse_listing(decisions.model_list(get_client(), refresh=True))
 
 
 def runs_with_counts(runs: Collection, results: Collection) -> List[dict]:
@@ -244,14 +277,126 @@ class ConfigForm(QWidget):
         )
 
 
-class NewRunDialog(QDialog):
-    """Asks for the two configurations, the sample size and a name."""
+PRICE_COLUMNS = ["Model", "Input", "Output", "Cache read", "Cache write", "Source"]
+# Price fields in column order (after Model), as pricing.Price names them.
+_PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 
-    def __init__(self, current: EngineConfig, parent: Optional[QWidget] = None) -> None:
+
+class PriceTable(QTableWidget):
+    """Prices per million tokens for the models in a test, editable.
+
+    Starts from today's prices (live); a value typed in marks that model's
+    prices "entered" and is kept if the model list changes.
+    """
+
+    def __init__(self, live: Dict[str, pricing.Price], parent=None) -> None:
+        super().__init__(0, len(PRICE_COLUMNS), parent)
+        use_si_scrollbars(self)
+        self.live = live
+        self.entered: Dict[str, Dict[str, str]] = {}
+        self._filling = False
+        self.setHorizontalHeaderLabels(PRICE_COLUMNS)
+        self.verticalHeader().setVisible(False)
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.setMaximumHeight(170)
+        self.itemChanged.connect(self._edited)
+
+    def show_models(self, models: List[str]) -> None:
+        self._filling = True
+        self.setRowCount(len(models))
+        for row, model in enumerate(models):
+            name = QTableWidgetItem(model)
+            name.setFlags(name.flags() & ~QtCore.Qt.ItemIsEditable)
+            self.setItem(row, 0, name)
+            live = self.live.get(model)
+            entered = self.entered.get(model, {})
+            for column, field in enumerate(_PRICE_FIELDS, start=1):
+                value = entered.get(field)
+                if value is None:
+                    number = getattr(live, field) if live else None
+                    value = "" if number is None else f"{number:g}"
+                self.setItem(row, column, QTableWidgetItem(value))
+            source = (
+                "entered" if entered else "live" if live else "not listed: enter it"
+            )
+            cell = QTableWidgetItem(source)
+            cell.setFlags(cell.flags() & ~QtCore.Qt.ItemIsEditable)
+            self.setItem(row, len(PRICE_COLUMNS) - 1, cell)
+        self._filling = False
+
+    def _edited(self, item: QTableWidgetItem) -> None:
+        if self._filling or item.column() in (0, len(PRICE_COLUMNS) - 1):
+            return
+        model = self.item(item.row(), 0).text()
+        values = self.entered.setdefault(model, {})
+        values[_PRICE_FIELDS[item.column() - 1]] = item.text().strip()
+        self._filling = True
+        self.item(item.row(), len(PRICE_COLUMNS) - 1).setText("entered")
+        self._filling = False
+
+    def prices(self) -> Dict[str, pricing.Price]:
+        """Model -> Price for every row with input and output prices.
+
+        Raises:
+            ValueError: a price isn't a number, or is negative.
+        """
+        prices = {}
+        for row in range(self.rowCount()):
+            model = self.item(row, 0).text()
+            values = {}
+            for column, field in enumerate(_PRICE_FIELDS, start=1):
+                text = self.item(row, column).text().strip().lstrip("$")
+                if not text:
+                    values[field] = None
+                    continue
+                try:
+                    values[field] = float(text)
+                except ValueError:
+                    raise ValueError(
+                        f"The {PRICE_COLUMNS[column].lower()} price for {model} isn't a number."
+                    )
+                if values[field] < 0:
+                    raise ValueError(f"Prices for {model} can't be negative.")
+            if values["input"] is None or values["output"] is None:
+                continue
+            source = "entered" if model in self.entered else "live"
+            prices[model] = pricing.Price(source=source, **values)
+        return prices
+
+
+class NewRunDialog(QDialog):
+    """Asks for the two configurations, their prices, the sample size and a name.
+
+    Args:
+        live_prices: Today's prices from Cheaper Inference, for every listed
+            model; may be empty if they couldn't be read.
+    """
+
+    def __init__(
+        self,
+        current: EngineConfig,
+        parent: Optional[QWidget] = None,
+        live_prices: Optional[Dict[str, pricing.Price]] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("New A/B Test")
         self.a_form = ConfigForm(current)
         self.b_form = ConfigForm(current)
+        self.price_table = PriceTable(live_prices or {})
+        for form in (self.a_form, self.b_form):
+            for field in (form.primary, form.secondary, form.confirmation):
+                field.textChanged.connect(lambda _: self._refresh_prices())
+        self._refresh_prices()
+        price_card = Card("Prices (US dollars per million tokens)")
+        price_card.body.addWidget(
+            hint(
+                "Today's prices from Cheaper Inference, discounts included"
+                + ("" if live_prices else " (they couldn't be read: enter them)")
+                + ". A call's actual charge is used whenever its reply reports one; "
+                "these prices cost the rest. Edit any that are wrong."
+            )
+        )
+        price_card.body.addWidget(self.price_table)
         a_card = Card("A: current engine")
         a_card.body.addWidget(self.a_form)
         b_card = Card("B: the configuration to try")
@@ -287,10 +432,12 @@ class NewRunDialog(QDialog):
         layout.addWidget(
             hint(
                 "Each ticket in the sample is classified by both configurations: "
-                "two or more paid model calls per ticket. Nothing is saved to the tickets."
+                "two or more paid model calls per ticket. Nothing is saved to the tickets "
+                "until every verdict is in."
             )
         )
         layout.addLayout(forms)
+        layout.addWidget(price_card)
         layout.addLayout(sample)
         layout.addWidget(buttons)
 
@@ -305,10 +452,28 @@ class NewRunDialog(QDialog):
                 self, "Check the Settings", "A and B are the same; change B."
             )
             return
+        try:
+            self.price_table.prices()
+        except ValueError as e:
+            QMessageBox.warning(self, "Check the Prices", str(e))
+            return
         super().accept()
 
     def configs(self) -> Tuple[EngineConfig, EngineConfig]:
         return self.a_form.config(), self.b_form.config()
+
+    def _refresh_prices(self) -> None:
+        models = []
+        for form in (self.a_form, self.b_form):
+            for field in (form.primary, form.secondary, form.confirmation):
+                model = field.text().strip()
+                if model and model not in models:
+                    models.append(model)
+        self.price_table.show_models(models)
+
+    def prices(self) -> Dict[str, pricing.Price]:
+        """The prices to save with the test, for the models it uses."""
+        return self.price_table.prices()
 
 
 class ProgressRelay(QObject):
@@ -328,6 +493,7 @@ class ABTestDialog(QDialog):
         ready: Returns True if the model settings are present, warning the
             user if not; checked before anything that calls a model.
         classify: Classifies one ticket, as decision_engine.classify_ticket (tests replace it).
+        price_source: Returns today's prices (tests replace it).
     """
 
     def __init__(
@@ -338,12 +504,15 @@ class ABTestDialog(QDialog):
         parent: Optional[QWidget] = None,
         ready: Callable[[], bool] = lambda: True,
         classify: Optional[Callable[..., dict]] = None,
+        price_source: Optional[Callable[[], Dict[str, pricing.Price]]] = None,
     ) -> None:
         super().__init__(parent)
         self.run = run
         self.collections = collections
         self.closing = closing
         self.ready = ready
+        # Today's prices for every listed model; runs on the worker thread.
+        self.price_source = price_source or _live_prices
         self.classify = classify
         self._stop = threading.Event()
         self._relay = ProgressRelay(self)
@@ -567,12 +736,23 @@ class ABTestDialog(QDialog):
         self._update_buttons()
 
     def new_run(self) -> None:
+        """Reads today's prices (off the GUI thread), then asks for the test."""
         if not self.ready():
             return
-        dialog = NewRunDialog(EngineConfig.from_env(), self)
+        if not self.run(
+            self.price_source,
+            "Reading today's prices",
+            self._ask_new_run,
+            lambda _: self._ask_new_run({}),
+        ):
+            self._busy()
+
+    def _ask_new_run(self, live_prices: Dict[str, pricing.Price]) -> None:
+        dialog = NewRunDialog(EngineConfig.from_env(), self, live_prices)
         if dialog.exec_() != QDialog.Accepted:
             return
         a, b = dialog.configs()
+        prices = dialog.prices()
         size = dialog.size.value()
         awaiting_only = dialog.awaiting_only.isChecked()
         reuse = dialog.reuse.isChecked()
@@ -583,7 +763,16 @@ class ABTestDialog(QDialog):
             tickets, runs, results = self.collections()
             ids = ab_test.sample_ticket_ids(tickets, size, awaiting_only=awaiting_only)
             run_id = ab_test.create_run(
-                tickets, runs, results, a, b, ids, name, reviewer, reuse_answers=reuse
+                tickets,
+                runs,
+                results,
+                a,
+                b,
+                ids,
+                name,
+                reviewer,
+                reuse_answers=reuse,
+                prices=prices,
             )
             return run_id, len(ids)
 

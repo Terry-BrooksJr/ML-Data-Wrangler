@@ -44,7 +44,7 @@ from loguru import logger
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
 
-from . import decisions
+from . import decisions, pricing
 from .classify import classify_ticket, EFFORT_LEVELS, EngineConfig, is_fatal
 from .guards import CLASSIFICATIONS
 from .payload import build_ticket_payload
@@ -269,12 +269,17 @@ def create_run(
     created_by: str = "",
     seed: Optional[int] = None,
     reuse_answers: bool = True,
+    prices: Optional[Dict[str, pricing.Price]] = None,
 ) -> str:
     """Records a new run and one pending result per ticket; classifies nothing.
 
     With reuse_answers, classifying the run copies an answer saved in any
     run for the same ticket content and configuration within REUSE_WINDOW,
     instead of calling the model again.
+
+    prices (model -> Price) are saved with the run and price any call whose
+    reply didn't report its charge (pricing.calls_cost); give today's
+    (pricing.live_prices), corrected where needed.
 
     Each result keeps a snapshot of its ticket, including the payload built
     once (as of the run's creation), so A and B are sent exactly the same
@@ -323,6 +328,7 @@ def create_run(
             **_versions(),
             "ticket_count": len(ticket_ids),
             "reuse_answers": reuse_answers,
+            "prices": {m: p.to_dict() for m, p in (prices or {}).items()},
             "status": CREATING,
         }
     )
@@ -363,27 +369,61 @@ def configs(run: dict) -> Dict[str, EngineConfig]:
     return {v: EngineConfig.from_dict(run["variants"][v]) for v in VARIANTS}
 
 
-def _cost(calls: List[dict]) -> dict:
-    """Tokens and time across every model call one classification made."""
+def models_of(*configs: EngineConfig) -> List[str]:
+    """Every model the configurations can call, each once."""
+    models = []
+    for config in configs:
+        for model in (config.primary, config.secondary, config.confirmation):
+            if model and model not in models:
+                models.append(model)
+    return models
+
+
+def run_prices(run: dict) -> Dict[str, pricing.Price]:
+    """The prices a run was created with (see create_run)."""
+    return {
+        model: pricing.Price.from_dict(values)
+        for model, values in (run.get("prices") or {}).items()
+    }
+
+
+def _cost(calls: List[dict], prices: Dict[str, pricing.Price]) -> dict:
+    """Tokens, time and dollars across every model call one classification made."""
     return {
         "usage": _sum_usage(call.get("usage") for call in calls),
         "latency_ms": sum(call.get("latency_ms") or 0 for call in calls),
         "model_calls": len(calls),
+        **pricing.calls_cost(calls, prices),
     }
 
 
-def _output(result: dict) -> dict:
+def _single_call(result_or_error, audit: dict) -> List[dict]:
+    """The one call behind a result or error that has no model_calls list."""
+    return [
+        {
+            "model": getattr(result_or_error, "model", None)
+            or (
+                result_or_error.get("model_version")
+                if isinstance(result_or_error, dict)
+                else None
+            ),
+            "usage": audit.get("usage"),
+            "latency_ms": audit.get("latency_ms"),
+            "billed_usd": audit.get("billed_cost_usd"),
+        }
+    ]
+
+
+def _output(result: dict, prices: Optional[Dict[str, pricing.Price]] = None) -> dict:
     """What an A/B result keeps of a classification.
 
-    Usage and latency cover every model call behind the answer: a failed
-    primary call, the secondary that replaced it, and a confirmation.
+    Usage, latency and cost cover every model call behind the answer: a
+    failed primary call, the secondary that replaced it, and a confirmation.
     """
     kept = {key: result.get(key) for key in _KEPT_FIELDS}
     audit = result.get("audit") or {}
-    calls = result.get("model_calls") or [
-        {"usage": audit.get("usage"), "latency_ms": audit.get("latency_ms")}
-    ]
-    kept.update(_cost(calls))
+    calls = result.get("model_calls") or _single_call(result, audit)
+    kept.update(_cost(calls, prices or {}))
     confirmed = result.get("confirmation_of")
     if confirmed:
         kept["confirmed_from"] = {
@@ -393,14 +433,14 @@ def _output(result: dict) -> dict:
     return kept
 
 
-def _error_output(error: Exception) -> dict:
+def _error_output(
+    error: Exception, prices: Optional[Dict[str, pricing.Price]] = None
+) -> dict:
     """A failed classification: the error, its cost, and the raw reply (or
     the API's error body) for debugging. The raw reply can quote ticket
     text; finalize removes it."""
     audit = getattr(error, "audit", None) or {}
-    calls = getattr(error, "model_calls", None) or [
-        {"usage": audit.get("usage"), "latency_ms": audit.get("latency_ms")}
-    ]
+    calls = getattr(error, "model_calls", None) or _single_call(error, audit)
     raw = audit.get("raw_response")
     if raw is None and getattr(error, "body", None) is not None:
         raw = json.dumps(error.body, default=str)
@@ -409,7 +449,7 @@ def _error_output(error: Exception) -> dict:
         "raw_response": raw[:RAW_REPLY_LIMIT] if raw else None,
         "stop_reason": audit.get("stop_reason"),
         "request_id": audit.get("request_id") or getattr(error, "request_id", None),
-        **_cost(calls),
+        **_cost(calls, prices or {}),
     }
 
 
@@ -562,6 +602,7 @@ def run_ab_test(
                             classify,
                             worker,
                             reuse=run.get("reuse_answers", False),
+                            prices=run_prices(run),
                         )
                     finally:
                         results.update_one(
@@ -585,6 +626,7 @@ def _classify_pending(
     classify: Callable[..., dict],
     worker: str,
     reuse: bool = False,
+    prices: Optional[Dict[str, pricing.Price]] = None,
 ) -> None:
     """Classifies a claimed ticket's pending variants and saves each output.
 
@@ -609,7 +651,8 @@ def _classify_pending(
                         assignee=doc.get("assignee"),
                         config=config,
                         allow_decision_models=True,
-                    )
+                    ),
+                    prices,
                 )
                 output["answer_key"] = key
             except Exception as e:
@@ -619,7 +662,7 @@ def _classify_pending(
                     f"A/B {run_id}: ticket {doc['ticket_id']} failed on {variant} "
                     f"(attempt {attempt} of {MAX_ATTEMPTS}): {e}"
                 )
-                output = _error_output(e)
+                output = _error_output(e, prices)
         output["attempts"] = attempt
         output["answered_at"] = datetime.now(timezone.utc)
         saved = results.update_one(
@@ -761,7 +804,9 @@ def summarize(run: dict, docs: List[dict]) -> dict:
         {"run": run, "tickets": int, "classified": int (both variants done),
          "agreement": int (same classification), "variants": {variant:
          {"done", "errors", "classifications", "mean_confidence",
-         "confirmed", "classification_only", "usage", "mean_latency_ms"}},
+         "confirmed", "classification_only", "usage", "mean_latency_ms",
+         "cost_usd" (every answer, reused ones at their original cost),
+         "spent_usd" (calls this run paid for), "cost_unknown", "reused"}},
          "preferences":
          Counter, "reviewed": int, "disagreement_preferences": Counter}
     """
@@ -781,6 +826,12 @@ def summarize(run: dict, docs: List[dict]) -> dict:
             "classification_only": sum(1 for o in good if o.get("decision_only")),
             "usage": _sum_usage(o.get("usage") for o in outputs),
             "mean_latency_ms": sum(latencies) / len(latencies) if latencies else None,
+            "cost_usd": sum(o.get("cost_usd") or 0 for o in outputs),
+            "spent_usd": sum(
+                o.get("cost_usd") or 0 for o in outputs if not o.get("reused_from")
+            ),
+            "cost_unknown": sum(1 for o in outputs if o.get("cost_usd") is None),
+            "reused": sum(1 for o in outputs if o.get("reused_from")),
         }
     both = [d for d in docs if answered(d)]
     agree = [d for d in both if not differs(d)]
@@ -848,6 +899,14 @@ def format_summary(summary: dict) -> str:
     )
     row("Confirmed", lambda s: str(s["confirmed"]))
     row("Classification only", lambda s: str(s["classification_only"]))
+    row("Cost", lambda s: pricing.format_usd(s["cost_usd"]))
+    row(
+        "Cost per answer",
+        lambda s: pricing.format_usd(s["cost_usd"] / s["done"]) if s["done"] else "-",
+    )
+    row("Reused answers", lambda s: str(s["reused"]))
+    row("Spent in this test", lambda s: pricing.format_usd(s["spent_usd"]))
+    row("Cost unknown", lambda s: str(s["cost_unknown"]))
     row(
         "Mean latency (s)",
         lambda s: (
@@ -907,6 +966,7 @@ def _verdict_entry(run: dict, doc: dict, finalized_at: datetime) -> dict:
                         "confidence",
                         "model_version",
                         "decision_only",
+                        "cost_usd",
                     )
                 },
             }
@@ -1011,6 +1071,8 @@ _OUTPUT_COLUMNS = (
     "input_tokens",
     "output_tokens",
     "latency_ms",
+    "cost_usd",
+    "cost_basis",
 )
 
 
@@ -1156,6 +1218,18 @@ def main(argv: List[str]) -> int:
         a = _config_from(args, "A", EngineConfig.from_env())
         b = _config_from(args, "B", a)
         ids = sample_ticket_ids(tickets, args.size, args.seed, args.awaiting_only)
+        from .classify import get_client
+
+        prices = pricing.live_prices(get_client(), models_of(a, b))
+        for model in models_of(a, b):
+            print(
+                f"  {model}: "
+                + (
+                    f"${prices[model].input}/M in, ${prices[model].output}/M out"
+                    if model in prices
+                    else "no listed price (cost only from billed charges)"
+                )
+            )
         run_id = create_run(
             tickets,
             runs,
@@ -1166,6 +1240,7 @@ def main(argv: List[str]) -> int:
             args.name,
             seed=args.seed,
             reuse_answers=not args.no_reuse,
+            prices=prices,
         )
         print(f"Created A/B run {run_id} with {len(ids)} tickets.")
         print(f"  A: {a.describe()}\n  B: {b.describe()}")

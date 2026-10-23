@@ -24,7 +24,7 @@ import hashlib
 import json
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 
@@ -66,40 +66,41 @@ INSTRUCTIONS_VERSION = hashlib.sha256(
     json.dumps([INSTRUCTIONS, CATEGORY_GUIDE], sort_keys=True).encode()
 ).hexdigest()[:12]
 
-_types: Optional[Dict[str, str]] = None
-_types_lock = threading.Lock()
+_models: Optional[List[dict]] = None
+_models_lock = threading.Lock()
 
 
 def reset() -> None:
     """Forgets the model list, so the next lookup reads it again."""
-    global _types
-    with _types_lock:
-        _types = None
+    global _models
+    with _models_lock:
+        _models = None
 
 
-def model_types(client) -> Dict[str, str]:
-    """Model ID -> type ("text", "decision", ...) from GET /v1/models.
+def model_list(client, refresh: bool = False) -> List[dict]:
+    """The models from GET /v1/models, each with its "type" and "pricing".
 
-    Read once per process. If the list can't be read, every model counts as
-    a text model and nothing is cached, so a later lookup tries again.
+    Read once per process, or again with refresh (prices change). If the
+    list can't be read, [] is returned and nothing is cached, so a later
+    call tries again.
     """
-    global _types
-    with _types_lock:
-        if _types is None:
+    global _models
+    with _models_lock:
+        if _models is None or refresh:
             try:
                 listing = client.get("/v1/models", cast_to=object)
                 items = listing.get("data", []) if isinstance(listing, dict) else []
-                _types = {
-                    m["id"]: m.get("type") or "text"
-                    for m in items
-                    if isinstance(m, dict) and "id" in m
-                }
+                _models = [m for m in items if isinstance(m, dict) and "id" in m]
             except Exception as e:  # never stop classification over the lookup
-                logger.warning(
-                    f"Couldn't read the model list ({e}); treating every model as a text model."
-                )
-                return {}
-        return _types
+                logger.warning(f"Couldn't read the model list ({e}).")
+                return []
+        return _models
+
+
+def model_types(client) -> Dict[str, str]:
+    """Model ID -> type ("text", "decision", ...). A model missing from the
+    list (or every model, if it can't be read) counts as a text model."""
+    return {m["id"]: m.get("type") or "text" for m in model_list(client)}
 
 
 def is_decision_model(client, model: str) -> bool:

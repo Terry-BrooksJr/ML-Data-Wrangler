@@ -511,7 +511,10 @@ with a configuration you're considering (B) on the same tickets:
 
 1. **New Test…** sets each side's primary, secondary and confirmation models,
    max tokens and effort (B starts as a copy of A), and how many tickets to
-   sample. Effort is sent only when set; leave it at the model default for
+   sample. **Prices** lists every model the two sides use with today's
+   prices from Cheaper Inference (per million tokens, its discounts
+   included); correct any that are wrong, or fill in a model it doesn't
+   list. They are saved with the test. Effort is sent only when set; leave it at the model default for
    models other than Claude.
 2. Each sampled ticket is classified by both configurations: at least two
    paid model calls per ticket. Both are sent the same snapshot of the
@@ -528,7 +531,12 @@ with a configuration you're considering (B) on the same tickets:
 3. **Blind Review** shows the ticket and the two answers as Output 1 and
    Output 2, in an order shuffled per ticket, without model names. Choose
    **Output 1 Better**, **Output 2 Better**, **Equally Good** or **Both
-   Wrong**, with an optional note. **Only where they disagree** skips the
+   Wrong**, with an optional note. Each side shows what its answer cost:
+   the charge Cheaper Inference reported for each call (`billed`), or, where
+   a reply didn't report one, an estimate from the test's prices
+   (`estimated`), over every call behind the answer (fallback and
+   confirmation calls included). A reused answer shows its original cost and
+   notes that nothing was spent this time. **Only where they disagree** skips the
    tickets where both chose the same classification. If someone else saved
    a verdict on the ticket after you opened it, yours is refused and theirs
    is shown.
@@ -542,7 +550,9 @@ with a configuration you're considering (B) on the same tickets:
    next time it's opened.
 5. **Show Results** names A and B and reports the verdicts (overall and
    where they disagreed), how often they agreed, errors, mean confidence,
-   latency and token use for each, counting every model call (fallback
+   latency, token use and cost for each (total, per answer, and what this
+   test actually spent, which leaves out reused answers), counting every
+   model call (fallback
    and confirmation calls, failed ones too).
 
 **Decision models.** Some Cheaper Inference models (type "decision" in its

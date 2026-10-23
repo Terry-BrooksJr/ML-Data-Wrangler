@@ -758,3 +758,107 @@ def test_export_json_keeps_everything_but_the_model_input(collections, tmp_path)
     assert data["results"][0]["ticket"]["transcript"]  # not finalized yet
     with pytest.raises(ValueError, match=".csv or .json"):
         ab_test.export_run(data["run"], [], tmp_path / "out.txt")
+
+
+# --- cost --------------------------------------------------------------------------------
+
+
+def priced_run(collections, size=2, **kwargs):
+    from decision_engine import pricing
+
+    tickets, runs, results = collections
+    ids = ab_test.sample_ticket_ids(tickets, size, seed=1)
+    prices = {
+        "current-model": pricing.Price(input=1, output=2),
+        "new-model": pricing.Price(input=10, output=20, source="entered"),
+    }
+    return ab_test.create_run(
+        tickets, runs, results, A, B, ids, prices=prices, **kwargs
+    )
+
+
+def test_a_run_saves_its_prices_and_costs_each_answer(collections):
+    _, runs, results = collections
+    run_id = priced_run(collections)
+    saved = runs.find_one({"_id": run_id})["prices"]
+    assert saved["new-model"] == {
+        "input": 10.0,
+        "output": 20.0,
+        "cache_read": None,
+        "cache_write": None,
+        "source": "entered",
+    }
+    summary = run(collections, run_id)
+    doc = results.find_one({"run_id": run_id})
+    # 10 input and 5 output tokens per answer.
+    assert doc["outputs"]["A"]["cost_usd"] == pytest.approx((10 * 1 + 5 * 2) / 1e6)
+    assert doc["outputs"]["B"]["cost_usd"] == pytest.approx((10 * 10 + 5 * 20) / 1e6)
+    assert doc["outputs"]["B"]["cost_basis"] == "estimated"
+    assert summary["variants"]["B"]["cost_usd"] == pytest.approx(2 * 200 / 1e6)
+    assert summary["variants"]["B"]["spent_usd"] == summary["variants"]["B"]["cost_usd"]
+    text = ab_test.format_summary(summary)
+    assert "Cost" in text and "$0.0004" in text
+
+
+def test_a_billed_charge_beats_the_estimate(collections):
+    run_id = priced_run(collections, size=1)
+
+    def engine(payload, config=None, **kwargs):
+        return answer(
+            "flag_solve",
+            model_calls=[
+                {
+                    "model": config.primary,
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                    "latency_ms": 1,
+                    "billed_usd": "0.0042",
+                }
+            ],
+        )
+
+    run(collections, run_id, classify=engine)
+    output = collections[2].find_one({"run_id": run_id})["outputs"]["A"]
+    assert (
+        output["cost_usd"] == pytest.approx(0.0042) and output["cost_basis"] == "billed"
+    )
+
+
+def test_reused_answers_cost_nothing_in_the_new_test(collections):
+    first = priced_run(collections)
+    run(collections, first)
+    second = priced_run(collections)
+    summary = run(collections, second, classify=FakeEngine())
+    stats = summary["variants"]["B"]
+    assert stats["reused"] == 2 and stats["spent_usd"] == 0
+    assert stats["cost_usd"] == pytest.approx(2 * 200 / 1e6)
+
+
+def test_an_unpriced_model_is_counted_as_unknown(collections):
+    _, runs, results = collections
+    run_id = new_run(collections, size=1)  # no prices
+    summary = run(collections, run_id)
+    assert summary["variants"]["A"]["cost_unknown"] == 1
+    assert results.find_one({"run_id": run_id})["outputs"]["A"]["cost_usd"] is None
+
+
+def test_cost_reaches_exports_and_ticket_verdicts(collections, tmp_path):
+    import csv
+
+    tickets, runs, results = collections
+    run_id = priced_run(collections)
+    run(collections, run_id)
+    for ticket_id in ticket_ids(collections, run_id):
+        ab_test.record_preference(results, run_id, ticket_id, "A", 0)
+    path = ab_test.export_run(
+        runs.find_one({"_id": run_id}),
+        list(results.find({"run_id": run_id})),
+        tmp_path / "out.csv",
+    )
+    row = next(csv.DictReader(path.open()))
+    assert float(row["B_cost_usd"]) == pytest.approx(200 / 1e6)
+    assert row["B_cost_basis"] == "estimated"
+    ab_test.finalize(tickets, runs, results, run_id)
+    verdict = tickets.find_one({"zendesk_id": ticket_ids(collections, run_id)[0]})
+    assert verdict["ab_test_verdicts"][0]["variants"]["B"]["cost_usd"] == pytest.approx(
+        200 / 1e6
+    )

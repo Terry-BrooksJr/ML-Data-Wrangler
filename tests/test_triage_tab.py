@@ -9,6 +9,7 @@ import ab_test_dialog
 import mongomock
 import pytest
 import triage_tab
+from decision_engine import pricing
 from fixtures import CATEGORY_FIXTURES
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5.QtWidgets import QApplication, QMessageBox
@@ -1038,6 +1039,10 @@ def open_ab_test(qapp, tab, monkeypatch, b_primary="new-model"):
     tab.open_ab_test()
     dialog = tab.ab_test_dialog
     dialog.classify = ab_engine
+    dialog.price_source = lambda: {
+        "new-model": pricing.Price(input=10, output=20),
+        "test": pricing.Price(input=1, output=2),
+    }
     wait_until_idle(qapp, tab)
     return dialog
 
@@ -1063,7 +1068,8 @@ def test_ab_test_creates_classifies_and_reviews_blind(
 
     # A fixed mix of orders: each side must show the variant its ticket's
     # stored order names, not always A first.
-    _, results = ab_test.get_collections(ab_tickets.database)
+    runs, results = ab_test.get_collections(ab_tickets.database)
+    assert runs.find_one()["prices"]["new-model"]["input"] == 10.0
     orders = [["B", "A"], ["A", "B"], ["B", "A"]]
     ids = sorted(d["ticket_id"] for d in results.find())
     for ticket_id, order in zip(ids, orders):
@@ -1080,6 +1086,7 @@ def test_ab_test_creates_classifies_and_reviews_blind(
         dialog._show_current()
         texts = [view.toPlainText() for view in dialog.output_views]
         assert [t.splitlines()[0] for t in texts] == [answers[v] for v in order]
+        assert all("Cost: " in t for t in texts)
         assert not any("new-model" in t or "current" in t for t in texts)
     dialog.position = 0
     dialog._show_current()
@@ -1171,3 +1178,57 @@ def test_ab_test_needs_the_model_settings_to_classify(
     dialog.new_run()
     assert dialogs[-1][0] == "warning" and "Not configured" in dialogs[-1][1]
     assert dialog.run_table.rowCount() == 0
+
+
+def test_the_price_table_starts_live_and_marks_edits(qapp, monkeypatch):
+    from decision_engine.classify import EngineConfig
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: shown.append(a[2]))
+    live = {"opus": pricing.Price(input=2.9, output=14.5, cache_read=0.145)}
+    dialog = ab_test_dialog.NewRunDialog(EngineConfig("gpt"), None, live)
+    dialog.b_form.primary.setText("opus")
+    table = dialog.price_table
+    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["gpt", "opus"]
+    assert table.item(1, 1).text() == "2.9" and table.item(1, 5).text() == "live"
+    assert table.item(0, 5).text() == "not listed: enter it"
+    assert set(dialog.prices()) == {"opus"}
+
+    table.item(0, 1).setText("0.065")
+    table.item(0, 2).setText("0.325")
+    assert table.item(0, 5).text() == "entered"
+    prices = dialog.prices()
+    assert prices["gpt"] == pricing.Price(input=0.065, output=0.325, source="entered")
+    assert prices["opus"].source == "live"
+
+    # An edit survives the model list changing.
+    dialog.b_form.confirmation.setText("checker")
+    assert dialog.prices()["gpt"].input == 0.065
+
+    table.item(1, 2).setText("lots")
+    dialog.accept()
+    assert shown and "isn't a number" in shown[-1]
+
+
+def test_each_side_shows_its_cost():
+    text = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 90,
+            "cost_usd": 0.0123,
+            "cost_basis": "billed",
+            "model_calls": 2,
+        }
+    )
+    assert "Cost: $0.01 (billed, 2 model calls)" in text
+    reused = ab_test_dialog.format_output(
+        {
+            "classification": "flag_solve",
+            "confidence": 90,
+            "cost_usd": 0.0001,
+            "cost_basis": "estimated",
+            "model_calls": 1,
+            "reused_from": {"run_id": "x"},
+        }
+    )
+    assert "reused from an earlier test, so nothing was spent here" in reused
