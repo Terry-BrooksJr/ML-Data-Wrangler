@@ -12,13 +12,13 @@ runner, so it runs on a worker thread and never overlaps another tab job.
 Nothing is written to the tickets collection.
 """
 
-import getpass
 import json
 import math
-import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import pin_dialog
+import spend_guard
 from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
 from loguru import logger
@@ -78,11 +78,7 @@ def reviewer_identity() -> str:
     nobody can record a verdict as someone else from this window. It is only
     as trustworthy as the login: anyone signed in as that user is that user.
     """
-    try:
-        user = getpass.getuser()
-    except Exception:  # no login name (some containers)
-        user = "unknown"
-    return f"{user}@{socket.gethostname().split('.')[0]}"
+    return spend_guard.identity()
 
 
 def format_output(output: Optional[dict]) -> str:
@@ -895,6 +891,12 @@ class ABTestDialog(QDialog):
             self._classify(run["_id"], retry_interrupted=retry)
 
     def _classify(self, run_id: str, retry_interrupted: bool = False) -> None:
+        grant = pin_dialog.ask_for_grant(
+            self, "Classifying an A/B test", [spend_guard.CHEAPER_INFERENCE]
+        )
+        if grant is None:
+            self.load_runs()
+            return
         self._stop.clear()
         extra = {"classify": self.classify} if self.classify else {}
 
@@ -915,7 +917,7 @@ class ABTestDialog(QDialog):
                 return None
 
         started = self.run(
-            task,
+            grant.wrap(task),
             "Classifying an A/B run",
             lambda summary: self._classified(run_id, summary),
             lambda _: self._classified(run_id, None, failed=True),
@@ -1123,6 +1125,8 @@ class ABTestDialog(QDialog):
         """Saves the verdict for the ticket shown, then moves to the next one."""
         doc = self._current_doc()
         if doc is None or self.current is None:
+            return
+        if not pin_dialog.allowed(self, spend_guard.REVIEW, "record A/B verdicts"):
             return
         # Map the blind side back to its variant.
         choice = ab_test.blind_choice(doc, int(key)) if key in ("1", "2") else key

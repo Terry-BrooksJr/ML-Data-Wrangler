@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import settings
+import spend_guard
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtCore import (
@@ -49,6 +50,7 @@ import chart_viewer
 import en_core_web_lg
 import macos
 import model_storage
+import pin_dialog
 import tag_normalizer
 import theme
 import topic_store
@@ -802,6 +804,8 @@ class MainWindow(QMainWindow, QDialog):
             logger.error(message)
             QMessageBox.warning(self, "MongoDB Not Configured", message)
             return
+        if not pin_dialog.allowed(self, spend_guard.WRITE_DATA, "write tickets to MongoDB"):
+            return
         try:
             with open(self.wrangler.ticket_file, "r") as tickets_file:
                 tickets = json.load(tickets_file)
@@ -1507,6 +1511,16 @@ app.aboutToQuit.connect(window.join_threads_on_quit)
 app.aboutToQuit.connect(chart_viewer.shutdown)
 
 if __name__ == "__main__":
+    # Paid calls in the app need a PIN per job, never a terminal prompt.
+    spend_guard.gui_mode()
+    try:
+        logger.info(
+            f"Paid model and embedding calls ask for the spending PIN, which is in "
+            f"{spend_guard.ensure_pin()} ({spend_guard.identity()}: "
+            f"{spend_guard.role()})."
+        )
+    except (spend_guard.SecurityError, OSError) as e:
+        logger.error(f"Spending PIN unavailable, so paid calls will be refused: {e}")
     window.show()
     QTimer.singleShot(0, window.prompt_for_missing_settings)
     sys.exit(app.exec_())

@@ -34,6 +34,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import embeddings
 import numpy as np
+import spend_guard
 from decision_engine.evaluation import load_eval_set
 from decision_engine.guards import CLASSIFICATIONS
 from decision_engine.search import terminal_safe
@@ -58,6 +59,7 @@ def _api_embedder(
     def embed(texts: List[str]) -> Tuple[np.ndarray, int]:
         rows, tokens = [], 0
         for start in range(0, len(texts), BATCH_SIZE):
+            spend_guard.require(spend_guard.OPENAI, f"embed with {model}")
             reply = embeddings.post_json(
                 url,
                 api_key,

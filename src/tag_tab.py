@@ -24,6 +24,8 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import embeddings
 import numpy as np
+import pin_dialog
+import spend_guard
 import tag_llm
 import tag_normalizer
 import tag_runs
@@ -313,6 +315,13 @@ class TagTab(QWidget):
         if backend == LLM:
             return self._start_model(tags)
         cached = {text for b, text in self._cache if b == backend}
+        grant = None
+        if backend == VOYAGE:
+            grant = pin_dialog.ask_for_grant(
+                self, "Embedding tags", [spend_guard.VOYAGE]
+            )
+            if grant is None:
+                return False
 
         def task():
             previous = self._read_previous()
@@ -332,7 +341,9 @@ class TagTab(QWidget):
             )
 
         engine = "Voyage AI" if backend == VOYAGE else "spaCy"
-        self._run(task, f"Embedding tags with {engine}", done)
+        self._run(
+            grant.wrap(task) if grant else task, f"Embedding tags with {engine}", done
+        )
         return True
 
     def _start_model(self, tags: List[Tag]) -> bool:
@@ -341,6 +352,13 @@ class TagTab(QWidget):
         Zendesk AI tags are never embedded or sent (tag_llm.split_ignored).
         Earlier decisions (normalized_tags) are not applied to model runs.
         """
+        grant = pin_dialog.ask_for_grant(
+            self,
+            "Normalizing tags with a language model",
+            [spend_guard.CHEAPER_INFERENCE, spend_guard.VOYAGE],
+        )
+        if grant is None:
+            return False
         to_embed, _ = tag_llm.split_ignored(tags)
         missing = [t.text for t in to_embed if (VOYAGE, t.text) not in self._cache]
         known = {
@@ -374,7 +392,9 @@ class TagTab(QWidget):
             self.show_model_result(tags, result)
 
         self._run(
-            task, f"Asking the language model to normalize {len(tags)} tag(s)", done
+            grant.wrap(task),
+            f"Asking the language model to normalize {len(tags)} tag(s)",
+            done,
         )
         return True
 

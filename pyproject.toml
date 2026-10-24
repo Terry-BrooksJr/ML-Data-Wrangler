@@ -75,3 +75,7 @@ dedup_headings = true
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "real_spend_guard: run with the real spending PIN checks (see conftest.py)",
+    "live_spend: makes real paid calls; real PIN checks and secrets folder",
+]

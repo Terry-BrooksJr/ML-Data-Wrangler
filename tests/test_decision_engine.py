@@ -1236,6 +1236,8 @@ live = pytest.mark.skipif(
 )
 
 
+# Paid: needs the spending PIN (LASSO_SPEND_PIN_FILE, since pytest has no terminal).
+@pytest.mark.live_spend
 @pytest.mark.skipif(
     not (
         os.environ.get("RUN_LIVE_EVAL")
@@ -1252,6 +1254,7 @@ def test_live_labelled_set_report():
 
 
 @live
+@pytest.mark.live_spend
 @pytest.mark.parametrize(
     "ticket, expected",
     [(t, c) for c, t in CATEGORY_FIXTURES.items()]

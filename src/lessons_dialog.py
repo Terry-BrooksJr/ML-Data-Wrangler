@@ -11,6 +11,8 @@ import getpass
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
+import pin_dialog
+import spend_guard
 from decision_engine import feedback
 from loguru import logger
 from pymongo.collection import Collection
@@ -230,6 +232,8 @@ class WeeklyReviewDialog(QDialog):
         )
 
     def _reviewer(self, action: str) -> Optional[str]:
+        if not pin_dialog.allowed(self, spend_guard.REVIEW, action):
+            return None
         name = self.reviewer_input.text().strip()
         if not name:
             QMessageBox.warning(
@@ -394,6 +398,8 @@ class WeeklyReviewDialog(QDialog):
 
     def save_draft(self) -> None:
         """Stores the summary as an unapproved lessons_learned entry for the week."""
+        if not pin_dialog.allowed(self, spend_guard.REVIEW, "save a summary"):
+            return
         text = self.draft_input.toPlainText().strip()
         if not text:
             return

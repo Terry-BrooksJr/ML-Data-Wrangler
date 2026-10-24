@@ -29,6 +29,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+import spend_guard
+
 from .guards import apply_guards, CLASSIFICATIONS
 from .prompts import SYSTEM_INSTRUCTIONS
 
@@ -184,6 +186,7 @@ def decide(
     from .classify import EngineError
 
     started = time.monotonic()
+    spend_guard.require(spend_guard.CHEAPER_INFERENCE, f"decide with {model}")
     response = client.post(
         "/v1/decisions",
         cast_to=object,

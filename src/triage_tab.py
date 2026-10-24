@@ -12,6 +12,8 @@ import time
 from typing import Any, Callable, List, Optional
 
 import embeddings
+import pin_dialog
+import spend_guard
 from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
 from ab_test_dialog import ab_collections, ABTestDialog
@@ -742,15 +744,22 @@ class TriageTab(QWidget):
         count = ask_batch_size(self, len(awaiting), optional_models_note())
         if not count:
             return
+        grant = pin_dialog.ask_for_grant(
+            self, f"Reviewing {count} ticket(s)", [spend_guard.CHEAPER_INFERENCE]
+        )
+        if grant is None:
+            return
         chosen = awaiting[:count]
         zendesk_ids = [ticket["zendesk_id"] for ticket in chosen]
         self._warn_optional_models()
         self._cancel.clear()  # a Stop pressed during an earlier batch
         started = self._run(
-            lambda: self.review_batch(
-                self.collection_factory(),
-                list(zendesk_ids),
-                on_progress=self._batch_relay.progress.emit,
+            grant.wrap(
+                lambda: self.review_batch(
+                    self.collection_factory(),
+                    list(zendesk_ids),
+                    on_progress=self._batch_relay.progress.emit,
+                )
             ),
             f"Reviewing {count} ticket(s)",
             self._batch_done,
@@ -840,6 +849,13 @@ class TriageTab(QWidget):
             )
             if answer != QMessageBox.Yes:
                 return
+        grant = (
+            pin_dialog.ask_for_grant(self, "Embedding tickets", [spend_guard.VOYAGE])
+            if plan.embed
+            else spend_guard.Grant("Embedding tickets", frozenset())
+        )
+        if grant is None:
+            return
 
         def embed_and_index():
             tickets = self.collection_factory()
@@ -855,7 +871,9 @@ class TriageTab(QWidget):
             return summary
 
         self._run(
-            embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done
+            grant.wrap(embed_and_index),
+            f"Embedding {len(plan.embed)} ticket(s)",
+            self._embed_done,
         )
 
     def _embed_done(self, summary: dict) -> None:
@@ -900,9 +918,14 @@ class TriageTab(QWidget):
             return
         if not self._configured(REVIEW_ENV, notify=True):
             return
+        grant = pin_dialog.ask_for_grant(
+            self, f"Classifying ticket {zendesk_id}", [spend_guard.CHEAPER_INFERENCE]
+        )
+        if grant is None:
+            return
         self._warn_optional_models()
         self._run(
-            lambda: self.review_one(zendesk_id, self.collection_factory()),
+            grant.wrap(lambda: self.review_one(zendesk_id, self.collection_factory())),
             f"Classifying ticket {zendesk_id}",
             lambda result: self._review_one_done(zendesk_id, result),
         )
@@ -1028,6 +1051,8 @@ class TriageTab(QWidget):
         row = self._selected_row()
         if row is None or not self._configured(READ_ENV, notify=True):
             return
+        if not pin_dialog.allowed(self, spend_guard.REVIEW, "mark reviews correct"):
+            return
         zendesk_id, review_id = row["zendesk_id"], row["review"]["review_id"]
         self._run(
             lambda: feedback.record_outcome(
@@ -1043,6 +1068,8 @@ class TriageTab(QWidget):
         """Asks for the correct category and logs the selected review as misclassified."""
         row = self._selected_row()
         if row is None or not self._configured(READ_ENV, notify=True):
+            return
+        if not pin_dialog.allowed(self, spend_guard.REVIEW, "mark reviews misclassified"):
             return
         zendesk_id, review = row["zendesk_id"], row["review"]
         choices = [c for c in CLASSIFICATIONS if c != review.get("classification")]

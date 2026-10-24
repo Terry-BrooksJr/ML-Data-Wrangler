@@ -59,6 +59,79 @@ that host, use the jsDelivr mirror instead:
 mkdir -p ~/nltk_data/corpora && curl -sSfL -o ~/nltk_data/corpora/stopwords.zip https://cdn.jsdelivr.net/gh/nltk/nltk_data@gh-pages/packages/corpora/stopwords.zip && unzip -oq ~/nltk_data/corpora/stopwords.zip -d ~/nltk_data/corpora
 ```
 
+## Spending PIN, roles and audit log
+
+Every request that costs money (Decision Engine and A/B classification, tag
+normalizing with a language model, Voyage and OpenAI embeddings) needs the
+**spending PIN**. Lasso hands it over the way Jenkins hands over its initial
+admin password: it writes the PIN to a file that only your login can read,
+and you read it from there. Being able to read that file is what authorizes
+spending, so the folder can be a mounted secret an administrator controls.
+
+- **Where:** `spend_pin` in the secrets folder: `LASSO_SECRETS_DIR`, else
+  `secrets/` in the settings folder (`~/Library/Application Support/Lasso/secrets/`
+  on macOS). The app logs the path at launch and shows it when it asks;
+  `cd src && python -m spend_guard where` prints it. The folder is created
+  `0700` and the file `0600`; a folder or file other users can write to is
+  refused.
+- **When it changes:** every 12 hours (`pin_ttl_hours`), and after 5 wrong
+  tries, which also lock paid calls for 15 minutes.
+  `python -m spend_guard rotate` replaces it now. A PIN file in a folder
+  Lasso can't write to (a read-only mount) is used as provided and never
+  replaced.
+- **In the app:** each paid job (Run Batch, Classify One Ticket, Embed Tickets,
+  A/B classification, tag embedding or normalizing) asks for the PIN after
+  its usual confirmation. The PIN authorizes that job only: its own worker
+  thread, and only the services it named. A paid call made any other way is
+  refused before anything is sent.
+- **From the command line:** the first paid call asks for the PIN on the
+  terminal, once per run. For scheduled runs, mount the secrets folder and
+  point `LASSO_SPEND_PIN_FILE` at the PIN file:
+
+  ```bash
+  docker run -v /secure/lasso-secrets:/run/lasso:ro \
+    -e LASSO_SECRETS_DIR=/run/lasso -e LASSO_SPEND_PIN_FILE=/run/lasso/spend_pin ...
+  ```
+
+  The live eval needs it too (pytest has no terminal):
+  `LASSO_SPEND_PIN_FILE=... RUN_LIVE_EVAL=1 uv run pytest -k live`.
+
+**Roles.** `access.json` in the secrets folder assigns each login (`user@host`,
+or `user` on any host) a role. Without the file every login is admin. A file
+that can't be read or names an unknown role makes everyone a viewer.
+
+| Role | Can |
+|---|---|
+| `viewer` | read and export |
+| `reviewer` | + mark reviews correct/misclassified, A/B verdicts, the weekly review |
+| `operator` | + paid calls, writing tickets to MongoDB |
+| `admin` | + change Settings, rotate the PIN |
+
+```json
+{
+  "default_role": "viewer",
+  "users": {"terry@terry-mbp": "admin", "sam": "operator", "ana": "reviewer"},
+  "daily_paid_call_limit": 2000,
+  "pin_ttl_hours": 8
+}
+```
+
+`daily_paid_call_limit` caps paid requests per UTC day on this computer
+(several processes at once can overshoot it slightly).
+`python -m spend_guard whoami` shows your login and role.
+
+**Audit log.** `audit.log` in the settings folder (`LASSO_AUDIT_LOG`), one
+JSON line per PIN attempt, grant, paid request and refusal, with the login.
+The PIN is never logged. It rolls over to `audit.log.1` at 5 MB.
+
+**What this does and doesn't stop.** The PIN stops paid calls started by
+accident, by someone at an unlocked computer who can't read the PIN file, or
+by a script that wasn't given it. Roles and the PIN only bind someone who
+can't edit the secrets folder or Lasso itself: anyone signed in as the
+folder's owner can read the PIN and rewrite `access.json`. To make roles
+binding on a shared computer, have the folder owned by an administrator's
+account (readable by the user, not writable) or mounted read-only.
+
 ## Packaging for distribution
 
 `packaging/build.sh` builds a standalone app with PyInstaller, so users need
@@ -694,7 +767,7 @@ The live eval sends all five category fixtures plus a precedence-conflict
 ticket to the real model. It spends money, so it only runs on request:
 
 ```bash
-RUN_LIVE_EVAL=1 CHEAPER_INFERENCE_API_KEY=... uv run pytest -k live
+RUN_LIVE_EVAL=1 CHEAPER_INFERENCE_API_KEY=... LASSO_SPEND_PIN_FILE=... uv run pytest -k live
 ```
 
 ### Known gaps (open items)

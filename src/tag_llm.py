@@ -50,6 +50,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+import spend_guard
 import yaml
 from decision_engine import classify
 from tag_normalizer import clean_tag, Group, Tag, unit_rows
@@ -273,6 +274,7 @@ def ask_model(
     """
     model = model or model_name()
     client = client or classify.get_client()
+    spend_guard.require(spend_guard.CHEAPER_INFERENCE, f"normalize {len(tags)} tag(s)")
     with client.messages.stream(
         model=model,
         max_tokens=MAX_TOKENS,

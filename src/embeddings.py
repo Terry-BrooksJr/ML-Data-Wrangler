@@ -53,6 +53,7 @@ from decision_engine.classify import api_url_problem
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
+import spend_guard
 
 
 def default_url() -> str:
@@ -540,6 +541,9 @@ def voyage_embed(texts: List[str], cfg: Config, input_type: str):
     Raises:
         ApiError: with the HTTP status only.
     """
+    spend_guard.require(
+        spend_guard.VOYAGE, f"embed {len(texts)} text(s) with {cfg.model}"
+    )
     client = voyage_client(cfg)
     limiter = rate_limiter(cfg)
     attempts = rate_limited = 0

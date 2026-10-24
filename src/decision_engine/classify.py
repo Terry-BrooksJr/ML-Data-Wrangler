@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 import anthropic
 from loguru import logger
 
+import spend_guard
+
 from . import decisions
 from .decisions import DecisionModelNotAllowed
 from .guards import apply_guards, InvalidReply, SOLVE_CONFIDENCE_FLOOR, validate_reply
@@ -426,6 +428,7 @@ def _classify_with(
     started = time.monotonic()
     # Sent only when set: models other than Claude may reject the parameter.
     extra = {"output_config": {"effort": effort}} if effort else {}
+    spend_guard.require(spend_guard.CHEAPER_INFERENCE, f"classify with {model}")
     response = get_client().messages.create(
         model=model,
         max_tokens=max_tokens,

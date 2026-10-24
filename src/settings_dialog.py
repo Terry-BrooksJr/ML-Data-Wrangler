@@ -4,7 +4,9 @@ from itertools import groupby
 from typing import Dict
 from urllib.parse import urlsplit
 
+import pin_dialog
 import settings
+import spend_guard
 from decision_engine.ab_test import collection_name_problem
 from decision_engine.classify import api_url_problem, is_loopback_url
 from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
@@ -183,6 +185,8 @@ class SettingsDialog(QDialog):
     def save(self) -> None:
         """Saves the entered values and closes, or shows why saving failed."""
 
+        if not pin_dialog.allowed(self, spend_guard.CHANGE_SETTINGS, "change settings"):
+            return
         if not (
             self._api_urls_ok()
             and self._dimensions_ok()
