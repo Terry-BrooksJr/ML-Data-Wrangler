@@ -489,6 +489,13 @@ first), then shows progress after each ticket:
 **Stop After This Ticket** lets the ticket being reviewed finish and save, then
 stops; the rest stay awaiting review for the next batch.
 
+**View on Zendesk** opens the selected review's ticket at
+`https://learnositysupport.zendesk.com/agent/tickets/<ticket number>` in a
+new browser window (or tab, depending on the browser). The Weekly Review and
+the A/B test's Blind Review have the same button for the ticket in front of
+you; in an A/B review, Zendesk shows the ticket as it is now, not as the
+models saw it.
+
 ### Feedback and the weekly review
 
 On the Decision Engine tab, select a review and use **Mark Correct** or

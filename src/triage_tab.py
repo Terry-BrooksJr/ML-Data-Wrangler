@@ -15,6 +15,7 @@ import embeddings
 from decision_engine import feedback, persistence, search
 from decision_engine.guards import CLASSIFICATIONS
 from ab_test_dialog import ab_collections, ABTestDialog
+import zendesk_links
 from lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
@@ -411,6 +412,9 @@ class TriageTab(QWidget):
         self.mark_good_button.clicked.connect(self.mark_selected_correct)
         self.mark_bad_button = Button("Mark Misclassified…")
         self.mark_bad_button.clicked.connect(self.mark_selected_misclassified)
+        self.zendesk_button = Button(zendesk_links.BUTTON_TEXT)
+        self.zendesk_button.setToolTip(zendesk_links.BUTTON_TIP)
+        self.zendesk_button.clicked.connect(self.view_selected_on_zendesk)
         self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
         self.weekly_review_button = Button("Weekly Review…")
@@ -427,6 +431,7 @@ class TriageTab(QWidget):
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
+        feedback_row.addWidget(self.zendesk_button)
         feedback_row.addStretch()
         feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
@@ -583,6 +588,8 @@ class TriageTab(QWidget):
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
             button.setEnabled(not busy and has_selection)
+        # Opening a link doesn't touch Mongo, so it works during a job too.
+        self.zendesk_button.setEnabled(has_selection)
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
@@ -1007,10 +1014,17 @@ class TriageTab(QWidget):
         enabled = row is not None and not self.is_busy()
         self.mark_good_button.setEnabled(enabled)
         self.mark_bad_button.setEnabled(enabled)
+        self.zendesk_button.setEnabled(row is not None)
         if row is None:
             self.detail.clear()
             return
         self.detail.setPlainText(format_review(row))
+
+    def view_selected_on_zendesk(self) -> None:
+        """Opens the selected review's ticket in Zendesk."""
+        row = self._selected_row()
+        if row is not None:
+            zendesk_links.open_ticket(row.get("zendesk_id"))
 
     def _selected_row(self) -> Optional[dict]:
         """The loaded row behind the selected table row, or None."""
