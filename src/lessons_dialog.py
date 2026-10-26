@@ -11,6 +11,7 @@ import getpass
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
+import zendesk_links
 from decision_engine import feedback
 from loguru import logger
 from pymongo.collection import Collection
@@ -121,7 +122,11 @@ class WeeklyReviewDialog(QDialog):
         self.log_table.itemSelectionChanged.connect(self._update_buttons)
         self.mark_reviewed_button = Button("Mark Selected Reviewed")
         self.mark_reviewed_button.clicked.connect(self.mark_selected_reviewed)
+        self.zendesk_button = Button(zendesk_links.BUTTON_TEXT)
+        self.zendesk_button.setToolTip(zendesk_links.BUTTON_TIP)
+        self.zendesk_button.clicked.connect(self.view_selected_on_zendesk)
         log_buttons = QHBoxLayout()
+        log_buttons.addWidget(self.zendesk_button)
         log_buttons.addStretch()
         log_buttons.addWidget(self.mark_reviewed_button)
         log_box = Card("Misclassifications")
@@ -203,6 +208,12 @@ class WeeklyReviewDialog(QDialog):
     def _selected_entries(self) -> List[dict]:
         return [self.entries[row] for row in self._selected_rows(self.log_table)]
 
+    def view_selected_on_zendesk(self) -> None:
+        """Opens the selected entry's ticket in Zendesk (one entry selected)."""
+        entries = self._selected_entries()
+        if len(entries) == 1:
+            zendesk_links.open_ticket(entries[0].get("ticket_id"))
+
     def _selected_lesson(self) -> Optional[dict]:
         rows = self._selected_rows(self.lesson_table)
         return self.lessons[rows[0]] if rows else None
@@ -219,6 +230,7 @@ class WeeklyReviewDialog(QDialog):
         self.mark_reviewed_button.setEnabled(
             idle and any(not e.get("reviewed") for e in self._selected_entries())
         )
+        self.zendesk_button.setEnabled(len(self._selected_entries()) == 1)
         lesson = self._selected_lesson()
         self.approve_button.setEnabled(
             idle and lesson is not None and not lesson.get("approved")

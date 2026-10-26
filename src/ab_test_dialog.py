@@ -19,6 +19,7 @@ import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import zendesk_links
 from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
 from loguru import logger
@@ -638,6 +639,13 @@ class ABTestDialog(QDialog):
         nav.addWidget(self.only_unreviewed)
         nav.addWidget(self.prev_button)
         nav.addWidget(self.next_button)
+        self.zendesk_button = Button(zendesk_links.BUTTON_TEXT)
+        self.zendesk_button.setToolTip(
+            zendesk_links.BUTTON_TIP
+            + " Zendesk shows the ticket as it is now, not as the models saw it."
+        )
+        self.zendesk_button.clicked.connect(self.view_current_on_zendesk)
+        nav.addWidget(self.zendesk_button)
 
         mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         self.ticket_view = self._text_view("The ticket appears here.")
@@ -718,6 +726,12 @@ class ABTestDialog(QDialog):
         docs = self.visible()
         return docs[self.position] if 0 <= self.position < len(docs) else None
 
+    def view_current_on_zendesk(self) -> None:
+        """Opens the ticket being reviewed in Zendesk."""
+        doc = self._current_doc()
+        if doc is not None:
+            zendesk_links.open_ticket(doc["ticket_id"])
+
     def _update_buttons(self) -> None:
         selected = self._selected_run() is not None
         idle = not self.classifying
@@ -734,6 +748,7 @@ class ABTestDialog(QDialog):
         doc = self._current_doc()
         self.prev_button.setEnabled(self.position > 0)
         self.next_button.setEnabled(self.position < len(docs) - 1)
+        self.zendesk_button.setEnabled(doc is not None)
         finalized = (self.current or {}).get("status") == ab_test.FINALIZED
         can_judge = doc is not None and ab_test.answered(doc) and idle and not finalized
         for button in self.choice_buttons.values():
