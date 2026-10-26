@@ -86,10 +86,14 @@ def _aware(moment) -> Optional[datetime]:
 
 
 def history_unknown(ticket: dict) -> bool:
-    """True if a transcript entry has no time: whether it came before or
-    after a judgement can't be told, so the ticket can't be rebuilt as of one."""
+    """True if a transcript entry or re-engage attempt has no time: whether
+    it came before or after a judgement can't be told, so the ticket can't be
+    rebuilt as of one."""
     return any(
         _aware(e.get("timestamp")) is None for e in ticket.get("transcript") or []
+    ) or any(
+        _aware(a.get("drafted_at")) is None
+        for a in ticket.get("reengage_attempts") or []
     )
 
 
@@ -208,13 +212,15 @@ def ab_candidates(
 
 
 def review_candidates(
-    tickets: Collection, misclassified: set, counts: dict
+    tickets: Collection, log: Collection, counts: dict
 ) -> Iterator[dict]:
     """Examples from reviews whose latest outcome is "good", one at a time.
 
-    A review also logged as misclassified (misclassified: its review IDs) is
-    left out, so the same answer is never exported both as right and as
-    corrected. Incomplete answers are counted in counts["reviews"].
+    A review also logged as misclassified is left out, so the same answer is
+    never exported both as right and as corrected. The log is checked for
+    each review as it is exported, after its ticket was read, so a
+    correction logged during the export is honoured (the outcome is written
+    before the log entry; see feedback.log_misclassification). Incomplete answers are counted in counts["reviews"].
     """
     for ticket in tickets.find({"outcomes.outcome": "good"}):
         latest = _latest_outcomes(ticket)
@@ -222,7 +228,7 @@ def review_candidates(
             outcome = latest.get(review.get("review_id")) or {}
             if outcome.get("outcome") != "good":
                 continue
-            if review.get("review_id") in misclassified:
+            if log.find_one({"review_id": review.get("review_id")}, {"_id": 1}):
                 counts["contradicted"] += 1
                 continue
             answer = answer_of(review, str(ticket["zendesk_id"]))
@@ -261,13 +267,15 @@ def corrections(log: Collection, reviewed_only: bool = True) -> Iterator[dict]:
     """Reviews marked misclassified, oldest first: the right category, what
     the engine said and the signal it misread. By default only entries
     marked reviewed in the Weekly Review."""
-    query = {"reviewed": True} if reviewed_only else {}
-    # Once per review: the latest entry (logs written before a review had a
-    # single entry can hold several).
+    # Once per review: its latest entry (logs written before a review had a
+    # single entry can hold several), and only then whether that is reviewed,
+    # so an older reviewed entry never stands in for a newer unreviewed one.
     latest: Dict[object, dict] = {}
-    for entry in log.find(query).sort("logged_at", 1):
+    for entry in log.find().sort("logged_at", 1):
         latest[entry.get("review_id") or entry["_id"]] = entry
     for entry in latest.values():
+        if reviewed_only and not entry.get("reviewed"):
+            continue
         yield {
             "ticket_id": str(entry.get("ticket_id")),
             "agent_classification": entry.get("agent_classification"),
@@ -358,11 +366,24 @@ def _journal_path(path: pathlib.Path) -> pathlib.Path:
     return path.with_name(f".{path.name}.publish.json")
 
 
-def _write_journal(journal: pathlib.Path, plan: List[dict]) -> None:
+def _write_journal(
+    journal: pathlib.Path, plan: List[dict], committed: bool = False
+) -> None:
+    """Records a publish's plan, and once every file has moved, that it is
+    committed. Written atomically, so it is always one or the other."""
     handle, tmp = _temp_beside(journal)
     with handle:
-        json.dump(plan, handle)
+        json.dump({"committed": committed, "plan": plan}, handle)
     os.replace(tmp, journal)
+
+
+def _finish(plan: List[dict]) -> None:
+    """Completes a committed publish: every file is in place, so only its
+    leftovers (backups of the replaced files, stray temporaries) go."""
+    for step in plan:
+        if step.get("backup"):
+            pathlib.Path(step["backup"]).unlink(missing_ok=True)
+        pathlib.Path(step["tmp"]).unlink(missing_ok=True)
 
 
 def _roll_back(plan: List[dict]) -> None:
@@ -378,13 +399,22 @@ def _roll_back(plan: List[dict]) -> None:
 
 
 def _recover(path: pathlib.Path) -> None:
-    """Rolls back a publish a stopped export left half done, so the previous
-    matching files are what remains."""
+    """Settles a publish a stopped export left unfinished, so the files
+    always come from one export: a committed one (every file moved) is
+    finished, anything earlier is rolled back to the previous pair."""
     journal = _journal_path(path)
-    if journal.exists():
+    if not journal.exists():
+        return
+    record = json.loads(journal.read_text())
+    if isinstance(record, list):  # journals from before "committed" existed
+        record = {"committed": False, "plan": record}
+    if record["committed"]:
+        logger.warning(f"Finishing an export to {path} that stopped while tidying up.")
+        _finish(record["plan"])
+    else:
         logger.warning(f"Rolling back an unfinished export to {path}.")
-        _roll_back(json.loads(journal.read_text()))
-        journal.unlink()
+        _roll_back(record["plan"])
+    journal.unlink()
 
 
 def _publish(
@@ -393,9 +423,10 @@ def _publish(
     """Moves each written temporary file onto its destination, all or none.
 
     The plan (each move, and the backup of the file it replaces) is
-    journalled first. If a move fails, everything is put back as it was; if
-    the process stops part way, the next export to path rolls it back
-    (_recover).
+    journalled first and marked committed once every file has moved. If a
+    move fails, everything is put back as it was. If the process stops, the
+    next export to path settles it (_recover): rolled back before the
+    commit, finished after it.
     """
     plan = [
         {
@@ -420,9 +451,10 @@ def _publish(
         _roll_back(plan)
         journal.unlink(missing_ok=True)
         raise
-    for step in plan:
-        if step["backup"]:
-            pathlib.Path(step["backup"]).unlink(missing_ok=True)
+    # Every file is in place: commit before deleting any backup, so a stop
+    # from here on is finished, not rolled back with a backup missing.
+    _write_journal(journal, plan, committed=True)
+    _finish(plan)
     journal.unlink(missing_ok=True)
 
 
@@ -522,12 +554,11 @@ def _export_locked(
         ),
         0,
     )
-    misclassified = {entry.get("review_id") for entry in log.find({}, {"review_id": 1})}
 
     def examples() -> Iterator[dict]:
         if ab_runs is not None and ab_results is not None:
             yield from ab_candidates(tickets, ab_runs, ab_results, counts)
-        yield from review_candidates(tickets, misclassified, counts)
+        yield from review_candidates(tickets, log, counts)
 
     data, data_tmp = _temp_beside(path)
     meta_path = path.with_name(path.name[: -len(".jsonl")] + ".meta.jsonl")

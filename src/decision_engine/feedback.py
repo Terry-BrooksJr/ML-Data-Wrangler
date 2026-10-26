@@ -11,8 +11,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 from bson import ObjectId
+from loguru import logger
 from pymongo import ReturnDocument
 from pymongo.collection import Collection
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from .guards import CLASSIFICATIONS
 from .identity import current_user
@@ -84,6 +86,29 @@ def record_outcome(
     return entry
 
 
+def ensure_log_index(log: Collection) -> None:
+    """One misclassification entry per review, enforced by a unique index on
+    review_id. If old duplicates prevent it, they are left as they are (and
+    the export uses each review's latest); the index isn't created."""
+    try:
+        log.create_index(
+            "review_id",
+            unique=True,
+            name="review_id_unique",
+            partialFilterExpression={"review_id": {"$exists": True}},
+        )
+    except (DuplicateKeyError, OperationFailure) as e:
+        logger.warning(
+            f"misclassification_log has duplicate entries for a review; the unique index "
+            f"on review_id wasn't created ({e})."
+        )
+
+
+def _latest_outcome(tickets: Collection, zendesk_id: str, review_id) -> Optional[dict]:
+    doc = tickets.find_one({"zendesk_id": zendesk_id}, {"outcomes": 1}) or {}
+    return _latest_outcomes_full(doc).get(review_id)
+
+
 def log_misclassification(
     tickets: Collection,
     log: Collection,
@@ -95,10 +120,17 @@ def log_misclassification(
 ) -> ObjectId:
     """Records that a review was wrong, and marks its outcome "bad".
 
-    One log entry per review: logging it again (a retry, or a changed mind)
-    updates that entry instead of adding another. If the outcome can't be
-    written, an entry this call created is removed again, so the log never
-    says "wrong" while the outcome still says "good".
+    The outcome is written first, then the log entry, so the log never says
+    "wrong" while the outcome still says "good": if the process stops in
+    between, the review is left marked bad with no correction. If the log
+    write fails, the previous outcome is restored (outcomes are append-only,
+    so it is appended again; "pending" if there was none).
+
+    One log entry per review (a unique index; a racing duplicate retries
+    onto the winner's entry): logging it again updates that entry. A
+    correction that changes (category or misread signal) is no longer
+    reviewed and moves to this week, so it is reviewed again before it
+    counts; a retry with the same values changes nothing.
 
     Returns:
         The misclassification_log entry's _id.
@@ -108,44 +140,93 @@ def log_misclassification(
     review = find_review(tickets, zendesk_id, review_id)
     now = datetime.now(timezone.utc)
     recorded_by = recorded_by or current_user()
-    before = log.find_one({"review_id": review["review_id"]}, {"_id": 1})
-    entry = log.find_one_and_update(
-        {"review_id": review["review_id"]},
-        {
-            "$set": {
-                "correct_classification": correct_classification,
-                "misread_signal": misread_signal,
-                "logged_by": recorded_by,
-            },
-            "$setOnInsert": {
-                "ticket_id": zendesk_id,
-                "agent_classification": review.get("classification"),
-                "logged_at": now,
-                "reviewed": False,
-                "reviewed_by": None,
-                "reviewed_at": None,
-                "week_of": week_of(now),
-            },
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
+    ensure_log_index(log)
+    previous_outcome = _latest_outcome(tickets, zendesk_id, review["review_id"])
+    record_outcome(
+        tickets,
+        zendesk_id,
+        review["review_id"],
+        "bad",
+        detail=f"Should have been {correct_classification}"
+        + (f"; misread: {misread_signal}" if misread_signal else ""),
+        recorded_by=recorded_by,
     )
-    log_id = entry["_id"]
     try:
+        return _upsert_correction(
+            log,
+            review,
+            zendesk_id,
+            correct_classification,
+            misread_signal,
+            recorded_by,
+            now,
+        )
+    except BaseException:
+        restored = previous_outcome or {"outcome": "pending", "detail": ""}
         record_outcome(
             tickets,
             zendesk_id,
             review["review_id"],
-            "bad",
-            detail=f"Should have been {correct_classification}"
-            + (f"; misread: {misread_signal}" if misread_signal else ""),
-            recorded_by=recorded_by,
+            restored["outcome"],
+            detail=restored.get("detail")
+            or "Restored: the correction couldn't be saved.",
+            detection_method=restored.get("detection_method") or "manual",
+            recorded_by=restored.get("recorded_by") or recorded_by,
         )
-    except BaseException:
-        if before is None:
-            log.delete_one({"_id": log_id})
         raise
-    return log_id
+
+
+def _upsert_correction(
+    log: Collection,
+    review: dict,
+    zendesk_id: str,
+    correct_classification: str,
+    misread_signal: str,
+    recorded_by: str,
+    now: datetime,
+) -> ObjectId:
+    existing = log.find_one({"review_id": review["review_id"]})
+    changed = existing is None or (
+        existing.get("correct_classification"),
+        existing.get("misread_signal") or "",
+    ) != (correct_classification, misread_signal or "")
+    fields = {
+        "correct_classification": correct_classification,
+        "misread_signal": misread_signal,
+        "logged_by": recorded_by,
+    }
+    if changed:
+        # A new or changed correction waits for review again, this week.
+        fields.update(
+            {
+                "logged_at": now,
+                "week_of": week_of(now),
+                "reviewed": False,
+                "reviewed_by": None,
+                "reviewed_at": None,
+            }
+        )
+    update = {
+        "$set": fields,
+        "$setOnInsert": {
+            "ticket_id": zendesk_id,
+            "agent_classification": review.get("classification"),
+        },
+    }
+    for attempt in range(2):
+        try:
+            entry = log.find_one_and_update(
+                {"review_id": review["review_id"]},
+                update,
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            return entry["_id"]
+        except DuplicateKeyError:
+            # Another caller inserted it first; update theirs instead.
+            if attempt:
+                raise
+    raise AssertionError("unreachable")
 
 
 def mark_misclassification_reviewed(log: Collection, log_id, reviewed_by: str) -> None:
@@ -271,6 +352,11 @@ def approve_lessons_learned(lessons: Collection, lessons_id, approved_by: str) -
         ).modified_count
         == 1
     )
+
+
+def _latest_outcomes_full(doc: dict) -> Dict[ObjectId, dict]:
+    # Outcomes are only ever appended, so the last one per review is the latest.
+    return {entry.get("review_id"): entry for entry in doc.get("outcomes") or []}
 
 
 def _latest_outcomes(doc: dict) -> Dict[ObjectId, str]:

@@ -530,10 +530,13 @@ until the test is finalized. Older reviews and finalized A/B results are
 rebuilt from the ticket as of the judgement (later comments are left out;
 subject, status, assignee and similar fields are as they are now); the
 metadata marks each example `exact` or `rebuilt`. A ticket with a comment
-that has no time, or with duplicate documents for its ID, isn't rebuilt,
+or re-engage attempt that has no time, or with duplicate documents for its
+ID, isn't rebuilt,
 since its history can't be established. A review marked correct but also
 logged as misclassified is left out, and each review's correction appears
-once (logging a review as misclassified again updates its entry). Only answers made with the
+once (logging a review as misclassified again updates its entry; changing
+the correction puts it back up for review in the current week, and a
+review's latest correction is the one that counts). Only answers made with the
 current prompt are exported by default, since the examples pair them with
 today's prompt. Duplicates of the same input are kept once, preferring A/B
 verdicts. Outcomes and misclassifications now record who made them (the
@@ -566,7 +569,8 @@ python -m decision_engine.training_export examples.md --include-older-prompts
 misclassifications not yet marked reviewed. The command line uses the app's
 saved Settings. Exports to the same file take turns (a lock file stays beside
 it), and the data and metadata files are published together: if an export
-stops part way, the next one restores the previous pair first.
+stops part way, the next one first restores the previous pair, or finishes
+the new one if both files were already in place.
 
 ### A/B testing engine configurations
 

@@ -326,3 +326,143 @@ def test_the_cli_accepts_current_prompt_only():
         parser.parse_args(
             ["x.jsonl", "--current-prompt-only", "--include-older-prompts"]
         )
+
+
+# --- review round 3 ----------------------------------------------------------------
+
+
+def test_a_committed_publish_is_finished_not_rolled_back(db, tmp_path):
+    first = export(db, tmp_path / "out.jsonl")
+    data_path, meta_path = first["files"]
+    plan = []
+    for dest in (data_path, meta_path):
+        handle, tmp = training_export._temp_beside(dest)
+        with handle:
+            handle.write(f"NEW {dest.name}\n")
+        plan.append({"tmp": str(tmp), "dest": str(dest), "backup": str(dest) + ".bak"})
+    journal = training_export._journal_path(data_path)
+    training_export._write_journal(journal, plan)
+    for step in plan:
+        os.replace(step["dest"], step["backup"])
+        os.replace(step["tmp"], step["dest"])
+    training_export._write_journal(journal, plan, committed=True)
+    os.unlink(plan[0]["backup"])  # stopped after removing one backup
+
+    training_export._recover(data_path)
+    assert data_path.read_text() == "NEW out.jsonl\n"
+    assert meta_path.read_text() == "NEW out.meta.jsonl\n"  # the same export
+    assert not any(
+        p.name.endswith((".bak", ".json", ".tmp")) for p in tmp_path.iterdir()
+    )
+
+
+def misclassification_setup():
+    database = mongomock.MongoClient().support_db
+    log, _ = feedback.get_feedback_collections(database)
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    entry = review("flag_solve")
+    ticket["agent_reviews"] = [entry]
+    database.tickets.insert_one(ticket)
+    return database, log, ticket["zendesk_id"], entry["review_id"]
+
+
+def latest_outcome(database, zendesk_id):
+    return database.tickets.find_one({"zendesk_id": zendesk_id})["outcomes"][-1]
+
+
+def test_a_changed_correction_is_reviewed_again(monkeypatch):
+    database, log, zid, rid = misclassification_setup()
+    log_id = feedback.log_misclassification(
+        database.tickets, log, zid, rid, "manual_triage"
+    )
+    feedback.mark_misclassification_reviewed(log, log_id, "lead")
+    feedback.log_misclassification(database.tickets, log, zid, rid, "manual_triage")
+    assert log.find_one()["reviewed"]  # a retry with the same values
+    feedback.log_misclassification(database.tickets, log, zid, rid, "flag_reengage")
+    changed = log.find_one()
+    assert not changed["reviewed"] and changed["reviewed_by"] is None
+    assert changed["correct_classification"] == "flag_reengage"
+    assert log.count_documents({}) == 1
+
+
+def test_a_failed_correction_restores_the_previous_outcome(monkeypatch):
+    database, log, zid, rid = misclassification_setup()
+    feedback.record_outcome(database.tickets, zid, rid, "good", recorded_by="lead")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("log write failed")
+
+    monkeypatch.setattr(feedback, "_upsert_correction", broken)
+    with pytest.raises(RuntimeError):
+        feedback.log_misclassification(database.tickets, log, zid, rid, "manual_triage")
+    assert latest_outcome(database, zid)["outcome"] == "good"
+    assert log.count_documents({}) == 0
+
+
+def test_a_racing_duplicate_updates_the_winners_entry(monkeypatch):
+    from pymongo.errors import DuplicateKeyError
+
+    database, log, zid, rid = misclassification_setup()
+    real = log.find_one_and_update
+    calls = []
+
+    def lose_the_race(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            real(*args, **kwargs)  # the other caller's insert lands first
+            raise DuplicateKeyError("E11000 duplicate key")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(log, "find_one_and_update", lose_the_race)
+    feedback.log_misclassification(database.tickets, log, zid, rid, "manual_triage")
+    assert len(calls) == 2 and log.count_documents({}) == 1
+
+
+def test_the_latest_correction_decides_whether_it_counts():
+    log = mongomock.MongoClient().support_db.misclassification_log
+    rid = ObjectId()
+    base = {"review_id": rid, "ticket_id": "1", "agent_classification": "flag_solve"}
+    log.insert_one(
+        dict(
+            base,
+            correct_classification="manual_triage",
+            reviewed=True,
+            logged_at=NOW - timedelta(days=2),
+        )
+    )
+    log.insert_one(
+        dict(
+            base, correct_classification="flag_reengage", reviewed=False, logged_at=NOW
+        )
+    )
+    assert list(training_export.corrections(log)) == []
+    (fix,) = training_export.corrections(log, reviewed_only=False)
+    assert fix["correct_classification"] == "flag_reengage"
+
+
+def test_untimed_reengage_attempts_block_a_rebuild():
+    ticket = {"transcript": [], "reengage_attempts": [{"attempt_number": 1}]}
+    assert training_export.history_unknown(ticket)
+
+
+def test_a_correction_logged_during_an_export_is_honoured(db):
+    database, log, ab_runs, ab_results = db
+    counts = dict.fromkeys(("reviews", "contradicted", "uncertain_history"), 0)
+    # Two tickets marked correct; the second is corrected mid-export.
+    other = copy.deepcopy(CATEGORY_FIXTURES["escalate_leadership"])
+    other["zendesk_id"] = "99999"
+    late = review("escalate_leadership")
+    other["agent_reviews"] = [late]
+    database.tickets.insert_one(other)
+    feedback.record_outcome(database.tickets, "99999", late["review_id"], "good")
+    candidates = training_export.review_candidates(database.tickets, log, counts)
+    first = next(candidates)  # tickets are read in order; 99999 comes last
+    assert first["ticket_id"] != "99999"
+    before = counts["contradicted"]
+    feedback.log_misclassification(
+        database.tickets, log, "99999", late["review_id"], "manual_triage"
+    )
+    rest = list(candidates)
+    assert "99999" not in [c["ticket_id"] for c in rest]
+    # Left out: 99999, and the fixture's ticket that was already corrected.
+    assert counts["contradicted"] == before + 2
