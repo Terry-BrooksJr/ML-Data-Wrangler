@@ -10,6 +10,7 @@ import mongomock
 import pytest
 import triage_tab
 from decision_engine import pricing
+from decision_engine.zendesk_status import REVIEW_ADDED_KEY
 from fixtures import CATEGORY_FIXTURES
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5.QtWidgets import QApplication, QMessageBox
@@ -447,6 +448,45 @@ def test_mark_correct_records_outcome(qapp, configured, dialogs, tickets, monkey
 
     outcomes = tickets.find_one({"zendesk_id": ticket["zendesk_id"]})["outcomes"]
     assert [o["outcome"] for o in outcomes] == ["good"]
+
+
+def test_review_added_asks_then_marks_the_ticket(qapp, configured, dialogs, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    assert not tab.review_added_button.isEnabled()
+
+    tab.table.selectRow(0)
+    zendesk_id = tab._selected_row()["zendesk_id"]
+    assert "Review added to Zendesk: No" in tab.detail.toPlainText()
+    tab.mark_selected_review_added()
+    wait_until_idle(qapp, tab)
+
+    assert dialogs[-1] == (
+        "question",
+        f"Has the review of ticket {zendesk_id} been manually added to Zendesk?",
+    )
+    assert stored.find_one({"zendesk_id": zendesk_id})[REVIEW_ADDED_KEY] is True
+    # The refresh keeps the row selected and shows the change; it can't be
+    # marked twice.
+    assert tab._selected_row()["zendesk_id"] == zendesk_id
+    assert "Review added to Zendesk: Yes" in tab.detail.toPlainText()
+    assert not tab.review_added_button.isEnabled()
+
+
+def test_review_added_answering_no_changes_nothing(
+    qapp, configured, dialogs, stored, monkeypatch
+):
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    tab.table.selectRow(0)
+    tab.mark_selected_review_added()
+    wait_until_idle(qapp, tab)
+
+    assert stored.count_documents({REVIEW_ADDED_KEY: True}) == 0
 
 
 def test_mark_misclassified_logs_entry(qapp, configured, dialogs, tickets, monkeypatch):

@@ -496,6 +496,17 @@ the A/B test's Blind Review have the same button for the ticket in front of
 you; in an A/B review, Zendesk shows the ticket as it is now, not as the
 models saw it.
 
+**Review Added to Zendesk**, beside it, records that you have copied the
+selected ticket's review into Zendesk by hand. It asks you to confirm, then
+sets the ticket's `Review Added to Zendesk?` field to true; the review detail
+shows the field as Yes or No, and the button is disabled once a ticket is
+marked. New tickets are stored with the field set to false. To add it to
+tickets stored before it existed (safe to re-run), from `src/`:
+
+```bash
+uv run python -m decision_engine.zendesk_status
+```
+
 ### Feedback and the weekly review
 
 On the Decision Engine tab, select a review and use **Mark Correct** or

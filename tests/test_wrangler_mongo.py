@@ -111,6 +111,7 @@ def test_insert_marks_ticket_awaiting_review(wrangler, tickets):
     stored = tickets.find_one({"zendesk_id": "101"})
     assert stored["awaiting_review"] is True
     assert stored["agent_reviews"] == [] and stored["reengage_attempts"] == []
+    assert stored["Review Added to Zendesk?"] is False
 
 
 def test_rewrite_is_idempotent(wrangler, tickets):
