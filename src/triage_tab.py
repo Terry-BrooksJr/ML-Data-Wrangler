@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 import embeddings
-from decision_engine import feedback, persistence, search
+from decision_engine import ab_test, feedback, persistence, search, training_export
 from decision_engine.guards import CLASSIFICATIONS
 from ab_test_dialog import ab_collections, ABTestDialog
 import zendesk_links
@@ -24,6 +24,7 @@ from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -417,6 +418,12 @@ class TriageTab(QWidget):
         self.zendesk_button.clicked.connect(self.view_selected_on_zendesk)
         self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        self.training_button = Button("Export Training Data…")
+        self.training_button.setToolTip(
+            "Save reviews marked correct and A/B verdicts as examples: .jsonl for "
+            "fine-tuning, or .md for few-shot prompting (with corrections)."
+        )
+        self.training_button.clicked.connect(self.export_training_data)
         self.weekly_review_button = Button("Weekly Review…")
         self.weekly_review_button.setToolTip(
             "Review the week's misclassifications and write the lessons learned from them."
@@ -435,6 +442,7 @@ class TriageTab(QWidget):
         feedback_row.addStretch()
         feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
+        feedback_row.addWidget(self.training_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
@@ -583,6 +591,7 @@ class TriageTab(QWidget):
             self.embed_button,
             self.weekly_review_button,
             self.ab_test_button,
+            self.training_button,
         ):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
@@ -1128,6 +1137,39 @@ class TriageTab(QWidget):
             self,
         )
         self.weekly_review_dialog.show()
+
+    def export_training_data(self) -> None:
+        """Saves judged answers as fine-tuning JSONL or few-shot Markdown
+        (decision_engine.training_export), then says what was left out."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Training Data",
+            "triage-examples.jsonl",
+            "Fine-tuning JSONL (*.jsonl);;Few-shot Markdown (*.md)",
+        )
+        if not path:
+            return
+
+        def task():
+            tickets = self.collection_factory()
+            log, _ = feedback.get_feedback_collections(tickets.database)
+            ab_runs, ab_results = ab_test.get_collections(tickets.database)
+            collected = training_export.collect(tickets, log, ab_runs, ab_results)
+            return training_export.describe(
+                collected, training_export.export(collected, path)
+            )
+
+        def done(message: str) -> None:
+            self.status_label.setText(message)
+            QMessageBox.information(
+                self,
+                "Training Data Exported",
+                message + "\n\nThe files hold customer ticket text; review them before sharing.",
+            )
+
+        self._run(task, "Exporting training data", done)
 
     def open_ab_test(self) -> None:
         """Opens the A/B test window: two engine configurations compared blind."""

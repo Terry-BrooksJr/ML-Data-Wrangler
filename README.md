@@ -511,6 +511,45 @@ them for you to edit, and **Save Draft** stores it, unapproved, in
 built on. Select a draft and **Approve Selected** to record who approved it.
 Approved lessons aren't fed back into the prompt yet.
 
+### Exporting training data
+
+**Export Training Data…** (Decision Engine tab) saves the answers people
+judged right as examples for training or prompting the engine:
+
+| Judgement | Becomes |
+|---|---|
+| Review marked **Correct** | An example: the ticket and the engine's answer |
+| A/B verdict **A better** / **B better** | An example with the preferred side's answer |
+| A/B **Equally good** | An example with side A's answer |
+| Review marked **Misclassified** (reviewed in the Weekly Review) | A correction: the right category, the wrong one and the misread signal |
+| A/B **Both wrong**, failed or classification-only answers | Left out: there is no full right answer to learn from |
+
+Each ticket is rebuilt as it was when it was judged (later comments are
+left out), and duplicates of the same input are kept once. Choose the format
+by the file's extension:
+
+- **`.jsonl`**, for fine-tuning: one line per example with
+  `{"messages": [system, user, assistant]}`. The system message is the
+  engine's prompt, the user message the ticket as the engine sees it, and
+  the assistant message the right answer as JSON. Where each example came
+  from (source, ticket, time, model, prompt version, reviewer) is written
+  line for line to `<name>.meta.jsonl`, since fine-tuning APIs reject other
+  keys. Corrections aren't included: they have no full answer.
+- **`.md`**, for few-shot prompts: numbered examples (ticket, then answer),
+  then the corrections.
+
+The files hold customer ticket text and are created readable by you only;
+review them before sharing. From the command line:
+
+```bash
+cd src
+python -m decision_engine.training_export examples.jsonl
+python -m decision_engine.training_export examples.md --current-prompt-only
+```
+
+`--current-prompt-only` leaves out answers made with an older prompt;
+`--all-corrections` includes misclassifications not yet marked reviewed.
+
 ### A/B testing engine configurations
 
 **A/B Test…** on the Decision Engine tab compares the current engine (A)
