@@ -1,3 +1,4 @@
+import hashlib
 import os
 import socket
 import uuid
@@ -5,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional
 
+import bson
 from bson import ObjectId
 from loguru import logger
 from pymongo import MongoClient, ReturnDocument
@@ -18,6 +20,17 @@ from .payload import build_ticket_payload
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
 # the queue; after this many failed attempts it is routed to manual triage.
 MAX_ENGINE_ATTEMPTS = 3
+# A review keeps the payload it was classified on up to this size; a bigger
+# one keeps only its fingerprint, so a ticket document can't outgrow
+# MongoDB's 16 MiB limit through its reviews.
+MAX_SAVED_INPUT_BYTES = 256 * 1024
+# MongoDB refuses a document over 16 MiB; a review that would take its ticket
+# past this sheds its saved input, then its raw reply, to fit.
+MAX_TICKET_BYTES = 15 * 1024 * 1024 + 512 * 1024
+
+
+class ReviewTooLarge(ValueError):
+    """The ticket is too large to take another review, even trimmed."""
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
 
@@ -97,7 +110,26 @@ def _release_claim(
     )
 
 
-def _review_entry(result: dict, engine_error: Optional[str] = None) -> dict:
+def _review_input(payload: Optional[str], as_of: Optional[datetime]) -> dict:
+    """What the review was classified on: the moment, and the exact payload
+    (up to MAX_SAVED_INPUT_BYTES, else only its fingerprint), so it can be
+    reused as a training example exactly as the engine saw it."""
+    if payload is None:
+        return {"as_of": as_of}
+    encoded = payload.encode("utf-8")
+    return {
+        "as_of": as_of,
+        "payload": payload if len(encoded) <= MAX_SAVED_INPUT_BYTES else None,
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _review_entry(
+    result: dict,
+    engine_error: Optional[str] = None,
+    payload: Optional[str] = None,
+    as_of: Optional[datetime] = None,
+) -> dict:
     return {
         "review_id": ObjectId(),  # outcomes[].review_id references this
         "reviewed_at": datetime.now(timezone.utc),
@@ -118,6 +150,7 @@ def _review_entry(result: dict, engine_error: Optional[str] = None) -> dict:
         # this from a deliberate manual_triage abstention.
         "engine_error": engine_error,
         "audit": result.get("audit"),
+        "input": _review_input(payload, as_of),
     }
 
 
@@ -167,8 +200,9 @@ def process_one_ticket(
     if not ticket_doc:
         return None
 
+    as_of = datetime.now(timezone.utc)
     try:
-        payload = build_ticket_payload(ticket_doc)
+        payload = build_ticket_payload(ticket_doc, as_of)
         result = classify_ticket(
             payload,
             reengage_count=len(ticket_doc.get("reengage_attempts") or []),
@@ -210,7 +244,7 @@ def process_one_ticket(
             tickets,
             zendesk_id,
             worker,
-            _review_entry(result, engine_error=str(e)[:1000]),
+            _review_entry(result, engine_error=str(e)[:1000], as_of=as_of),
             {"review_attempts": attempts, "last_engine_error": error_record},
         )
         result["engine_error"] = str(e)
@@ -221,7 +255,7 @@ def process_one_ticket(
         tickets,
         zendesk_id,
         worker,
-        _review_entry(result),
+        _review_entry(result, payload=payload, as_of=as_of),
         assignee=ticket_doc.get("assignee"),
     )
     if saved == REASSIGNED:
@@ -231,6 +265,39 @@ def process_one_ticket(
 
 SAVED, CLAIM_LOST, REASSIGNED = "saved", "claim_lost", "reassigned"
 _NOT_GIVEN = object()
+
+
+def _fit_review(
+    tickets: Collection, zendesk_id: str, entry: dict, extra_set: Optional[dict]
+) -> None:
+    """Trims entry so the ticket stays under MAX_TICKET_BYTES once it is
+    added: first its saved input payload (its fingerprint stays), then its
+    raw reply.
+
+    Raises:
+        ReviewTooLarge: it still doesn't fit.
+    """
+    doc = tickets.find_one({"zendesk_id": zendesk_id}) or {}
+    base = len(bson.encode(doc)) + len(bson.encode({"set": extra_set or {}}))
+
+    def fits() -> bool:
+        return base + len(bson.encode({"review": entry})) <= MAX_TICKET_BYTES
+
+    trims = (
+        ("saved input", entry.get("input") or {}, "payload"),
+        ("raw reply", entry.get("audit") or {}, "raw_response"),
+    )
+    for what, holder, key in trims:
+        if fits():
+            return
+        if holder.get(key):
+            holder[key] = None
+            logger.warning(f"{zendesk_id}: ticket near MongoDB's size limit; review saved without its {what}.")
+    if not fits():
+        raise ReviewTooLarge(
+            f"Ticket {zendesk_id} is too large for MongoDB to store another review "
+            "(16 MiB per document). Trim its stored transcript or reviews."
+        )
 
 
 def _save_review(
@@ -266,6 +333,11 @@ def _save_review(
     }
     if not extra_set:
         update["$unset"].update({"review_attempts": "", "last_engine_error": ""})
+    try:
+        _fit_review(tickets, zendesk_id, entry, extra_set)
+    except ReviewTooLarge:
+        _release_claim(tickets, zendesk_id, worker)
+        raise
     saved = tickets.update_one(match, update)
     if saved.modified_count:
         return SAVED

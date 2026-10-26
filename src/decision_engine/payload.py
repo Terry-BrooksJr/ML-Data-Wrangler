@@ -54,10 +54,10 @@ def build_ticket_payload(ticket_doc: dict, as_of: Optional[datetime] = None) -> 
         "jira_ids": ticket_doc.get("jira_ids", []),
         "transcript": [
             {
-                "author": c["author"],
+                "author": c.get("author"),
                 "role": c.get("role"),
                 "is_internal_note": c.get("is_internal_note"),
-                "timestamp": _iso(c["timestamp"]),
+                "timestamp": _iso(c.get("timestamp")),
                 "body": wrap_untrusted(c.get("body")),
             }
             for c in ticket_doc.get("transcript", [])

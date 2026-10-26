@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable, List, Optional
 
 import embeddings
-from decision_engine import feedback, persistence, search
+from decision_engine import ab_test, feedback, persistence, search, training_export
 from decision_engine.guards import CLASSIFICATIONS
 from ab_test_dialog import ab_collections, ABTestDialog
 import zendesk_links
@@ -24,6 +24,7 @@ from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -55,6 +56,11 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
+# The training-data export's save-dialog filters and the format each picks.
+TRAINING_FORMATS = {
+    "Fine-tuning JSONL (*.jsonl)": "jsonl",
+    "Few-shot Markdown (*.md)": "markdown",
+}
 # Table data role on a row's first cell: its review's ID, to keep it selected.
 REVIEW_ID_ROLE = QtCore.Qt.UserRole + 1
 COLUMNS = [
@@ -417,6 +423,12 @@ class TriageTab(QWidget):
         self.zendesk_button.clicked.connect(self.view_selected_on_zendesk)
         self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
+        self.training_button = Button("Export Training Data…")
+        self.training_button.setToolTip(
+            "Save reviews marked correct and A/B verdicts as examples: .jsonl for "
+            "fine-tuning, or .md for few-shot prompting (with corrections)."
+        )
+        self.training_button.clicked.connect(self.export_training_data)
         self.weekly_review_button = Button("Weekly Review…")
         self.weekly_review_button.setToolTip(
             "Review the week's misclassifications and write the lessons learned from them."
@@ -435,6 +447,7 @@ class TriageTab(QWidget):
         feedback_row.addStretch()
         feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
+        feedback_row.addWidget(self.training_button)
         feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
@@ -583,6 +596,7 @@ class TriageTab(QWidget):
             self.embed_button,
             self.weekly_review_button,
             self.ab_test_button,
+            self.training_button,
         ):
             button.setEnabled(not busy)
         has_selection = self._selected_row() is not None
@@ -1128,6 +1142,45 @@ class TriageTab(QWidget):
             self,
         )
         self.weekly_review_dialog.show()
+
+    def export_training_data(self) -> None:
+        """Saves judged answers as fine-tuning JSONL or few-shot Markdown
+        (decision_engine.training_export), then says what was left out."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+        path, chosen = QFileDialog.getSaveFileName(
+            self,
+            "Export Training Data",
+            "triage-examples.jsonl",
+            ";;".join(TRAINING_FORMATS),
+        )
+        if not path:
+            return
+        # The chosen format wins: its extension is added if the name lacks it.
+        fmt = TRAINING_FORMATS.get(chosen)
+
+        def task():
+            tickets = self.collection_factory()
+            log, _ = feedback.get_feedback_collections(tickets.database)
+            ab_runs, ab_results = ab_test.get_collections(tickets.database)
+            return training_export.describe(
+                training_export.export_training_data(
+                    tickets, log, ab_runs, ab_results, path, fmt=fmt
+                )
+            )
+
+        def done(message: str) -> None:
+            self.status_label.setText(message)
+            QMessageBox.information(
+                self,
+                "Training Data Exported",
+                message
+                + "\n\nOnly answers made with the current prompt are included (the command "
+                "line's --include-older-prompts adds the rest). The files hold customer "
+                "ticket text; review them before sharing.",
+            )
+
+        self._run(task, "Exporting training data", done)
 
     def open_ab_test(self) -> None:
         """Opens the A/B test window: two engine configurations compared blind."""

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import anthropic
 import httpx2
 import mongomock
+from bson import ObjectId
 import pytest
 from decision_engine import classify, evaluation, feedback, persistence
 from decision_engine.payload import build_ticket_payload
@@ -1070,11 +1071,17 @@ def test_weekly_review_marks_lists_and_suggests(reviewed):
     log, lessons = feedback.get_feedback_collections(reviewed.database)
     zendesk_id = CATEGORY_FIXTURES["escalation_internal"]["zendesk_id"]
     review_id = review_id_of(reviewed, "escalation_internal")
+    # A second review of the same ticket, logged separately.
+    later = dict(
+        reviewed.find_one({"zendesk_id": zendesk_id})["agent_reviews"][0],
+        review_id=ObjectId(),
+    )
+    reviewed.update_one({"zendesk_id": zendesk_id}, {"$push": {"agent_reviews": later}})
     first = feedback.log_misclassification(
         reviewed, log, zendesk_id, review_id, "flag_reengage", "48h rule"
     )
     second = feedback.log_misclassification(
-        reviewed, log, zendesk_id, review_id, "flag_reengage", ""
+        reviewed, log, zendesk_id, later["review_id"], "flag_reengage", ""
     )
     now = datetime.now(timezone.utc)
 
