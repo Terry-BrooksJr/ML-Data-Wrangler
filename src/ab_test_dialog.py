@@ -12,16 +12,15 @@ runner, so it runs on a worker thread and never overlaps another tab job.
 Nothing is written to the tickets collection.
 """
 
-import getpass
 import json
 import math
-import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import zendesk_links
 from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
+from decision_engine.identity import current_user
 from loguru import logger
 from pymongo.collection import Collection
 from PyQt5 import QtCore
@@ -73,17 +72,8 @@ BUSY_MESSAGE = "Another Decision Engine job is running. Try again when it finish
 
 
 def reviewer_identity() -> str:
-    """Who is reviewing: the computer login running the app, as user@host.
-
-    Verdicts and tests are recorded under it rather than a typed-in name, so
-    nobody can record a verdict as someone else from this window. It is only
-    as trustworthy as the login: anyone signed in as that user is that user.
-    """
-    try:
-        user = getpass.getuser()
-    except Exception:  # no login name (some containers)
-        user = "unknown"
-    return f"{user}@{socket.gethostname().split('.')[0]}"
+    """Who is reviewing: the computer login (decision_engine.identity)."""
+    return current_user()
 
 
 def format_output(output: Optional[dict]) -> str:

@@ -56,6 +56,11 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
+# The training-data export's save-dialog filters and the format each picks.
+TRAINING_FORMATS = {
+    "Fine-tuning JSONL (*.jsonl)": "jsonl",
+    "Few-shot Markdown (*.md)": "markdown",
+}
 # Table data role on a row's first cell: its review's ID, to keep it selected.
 REVIEW_ID_ROLE = QtCore.Qt.UserRole + 1
 COLUMNS = [
@@ -1143,22 +1148,25 @@ class TriageTab(QWidget):
         (decision_engine.training_export), then says what was left out."""
         if not self._configured(READ_ENV, notify=True):
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, chosen = QFileDialog.getSaveFileName(
             self,
             "Export Training Data",
             "triage-examples.jsonl",
-            "Fine-tuning JSONL (*.jsonl);;Few-shot Markdown (*.md)",
+            ";;".join(TRAINING_FORMATS),
         )
         if not path:
             return
+        # The chosen format wins: its extension is added if the name lacks it.
+        fmt = TRAINING_FORMATS.get(chosen)
 
         def task():
             tickets = self.collection_factory()
             log, _ = feedback.get_feedback_collections(tickets.database)
             ab_runs, ab_results = ab_test.get_collections(tickets.database)
-            collected = training_export.collect(tickets, log, ab_runs, ab_results)
             return training_export.describe(
-                collected, training_export.export(collected, path)
+                training_export.export_training_data(
+                    tickets, log, ab_runs, ab_results, path, fmt=fmt
+                )
             )
 
         def done(message: str) -> None:
@@ -1166,7 +1174,10 @@ class TriageTab(QWidget):
             QMessageBox.information(
                 self,
                 "Training Data Exported",
-                message + "\n\nThe files hold customer ticket text; review them before sharing.",
+                message
+                + "\n\nOnly answers made with the current prompt are included (the command "
+                "line's --include-older-prompts adds the rest). The files hold customer "
+                "ticket text; review them before sharing.",
             )
 
         self._run(task, "Exporting training data", done)

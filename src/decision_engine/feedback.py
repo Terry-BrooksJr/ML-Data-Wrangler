@@ -14,6 +14,7 @@ from bson import ObjectId
 from pymongo.collection import Collection
 
 from .guards import CLASSIFICATIONS
+from .identity import current_user
 
 OUTCOMES = ("good", "bad", "pending")
 DETECTION_METHODS = ("automatic", "manual")
@@ -55,6 +56,7 @@ def record_outcome(
     outcome: str,
     detail: str = "",
     detection_method: str = "manual",
+    recorded_by: Optional[str] = None,
 ) -> dict:
     """Appends an outcome for one review to the ticket's `outcomes`.
 
@@ -74,6 +76,8 @@ def record_outcome(
         "detected_at": datetime.now(timezone.utc),
         "detection_method": detection_method,
         "detail": detail,
+        # Who judged it: the computer login unless given (identity.py).
+        "recorded_by": recorded_by or current_user(),
     }
     tickets.update_one({"zendesk_id": zendesk_id}, {"$push": {"outcomes": entry}})
     return entry
@@ -86,6 +90,7 @@ def log_misclassification(
     review_id,
     correct_classification: str,
     misread_signal: str = "",
+    recorded_by: Optional[str] = None,
 ) -> ObjectId:
     """Records that a review was wrong, and marks its outcome "bad".
 
@@ -96,6 +101,7 @@ def log_misclassification(
         raise ValueError(f"correct_classification must be one of {CLASSIFICATIONS}")
     review = find_review(tickets, zendesk_id, review_id)
     now = datetime.now(timezone.utc)
+    recorded_by = recorded_by or current_user()
     log_id = log.insert_one(
         {
             "ticket_id": zendesk_id,
@@ -104,6 +110,7 @@ def log_misclassification(
             "correct_classification": correct_classification,
             "misread_signal": misread_signal,
             "logged_at": now,
+            "logged_by": recorded_by,
             "reviewed": False,
             "reviewed_by": None,
             "reviewed_at": None,
@@ -117,6 +124,7 @@ def log_misclassification(
         "bad",
         detail=f"Should have been {correct_classification}"
         + (f"; misread: {misread_signal}" if misread_signal else ""),
+        recorded_by=recorded_by,
     )
     return log_id
 

@@ -524,9 +524,19 @@ judged right as examples for training or prompting the engine:
 | Review marked **Misclassified** (reviewed in the Weekly Review) | A correction: the right category, the wrong one and the misread signal |
 | A/B **Both wrong**, failed or classification-only answers | Left out: there is no full right answer to learn from |
 
-Each ticket is rebuilt as it was when it was judged (later comments are
-left out), and duplicates of the same input are kept once. Choose the format
-by the file's extension:
+Inputs are exact where they were saved: each review now keeps the ticket
+payload it was classified on (and when), and an A/B result keeps its payload
+until the test is finalized. Older reviews and finalized A/B results are
+rebuilt from the ticket as of the judgement (later comments are left out;
+subject, status, assignee and similar fields are as they are now); the
+metadata marks each example `exact` or `rebuilt`. A review marked correct
+but also logged as misclassified is left out. Only answers made with the
+current prompt are exported by default, since the examples pair them with
+today's prompt. Duplicates of the same input are kept once, preferring A/B
+verdicts. Outcomes and misclassifications now record who made them (the
+computer login).
+
+Choose the format in the save dialog (it sets the extension):
 
 - **`.jsonl`**, for fine-tuning: one line per example with
   `{"messages": [system, user, assistant]}`. The system message is the
@@ -544,11 +554,13 @@ review them before sharing. From the command line:
 ```bash
 cd src
 python -m decision_engine.training_export examples.jsonl
-python -m decision_engine.training_export examples.md --current-prompt-only
+python -m decision_engine.training_export examples.md --include-older-prompts
 ```
 
-`--current-prompt-only` leaves out answers made with an older prompt;
-`--all-corrections` includes misclassifications not yet marked reviewed.
+`--include-older-prompts` adds answers made with an older prompt;
+`--exact-inputs-only` leaves out rebuilt inputs; `--all-corrections` includes
+misclassifications not yet marked reviewed. The command line uses the app's
+saved Settings.
 
 ### A/B testing engine configurations
 

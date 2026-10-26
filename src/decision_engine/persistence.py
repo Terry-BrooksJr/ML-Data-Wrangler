@@ -1,3 +1,4 @@
+import hashlib
 import os
 import socket
 import uuid
@@ -18,6 +19,10 @@ from .payload import build_ticket_payload
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
 # the queue; after this many failed attempts it is routed to manual triage.
 MAX_ENGINE_ATTEMPTS = 3
+# A review keeps the payload it was classified on up to this size; a bigger
+# one keeps only its fingerprint, so a ticket document can't outgrow
+# MongoDB's 16 MiB limit through its reviews.
+MAX_SAVED_INPUT_BYTES = 256 * 1024
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
 
@@ -97,7 +102,26 @@ def _release_claim(
     )
 
 
-def _review_entry(result: dict, engine_error: Optional[str] = None) -> dict:
+def _review_input(payload: Optional[str], as_of: Optional[datetime]) -> dict:
+    """What the review was classified on: the moment, and the exact payload
+    (up to MAX_SAVED_INPUT_BYTES, else only its fingerprint), so it can be
+    reused as a training example exactly as the engine saw it."""
+    if payload is None:
+        return {"as_of": as_of}
+    encoded = payload.encode("utf-8")
+    return {
+        "as_of": as_of,
+        "payload": payload if len(encoded) <= MAX_SAVED_INPUT_BYTES else None,
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _review_entry(
+    result: dict,
+    engine_error: Optional[str] = None,
+    payload: Optional[str] = None,
+    as_of: Optional[datetime] = None,
+) -> dict:
     return {
         "review_id": ObjectId(),  # outcomes[].review_id references this
         "reviewed_at": datetime.now(timezone.utc),
@@ -118,6 +142,7 @@ def _review_entry(result: dict, engine_error: Optional[str] = None) -> dict:
         # this from a deliberate manual_triage abstention.
         "engine_error": engine_error,
         "audit": result.get("audit"),
+        "input": _review_input(payload, as_of),
     }
 
 
@@ -167,8 +192,9 @@ def process_one_ticket(
     if not ticket_doc:
         return None
 
+    as_of = datetime.now(timezone.utc)
     try:
-        payload = build_ticket_payload(ticket_doc)
+        payload = build_ticket_payload(ticket_doc, as_of)
         result = classify_ticket(
             payload,
             reengage_count=len(ticket_doc.get("reengage_attempts") or []),
@@ -210,7 +236,7 @@ def process_one_ticket(
             tickets,
             zendesk_id,
             worker,
-            _review_entry(result, engine_error=str(e)[:1000]),
+            _review_entry(result, engine_error=str(e)[:1000], as_of=as_of),
             {"review_attempts": attempts, "last_engine_error": error_record},
         )
         result["engine_error"] = str(e)
@@ -221,7 +247,7 @@ def process_one_ticket(
         tickets,
         zendesk_id,
         worker,
-        _review_entry(result),
+        _review_entry(result, payload=payload, as_of=as_of),
         assignee=ticket_doc.get("assignee"),
     )
     if saved == REASSIGNED:
