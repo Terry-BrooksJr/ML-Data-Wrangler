@@ -751,21 +751,24 @@ def test_index_changed_during_the_run_is_an_error_not_a_warning(
 
 @pytest.fixture
 def logged(tickets):
-    """One reviewed ticket logged twice as misclassified this week."""
+    """One ticket with two reviews, each logged as misclassified this week."""
     from bson import ObjectId
     from decision_engine import feedback
 
     ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
     ticket["awaiting_review"] = False
-    ticket["agent_reviews"] = [review("flag_solve", 5, review_id=ObjectId())]
+    ticket["agent_reviews"] = [
+        review("flag_solve", 5, review_id=ObjectId()),
+        review("flag_solve", 15, review_id=ObjectId()),
+    ]
     tickets.insert_one(ticket)
     log, _ = feedback.get_feedback_collections(tickets.database)
-    review_id = ticket["agent_reviews"][0]["review_id"]
+    first, second = (r["review_id"] for r in ticket["agent_reviews"])
     feedback.log_misclassification(
-        tickets, log, ticket["zendesk_id"], review_id, "flag_reengage", "no reply yet"
+        tickets, log, ticket["zendesk_id"], first, "flag_reengage", "no reply yet"
     )
     feedback.log_misclassification(
-        tickets, log, ticket["zendesk_id"], review_id, "flag_reengage"
+        tickets, log, ticket["zendesk_id"], second, "flag_reengage"
     )
     return tickets
 

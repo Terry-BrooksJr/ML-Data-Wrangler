@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional
 
+import bson
 from bson import ObjectId
 from loguru import logger
 from pymongo import MongoClient, ReturnDocument
@@ -23,6 +24,13 @@ MAX_ENGINE_ATTEMPTS = 3
 # one keeps only its fingerprint, so a ticket document can't outgrow
 # MongoDB's 16 MiB limit through its reviews.
 MAX_SAVED_INPUT_BYTES = 256 * 1024
+# MongoDB refuses a document over 16 MiB; a review that would take its ticket
+# past this sheds its saved input, then its raw reply, to fit.
+MAX_TICKET_BYTES = 15 * 1024 * 1024 + 512 * 1024
+
+
+class ReviewTooLarge(ValueError):
+    """The ticket is too large to take another review, even trimmed."""
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
 
@@ -259,6 +267,39 @@ SAVED, CLAIM_LOST, REASSIGNED = "saved", "claim_lost", "reassigned"
 _NOT_GIVEN = object()
 
 
+def _fit_review(
+    tickets: Collection, zendesk_id: str, entry: dict, extra_set: Optional[dict]
+) -> None:
+    """Trims entry so the ticket stays under MAX_TICKET_BYTES once it is
+    added: first its saved input payload (its fingerprint stays), then its
+    raw reply.
+
+    Raises:
+        ReviewTooLarge: it still doesn't fit.
+    """
+    doc = tickets.find_one({"zendesk_id": zendesk_id}) or {}
+    base = len(bson.encode(doc)) + len(bson.encode({"set": extra_set or {}}))
+
+    def fits() -> bool:
+        return base + len(bson.encode({"review": entry})) <= MAX_TICKET_BYTES
+
+    trims = (
+        ("saved input", entry.get("input") or {}, "payload"),
+        ("raw reply", entry.get("audit") or {}, "raw_response"),
+    )
+    for what, holder, key in trims:
+        if fits():
+            return
+        if holder.get(key):
+            holder[key] = None
+            logger.warning(f"{zendesk_id}: ticket near MongoDB's size limit; review saved without its {what}.")
+    if not fits():
+        raise ReviewTooLarge(
+            f"Ticket {zendesk_id} is too large for MongoDB to store another review "
+            "(16 MiB per document). Trim its stored transcript or reviews."
+        )
+
+
 def _save_review(
     tickets: Collection,
     zendesk_id: str,
@@ -292,6 +333,11 @@ def _save_review(
     }
     if not extra_set:
         update["$unset"].update({"review_attempts": "", "last_engine_error": ""})
+    try:
+        _fit_review(tickets, zendesk_id, entry, extra_set)
+    except ReviewTooLarge:
+        _release_claim(tickets, zendesk_id, worker)
+        raise
     saved = tickets.update_one(match, update)
     if saved.modified_count:
         return SAVED

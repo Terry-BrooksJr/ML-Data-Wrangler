@@ -48,10 +48,16 @@ import re
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from loguru import logger
+
+try:  # serialises exports to the same file; not on Windows
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 from pymongo.collection import Collection
 
 from .payload import build_ticket_payload
@@ -79,14 +85,22 @@ def _aware(moment) -> Optional[datetime]:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+def history_unknown(ticket: dict) -> bool:
+    """True if a transcript entry has no time: whether it came before or
+    after a judgement can't be told, so the ticket can't be rebuilt as of one."""
+    return any(
+        _aware(e.get("timestamp")) is None for e in ticket.get("transcript") or []
+    )
+
+
 def ticket_as_of(ticket: dict, as_of: datetime) -> dict:
     """The ticket as it was at as_of, as far as its history allows: later
-    comments and re-engage attempts are left out. An entry with no time
-    can't be placed, so it is kept."""
+    comments and re-engage attempts are left out, and so are entries with no
+    time (callers skip such tickets; see history_unknown)."""
 
     def before(moment) -> bool:
         moment = _aware(moment)
-        return moment is None or moment <= as_of
+        return moment is not None and moment <= as_of
 
     past = dict(ticket)
     past["transcript"] = [
@@ -159,9 +173,15 @@ def ab_candidates(
         payload, kind = result.get("payload"), EXACT
         if not payload:
             # Finalized: the payload was removed, so rebuild it from the ticket.
-            ticket = tickets.find_one({"zendesk_id": result["ticket_id"]})
-            if ticket is None:
+            # Only from an unambiguous ticket: with duplicate documents for
+            # the ID, which one the result was made from can't be told.
+            matches = list(tickets.find({"zendesk_id": result["ticket_id"]}).limit(2))
+            if len(matches) != 1:
                 counts["ab_tests"] += 1
+                continue
+            ticket = matches[0]
+            if history_unknown(ticket):
+                counts["uncertain_history"] += 1
                 continue
             payload, kind = (
                 build_ticket_payload(ticket_as_of(ticket, as_of), as_of),
@@ -215,6 +235,9 @@ def review_candidates(
                 continue
             payload, kind = saved.get("payload"), EXACT
             if not payload:
+                if history_unknown(ticket):
+                    counts["uncertain_history"] += 1
+                    continue
                 payload = build_ticket_payload(ticket_as_of(ticket, as_of), as_of)
                 kind = REBUILT
             yield {
@@ -239,7 +262,12 @@ def corrections(log: Collection, reviewed_only: bool = True) -> Iterator[dict]:
     the engine said and the signal it misread. By default only entries
     marked reviewed in the Weekly Review."""
     query = {"reviewed": True} if reviewed_only else {}
+    # Once per review: the latest entry (logs written before a review had a
+    # single entry can hold several).
+    latest: Dict[object, dict] = {}
     for entry in log.find(query).sort("logged_at", 1):
+        latest[entry.get("review_id") or entry["_id"]] = entry
+    for entry in latest.values():
         yield {
             "ticket_id": str(entry.get("ticket_id")),
             "agent_classification": entry.get("agent_classification"),
@@ -326,26 +354,90 @@ def _temp_beside(path: pathlib.Path):
     return os.fdopen(fd, "w", encoding="utf-8"), pathlib.Path(name)
 
 
-def _publish(pairs: List[Tuple[pathlib.Path, pathlib.Path]]) -> None:
-    """Moves each written temporary file onto its destination, all or none:
-    if one move fails, the files already moved are put back as they were."""
-    moved, backups = [], []
+def _journal_path(path: pathlib.Path) -> pathlib.Path:
+    return path.with_name(f".{path.name}.publish.json")
+
+
+def _write_journal(journal: pathlib.Path, plan: List[dict]) -> None:
+    handle, tmp = _temp_beside(journal)
+    with handle:
+        json.dump(plan, handle)
+    os.replace(tmp, journal)
+
+
+def _roll_back(plan: List[dict]) -> None:
+    """Puts each destination back as it was before the publish began."""
+    for step in reversed(plan):
+        tmp, dest = pathlib.Path(step["tmp"]), pathlib.Path(step["dest"])
+        backup = step.get("backup")
+        if backup and os.path.lexists(backup):
+            os.replace(backup, dest)  # the previous file
+        elif not backup and not tmp.exists() and os.path.lexists(dest):
+            dest.unlink()  # a new file where there was none
+        tmp.unlink(missing_ok=True)
+
+
+def _recover(path: pathlib.Path) -> None:
+    """Rolls back a publish a stopped export left half done, so the previous
+    matching files are what remains."""
+    journal = _journal_path(path)
+    if journal.exists():
+        logger.warning(f"Rolling back an unfinished export to {path}.")
+        _roll_back(json.loads(journal.read_text()))
+        journal.unlink()
+
+
+def _publish(
+    path: pathlib.Path, pairs: List[Tuple[pathlib.Path, pathlib.Path]]
+) -> None:
+    """Moves each written temporary file onto its destination, all or none.
+
+    The plan (each move, and the backup of the file it replaces) is
+    journalled first. If a move fails, everything is put back as it was; if
+    the process stops part way, the next export to path rolls it back
+    (_recover).
+    """
+    plan = [
+        {
+            "tmp": str(tmp),
+            "dest": str(dest),
+            "backup": (
+                str(dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.bak"))
+                if os.path.lexists(dest)
+                else None
+            ),
+        }
+        for tmp, dest in pairs
+    ]
+    journal = _journal_path(path)
+    _write_journal(journal, plan)
     try:
-        for tmp, dest in pairs:
-            if os.path.lexists(dest):
-                backup = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.bak")
-                os.replace(dest, backup)
-                backups.append((backup, dest))
-            os.replace(tmp, dest)
-            moved.append(dest)
+        for step in plan:
+            if step["backup"]:
+                os.replace(step["dest"], step["backup"])
+            os.replace(step["tmp"], step["dest"])
     except BaseException:
-        for dest in moved:
-            dest.unlink(missing_ok=True)
-        for backup, dest in backups:
-            os.replace(backup, dest)
+        _roll_back(plan)
+        journal.unlink(missing_ok=True)
         raise
-    for backup, _ in backups:
-        backup.unlink(missing_ok=True)
+    for step in plan:
+        if step["backup"]:
+            pathlib.Path(step["backup"]).unlink(missing_ok=True)
+    journal.unlink(missing_ok=True)
+
+
+@contextmanager
+def _exclusive(path: pathlib.Path):
+    """Holds a lock beside path for the whole export, so two exports to the
+    same file take turns instead of interleaving their files."""
+    lock_path = path.with_name(f".{path.name}.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
 
 
 def destination(path, fmt: Optional[str] = None) -> Tuple[pathlib.Path, str]:
@@ -389,9 +481,35 @@ def export_training_data(
     Returns:
         {"files": [paths written], "examples", "corrections", "rebuilt",
         "skipped": {"reviews", "ab_tests", "older_prompt", "rebuilt_input",
-        "duplicates", "contradicted"}}.
+        "duplicates", "contradicted", "uncertain_history"}}.
     """
     path, fmt = destination(path, fmt)
+    with _exclusive(path):
+        _recover(path)
+        return _export_locked(
+            tickets,
+            log,
+            ab_runs,
+            ab_results,
+            path,
+            fmt,
+            include_older_prompts,
+            exact_inputs_only,
+            all_corrections,
+        )
+
+
+def _export_locked(
+    tickets,
+    log,
+    ab_runs,
+    ab_results,
+    path: pathlib.Path,
+    fmt: str,
+    include_older_prompts: bool,
+    exact_inputs_only: bool,
+    all_corrections: bool,
+) -> dict:
     counts = dict.fromkeys(
         (
             "reviews",
@@ -400,6 +518,7 @@ def export_training_data(
             "rebuilt_input",
             "duplicates",
             "contradicted",
+            "uncertain_history",
         ),
         0,
     )
@@ -455,7 +574,7 @@ def export_training_data(
         if meta is not None:
             meta.close()
         pairs = [(data_tmp, path)] + ([(meta_tmp, meta_path)] if meta_tmp else [])
-        _publish(pairs)
+        _publish(path, pairs)
     finally:
         for handle in (data, meta):
             if handle is not None and not handle.closed:
@@ -484,6 +603,10 @@ def describe(summary: dict) -> str:
                 skipped["contradicted"],
                 "marked correct but also logged as misclassified",
             ),
+            (
+                skipped["uncertain_history"],
+                "whose comments without a time made the input impossible to rebuild",
+            ),
             (skipped["reviews"], "correct review(s) without a full answer"),
             (skipped["ab_tests"], "A/B verdict(s) with no full answer to learn from"),
             (skipped["duplicates"], "duplicate input(s)"),
@@ -505,12 +628,18 @@ def describe(summary: dict) -> str:
     return text
 
 
-def main(argv: List[str]) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m decision_engine.training_export")
     parser.add_argument(
         "path", help="examples.jsonl (fine-tuning) or examples.md (few-shot)"
     )
-    parser.add_argument(
+    prompts = parser.add_mutually_exclusive_group()
+    prompts.add_argument(
+        "--current-prompt-only",
+        action="store_true",
+        help="only answers made with the current prompt (the default)",
+    )
+    prompts.add_argument(
         "--include-older-prompts",
         action="store_true",
         help="also export answers made with an older prompt (paired with today's)",
@@ -525,7 +654,11 @@ def main(argv: List[str]) -> int:
         action="store_true",
         help="include misclassifications not yet marked reviewed",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: List[str]) -> int:
+    args = build_parser().parse_args(argv)
 
     try:  # the app's saved Settings, like the app itself (run from src/)
         import settings

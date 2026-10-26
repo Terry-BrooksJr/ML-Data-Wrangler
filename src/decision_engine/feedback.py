@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 from bson import ObjectId
+from pymongo import ReturnDocument
 from pymongo.collection import Collection
 
 from .guards import CLASSIFICATIONS
@@ -94,6 +95,11 @@ def log_misclassification(
 ) -> ObjectId:
     """Records that a review was wrong, and marks its outcome "bad".
 
+    One log entry per review: logging it again (a retry, or a changed mind)
+    updates that entry instead of adding another. If the outcome can't be
+    written, an entry this call created is removed again, so the log never
+    says "wrong" while the outcome still says "good".
+
     Returns:
         The misclassification_log entry's _id.
     """
@@ -102,30 +108,43 @@ def log_misclassification(
     review = find_review(tickets, zendesk_id, review_id)
     now = datetime.now(timezone.utc)
     recorded_by = recorded_by or current_user()
-    log_id = log.insert_one(
+    before = log.find_one({"review_id": review["review_id"]}, {"_id": 1})
+    entry = log.find_one_and_update(
+        {"review_id": review["review_id"]},
         {
-            "ticket_id": zendesk_id,
-            "review_id": review["review_id"],
-            "agent_classification": review.get("classification"),
-            "correct_classification": correct_classification,
-            "misread_signal": misread_signal,
-            "logged_at": now,
-            "logged_by": recorded_by,
-            "reviewed": False,
-            "reviewed_by": None,
-            "reviewed_at": None,
-            "week_of": week_of(now),
-        }
-    ).inserted_id
-    record_outcome(
-        tickets,
-        zendesk_id,
-        review["review_id"],
-        "bad",
-        detail=f"Should have been {correct_classification}"
-        + (f"; misread: {misread_signal}" if misread_signal else ""),
-        recorded_by=recorded_by,
+            "$set": {
+                "correct_classification": correct_classification,
+                "misread_signal": misread_signal,
+                "logged_by": recorded_by,
+            },
+            "$setOnInsert": {
+                "ticket_id": zendesk_id,
+                "agent_classification": review.get("classification"),
+                "logged_at": now,
+                "reviewed": False,
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "week_of": week_of(now),
+            },
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
+    log_id = entry["_id"]
+    try:
+        record_outcome(
+            tickets,
+            zendesk_id,
+            review["review_id"],
+            "bad",
+            detail=f"Should have been {correct_classification}"
+            + (f"; misread: {misread_signal}" if misread_signal else ""),
+            recorded_by=recorded_by,
+        )
+    except BaseException:
+        if before is None:
+            log.delete_one({"_id": log_id})
+        raise
     return log_id
 
 
@@ -329,7 +348,9 @@ def get_feedback_collections(database) -> tuple:
     The names are read here, not at import, so a saved setting applies at once.
     """
     return (
-        database[os.environ.get("MISCLASSIFICATION_COLLECTION", "misclassification_log")],
+        database[
+            os.environ.get("MISCLASSIFICATION_COLLECTION", "misclassification_log")
+        ],
         database[os.environ.get("LESSONS_COLLECTION", "lessons_learned")],
     )
 

@@ -529,8 +529,11 @@ payload it was classified on (and when), and an A/B result keeps its payload
 until the test is finalized. Older reviews and finalized A/B results are
 rebuilt from the ticket as of the judgement (later comments are left out;
 subject, status, assignee and similar fields are as they are now); the
-metadata marks each example `exact` or `rebuilt`. A review marked correct
-but also logged as misclassified is left out. Only answers made with the
+metadata marks each example `exact` or `rebuilt`. A ticket with a comment
+that has no time, or with duplicate documents for its ID, isn't rebuilt,
+since its history can't be established. A review marked correct but also
+logged as misclassified is left out, and each review's correction appears
+once (logging a review as misclassified again updates its entry). Only answers made with the
 current prompt are exported by default, since the examples pair them with
 today's prompt. Duplicates of the same input are kept once, preferring A/B
 verdicts. Outcomes and misclassifications now record who made them (the
@@ -557,10 +560,13 @@ python -m decision_engine.training_export examples.jsonl
 python -m decision_engine.training_export examples.md --include-older-prompts
 ```
 
-`--include-older-prompts` adds answers made with an older prompt;
+`--include-older-prompts` adds answers made with an older prompt
+(`--current-prompt-only`, the default, can be given explicitly);
 `--exact-inputs-only` leaves out rebuilt inputs; `--all-corrections` includes
 misclassifications not yet marked reviewed. The command line uses the app's
-saved Settings.
+saved Settings. Exports to the same file take turns (a lock file stays beside
+it), and the data and metadata files are published together: if an export
+stops part way, the next one restores the previous pair first.
 
 ### A/B testing engine configurations
 
