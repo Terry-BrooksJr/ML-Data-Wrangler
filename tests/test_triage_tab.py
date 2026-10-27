@@ -474,6 +474,20 @@ def test_review_added_asks_then_marks_the_ticket(qapp, configured, dialogs, stor
     assert not tab.review_added_button.isEnabled()
 
 
+def test_copy_puts_the_whole_review_on_the_clipboard(qapp, configured, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    assert not tab.copy_button.isEnabled()
+
+    tab.table.selectRow(0)
+    assert tab.copy_button.isEnabled() and not tab.copy_button.icon().isNull()
+    tab.copy_selected_review()
+
+    assert QApplication.clipboard().text() == format_review(tab._selected_row())
+    assert "copied" in tab.status_label.text()
+
+
 def test_review_added_answering_no_changes_nothing(
     qapp, configured, dialogs, stored, monkeypatch
 ):

@@ -26,6 +26,7 @@ from siui.components.container import SiPanelCard
 from siui.components.editbox import SiCapsuleLineEdit
 from siui.components.progress_bar_ import SiProgressBarRefactor
 from siui.components.slider_ import SiScrollBar
+from siui.core import SiGlobal
 
 DISABLED_OPACITY = 0.4
 
@@ -54,6 +55,12 @@ def _dim_when_disabled(widget: QWidget) -> None:
         effect = QGraphicsOpacityEffect(widget)
         widget.setGraphicsEffect(effect)
     effect.setOpacity(1.0 if widget.isEnabled() else DISABLED_OPACITY)
+
+
+def fluent_icon(name: str) -> bytes:
+    """SVG data for one of SiliconUI's bundled Fluent icons, e.g.
+    "ic_fluent_copy_regular", in its default (light) icon colour."""
+    return SiGlobal.siui.iconpack.get(name)
 
 
 class Button(SiPushButtonRefactor):
