@@ -665,6 +665,21 @@ def test_tickets_whose_text_is_gone_lose_their_vectors(env, tickets):
     assert "embedding" not in doc and "embedding_meta" not in doc
 
 
+def test_stop_while_clearing_leaves_the_rest_for_the_next_run(env, tickets):
+    cfg, calls = embeddings.config(), []
+    _backfill(tickets, cfg, calls)
+    tickets.update_many({}, {"$set": {"subject": "", "transcript": []}})
+    plan = embeddings.plan_backfill(tickets, cfg)
+    assert len(plan.clear) == 2
+    stops = iter([False, True])
+
+    summary = embeddings.run_backfill(
+        tickets, cfg, plan, should_stop=lambda: next(stops), embed_fn=_fake_embed(calls)
+    )
+    assert (summary["cleared"], summary["cancelled"], summary["complete"]) == (1, 1, False)
+    assert tickets.count_documents({"embedding": {"$exists": True}}) == 1
+
+
 def test_duplicate_zendesk_ids_each_get_their_own_vector(env):
     collection = mongomock.MongoClient().db.tickets
     collection.insert_many(

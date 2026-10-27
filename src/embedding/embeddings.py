@@ -810,7 +810,13 @@ def run_backfill(
         "complete": False,
     }
     with backfill_lock(tickets) as renew:
-        for doc_id in plan.clear:
+        for done, doc_id in enumerate(plan.clear):
+            if should_stop and should_stop():
+                summary["cancelled"] = len(plan.clear) - done + len(plan.embed)
+                logger.warning(
+                    f"Embedding cancelled; {summary['cancelled']} ticket(s) not started."
+                )
+                return summary
             result = tickets.update_one(
                 {"_id": doc_id}, {"$unset": {"embedding": "", "embedding_meta": ""}}
             )

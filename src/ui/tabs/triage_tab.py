@@ -14,6 +14,7 @@ from typing import Any, Callable, List, Optional
 from embedding import embeddings
 from decision_engine import ab_test, feedback, persistence, search, training_export
 from decision_engine.zendesk_status import (
+    ADDED_REVIEWS_KEY,
     mark_review_added,
     REVIEW_ADDED_KEY,
     review_added,
@@ -83,6 +84,8 @@ COLUMNS = [
     "Added to Zendesk",
 ]
 SUBJECT_MAX_WIDTH = 280
+# The most reviews the table loads: past this, its widgets use too much memory.
+REVIEW_ROW_LIMIT = 5000
 # The Decision column's text for each manual outcome; "pending" shows blank.
 DECISION_LABELS = {"good": "Correct", "bad": "Misclassified"}
 CONNECTION_HINT = (
@@ -132,18 +135,18 @@ def count_awaiting(tickets: Collection) -> int:
     return tickets.count_documents({"awaiting_review": True})
 
 
-def recent_reviews(tickets: Collection, limit: Optional[int] = None) -> List[dict]:
-    """Returns every review across all tickets (or the newest `limit`), newest first.
+def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[dict]:
+    """Returns the newest `limit` reviews across all tickets, newest first.
 
     Each row is {"zendesk_id", "subject", "outcomes", REVIEW_ADDED_KEY,
-    "review"}, where review is one agent_reviews entry exactly as the engine
-    stored it.
+    ADDED_REVIEWS_KEY, "review"}, where review is one agent_reviews entry
+    exactly as the engine stored it.
     """
     pipeline = [
         {"$match": {"agent_reviews.0": {"$exists": True}}},
         {"$unwind": "$agent_reviews"},
         {"$sort": {"agent_reviews.reviewed_at": -1}},
-        *([{"$limit": limit}] if limit else []),
+        {"$limit": limit},
         {
             "$project": {
                 "_id": 0,
@@ -151,11 +154,12 @@ def recent_reviews(tickets: Collection, limit: Optional[int] = None) -> List[dic
                 "subject": 1,
                 "outcomes": 1,
                 REVIEW_ADDED_KEY: 1,
+                ADDED_REVIEWS_KEY: 1,
                 "review": "$agent_reviews",
             }
         },
     ]
-    # Without a limit the sort can pass Atlas's in-memory cap, so let it spill to disk.
+    # A large sort can pass Atlas's in-memory cap, so let it spill to disk.
     return list(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
@@ -204,7 +208,7 @@ def format_review(row: dict) -> str:
             "",
             f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
         ]
-    lines += ["", f"Review added to Zendesk: {'Yes' if review_added(row) else 'No'}"]
+    lines += ["", f"Review added to Zendesk: {'Yes' if row_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
             "",
@@ -222,6 +226,15 @@ def format_review(row: dict) -> str:
     return "\n".join(lines)
 
 
+def row_added(row: dict) -> bool:
+    """Whether this row's review was added to Zendesk."""
+    return review_added(row, row["review"].get("review_id"))
+
+
+# What a review row carries from its ticket, besides the review itself.
+TICKET_STATE_FIELDS = ("outcomes", REVIEW_ADDED_KEY, ADDED_REVIEWS_KEY)
+
+
 def latest_outcome(row: dict) -> Optional[dict]:
     """The newest outcome recorded for this row's review, or None."""
     review_id = row["review"].get("review_id")
@@ -237,13 +250,13 @@ def decision_label(row: dict) -> str:
 def fully_handled(row: dict) -> bool:
     """True once a review has a decision and is added to Zendesk; the table
     greys these rows out."""
-    return bool(decision_label(row)) and review_added(row)
+    return bool(decision_label(row)) and row_added(row)
 
 
 def awaiting_decision(row: dict) -> bool:
     """True while a review is neither marked correct or misclassified nor
     added to Zendesk."""
-    return not decision_label(row) and not review_added(row)
+    return not decision_label(row) and not row_added(row)
 
 
 def step_awaiting(rows: List[dict], current: Optional[int], step: int) -> Optional[int]:
@@ -860,7 +873,10 @@ class TriageTab(QWidget):
                 refresh task.
         """
         awaiting, rows = loaded
-        self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
+        status = f"{awaiting} ticket(s) awaiting review."
+        if len(rows) >= REVIEW_ROW_LIMIT:
+            status += f" Showing the newest {REVIEW_ROW_LIMIT:,} reviews."
+        self.status_label.setText(status)
         self._rows = rows
         self._fill_table()
 
@@ -900,12 +916,27 @@ class TriageTab(QWidget):
         zendesk_ids = [ticket["zendesk_id"] for ticket in chosen]
         self._warn_optional_models()
         self._cancel.clear()  # a Stop pressed during an earlier batch
+
+        def review_chosen():
+            tickets = self.collection_factory()
+
+            def with_ticket_state(progress: dict) -> None:
+                # Read here, on the batch's thread: a re-reviewed ticket's new
+                # row must show its outcomes and Zendesk status like a refresh.
+                if progress.get("review") is not None:
+                    ticket = tickets.find_one(
+                        {"zendesk_id": progress["zendesk_id"]},
+                        {field: 1 for field in TICKET_STATE_FIELDS},
+                    )
+                    progress = {**progress, "ticket": ticket or {}}
+                self._batch_relay.progress.emit(progress)
+
+            return self.review_batch(
+                tickets, list(zendesk_ids), on_progress=with_ticket_state
+            )
+
         started = self._run(
-            lambda: self.review_batch(
-                self.collection_factory(),
-                list(zendesk_ids),
-                on_progress=self._batch_relay.progress.emit,
-            ),
+            review_chosen,
             f"Reviewing {count} ticket(s)",
             self._batch_done,
         )
@@ -948,12 +979,14 @@ class TriageTab(QWidget):
         review = progress.get("review")
         if review is not None:
             zendesk_id = progress["zendesk_id"]
+            ticket = progress.get("ticket") or {}
             row = {
                 "zendesk_id": zendesk_id,
                 "subject": self._batch["subjects"].get(zendesk_id),
+                **{field: ticket[field] for field in TICKET_STATE_FIELDS if field in ticket},
                 "review": review,
             }
-            self._rows = [row, *self._rows]
+            self._rows = [row, *self._rows][:REVIEW_ROW_LIMIT]
             self._fill_table()
 
     def start_embed_tickets(self) -> None:
@@ -1210,7 +1243,7 @@ class TriageTab(QWidget):
                 f"{reviewed_at:%Y-%m-%d %H:%M}" if reviewed_at else "",
                 review.get("model_version"),
                 decision_label(row),
-                "Yes" if review_added(row) else "No",
+                "Yes" if row_added(row) else "No",
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem()
@@ -1287,7 +1320,7 @@ class TriageTab(QWidget):
         """Enabled for a selected ticket not yet marked, while no job runs."""
         row = self._selected_row()
         self.review_added_button.setEnabled(
-            not busy and row is not None and not review_added(row)
+            not busy and row is not None and not row_added(row)
         )
 
     def mark_selected_review_added(self) -> None:
@@ -1296,7 +1329,7 @@ class TriageTab(QWidget):
         row = self._selected_row()
         if row is None or not self._configured(READ_ENV, notify=True):
             return
-        zendesk_id = row["zendesk_id"]
+        zendesk_id, review_id = row["zendesk_id"], row["review"].get("review_id")
         answer = QMessageBox.question(
             self,
             REVIEW_ADDED_BUTTON,
@@ -1307,7 +1340,7 @@ class TriageTab(QWidget):
         if answer != QMessageBox.Yes:
             return
         self._run(
-            lambda: mark_review_added(self.collection_factory(), zendesk_id),
+            lambda: mark_review_added(self.collection_factory(), zendesk_id, review_id),
             f"Marking ticket {zendesk_id}",
             lambda found: self._feedback_done(
                 f"Ticket {zendesk_id}: review marked as added to Zendesk."
