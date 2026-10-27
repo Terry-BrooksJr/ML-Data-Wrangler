@@ -13,7 +13,10 @@ from decision_engine import pricing
 from decision_engine.zendesk_status import REVIEW_ADDED_KEY
 from fixtures import CATEGORY_FIXTURES
 from pymongo.errors import ServerSelectionTimeoutError
+from PyQt5 import QtCore
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QApplication, QMessageBox
+from ui import theme
 from ui.tabs.triage_tab import count_awaiting, format_review, recent_reviews, TriageTab
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
@@ -79,6 +82,15 @@ def test_recent_reviews_respects_limit(stored):
     assert len(recent_reviews(stored, limit=2)) == 2
 
 
+def test_recent_reviews_returns_more_than_the_old_200(stored):
+    for minutes_ago in range(250):
+        stored.update_one(
+            {"zendesk_id": CATEGORY_FIXTURES["flag_solve"]["zendesk_id"]},
+            {"$push": {"agent_reviews": review("flag_solve", 100 + minutes_ago)}},
+        )
+    assert len(recent_reviews(stored)) == 253
+
+
 def test_format_review_includes_draft_only_when_present(stored):
     rows = {row["review"]["classification"]: row for row in recent_reviews(stored)}
     assert "Draft message (unsent):\nAny update?" in format_review(
@@ -131,7 +143,7 @@ def dialogs(monkeypatch):
 
 def wait_until_idle(qapp, tab, timeout=5.0):
     deadline = time.monotonic() + timeout
-    while tab._thread is not None or not tab.refresh_button.isEnabled():
+    while tab.is_busy() or not tab.refresh_button.isEnabled():
         qapp.processEvents()
         assert time.monotonic() < deadline, "background job did not finish"
         time.sleep(0.01)
@@ -370,6 +382,37 @@ def test_review_all_shows_batch_summary(qapp, configured, dialogs, stored):
     assert "Engine errors (left in the queue to retry): 2" in dialogs[-1][1]
 
 
+def test_batch_rows_carry_the_tickets_zendesk_status(qapp, configured, dialogs, stored):
+    # A ticket marked added before reviews were tracked is re-reviewed.
+    zendesk_id = CATEGORY_FIXTURES["flag_reengage"]["zendesk_id"]
+    stored.update_one({"zendesk_id": zendesk_id}, {"$set": {REVIEW_ADDED_KEY: True}})
+    new_review = review("flag_solve", 0)
+    progress = {
+        "zendesk_id": zendesk_id,
+        "outcome": "classified",
+        "review": new_review,
+        "done": 1,
+        "total": 1,
+        "summary": {},
+    }
+    tab = make_tab(stored, review_batch=lambda tickets, ids, on_progress=None: on_progress(progress))
+    emitted = []
+    tab._batch_relay.progress.connect(emitted.append)
+    tab.start_batch()
+    wait_until_idle(qapp, tab)
+
+    assert emitted[0]["ticket"][REVIEW_ADDED_KEY] is True
+    tab._batch = {"total": 1, "started": time.monotonic(), "subjects": {}}
+    tab._on_batch_progress(emitted[0])
+    assert triage_tab.row_added(tab._rows[0])
+    added = triage_tab.COLUMNS.index("Added to Zendesk")
+    newest = next(
+        r for r in range(tab.table.rowCount())
+        if tab.table.item(r, 0).data(QtCore.Qt.UserRole) == 0
+    )
+    assert tab.table.item(newest, added).text() == "Yes"
+
+
 def test_review_all_warns_when_batch_stopped(qapp, configured, dialogs, stored):
     summary = {
         "classified": 0,
@@ -486,6 +529,115 @@ def test_copy_puts_the_whole_review_on_the_clipboard(qapp, configured, stored):
 
     assert QApplication.clipboard().text() == format_review(tab._selected_row())
     assert "copied" in tab.status_label.text()
+
+
+def test_table_shows_decision_and_added_to_zendesk(qapp, configured, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    first, second = tab._rows[0], tab._rows[1]
+    stored.update_one(
+        {"zendesk_id": first["zendesk_id"]},
+        {"$set": {"outcomes": [{"review_id": first["review"]["review_id"], "outcome": "good"}]}},
+    )
+    stored.update_one(
+        {"zendesk_id": second["zendesk_id"]},
+        {"$set": {
+            REVIEW_ADDED_KEY: True,
+            "outcomes": [{"review_id": second["review"]["review_id"], "outcome": "bad"}],
+        }},
+    )
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    def column(name):
+        index = triage_tab.COLUMNS.index(name)
+        return [tab.table.item(row, index).text() for row in range(3)]
+
+    assert column("Decision") == ["Correct", "Misclassified", ""]
+    assert column("Added to Zendesk") == ["No", "Yes", "No"]
+    # Only the review with both a decision and the Zendesk flag is greyed out.
+    faint = QColor(theme.TEXT_FAINT)
+    greyed = [tab.table.item(row, 0).foreground().color() == faint for row in range(3)]
+    assert greyed == [False, True, False]
+
+
+def test_step_awaiting_skips_decided_and_added_rows():
+    rows = [
+        {"zendesk_id": "1", "review": {"review_id": "a"}},
+        {"zendesk_id": "2", "review": {"review_id": "b"},
+         "outcomes": [{"review_id": "b", "outcome": "good"}]},
+        {"zendesk_id": "3", "review": {"review_id": "c"}, REVIEW_ADDED_KEY: True},
+        {"zendesk_id": "4", "review": {"review_id": "d"},
+         "outcomes": [{"review_id": "d", "outcome": "pending"}]},
+        {"zendesk_id": "5", "review": {"review_id": "e"},
+         "outcomes": [{"review_id": "e", "outcome": "bad"}]},
+    ]
+    assert triage_tab.step_awaiting(rows, None, 1) == 0
+    assert triage_tab.step_awaiting(rows, None, -1) is None
+    assert triage_tab.step_awaiting(rows, 0, 1) == 3
+    assert triage_tab.step_awaiting(rows, 3, 1) is None
+    assert triage_tab.step_awaiting(rows, 4, -1) == 3
+    assert triage_tab.step_awaiting(rows, 3, -1) == 0
+
+
+def test_next_and_previous_move_between_undecided_reviews(qapp, configured, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    # The middle review is already added to Zendesk, so navigation skips it.
+    stored.update_one(
+        {"zendesk_id": tab._rows[1]["zendesk_id"]}, {"$set": {REVIEW_ADDED_KEY: True}}
+    )
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    newest, oldest = tab._rows[0]["review"]["review_id"], tab._rows[2]["review"]["review_id"]
+    assert tab.next_button.isEnabled() and not tab.previous_button.isEnabled()
+
+    # Sorting by another column doesn't change the order Next follows.
+    tab.table.sortItems(triage_tab.COLUMNS.index("Classification"))
+    tab.select_awaiting(1)
+    assert tab._selected_row()["review"]["review_id"] == newest
+    tab.select_awaiting(1)
+    assert tab._selected_row()["review"]["review_id"] == oldest
+    assert not tab.next_button.isEnabled() and tab.previous_button.isEnabled()
+    tab.select_awaiting(-1)
+    assert tab._selected_row()["review"]["review_id"] == newest
+
+
+def test_review_added_marks_only_the_selected_review(qapp, configured, dialogs, stored):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    # Rows 0 and 2 are two reviews of the same ticket.
+    assert tab._rows[0]["zendesk_id"] == tab._rows[2]["zendesk_id"]
+    tab.table.selectRow(0)
+    tab.mark_selected_review_added()
+    wait_until_idle(qapp, tab)
+
+    added = triage_tab.COLUMNS.index("Added to Zendesk")
+    by_review = {
+        tab._rows[tab.table.item(r, 0).data(QtCore.Qt.UserRole)]["review"]["review_id"]: (
+            tab.table.item(r, added).text()
+        )
+        for r in range(3)
+    }
+    assert by_review == {
+        tab._rows[0]["review"]["review_id"]: "Yes",
+        tab._rows[1]["review"]["review_id"]: "No",
+        tab._rows[2]["review"]["review_id"]: "No",
+    }
+    # The ticket's other review still needs a decision, so Next reaches it.
+    assert triage_tab.step_awaiting(tab._rows, 1, 1) == 2
+
+
+def test_status_says_when_reviews_are_capped(qapp, configured, monkeypatch, stored):
+    monkeypatch.setattr(triage_tab, "REVIEW_ROW_LIMIT", 2)
+    tab = make_tab(stored)
+    tab._show_loaded((1, recent_reviews(stored, limit=2)))
+    assert tab.status_label.text() == (
+        "1 ticket(s) awaiting review. Showing the newest 2 reviews."
+    )
 
 
 def test_review_added_answering_no_changes_nothing(
@@ -798,6 +950,108 @@ def test_index_changed_during_the_run_is_an_error_not_a_warning(
     wait_until_idle(qapp, tab)
     assert [kind for kind, _ in dialogs] == ["question", "critical"]
     assert "256-dimension" in dialogs[1][1]
+
+
+def test_embedding_runs_beside_reviewing_and_stops_safely(
+    qapp, configured, monkeypatch, dialogs, stored
+):
+    import threading
+
+    import numpy as np
+    from decision_engine import search
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(search, "check_vector_index", lambda *a: "missing")
+    monkeypatch.setattr(search, "ensure_vector_index", lambda *a: "created")
+    # One ticket per batch, so Stop lands between batches.
+    monkeypatch.setattr(triage_tab.embeddings, "batch_chars", lambda cfg: 1)
+    release, first_sent = threading.Event(), threading.Event()
+    sent = []
+
+    def slow_embed(texts, cfg, input_type="document"):
+        sent.extend(texts)
+        first_sent.set()
+        release.wait(5)
+        return np.zeros((len(texts), cfg.dimensions), dtype=np.float32), 1
+
+    monkeypatch.setattr(triage_tab.embeddings, "embed", slow_embed)
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    tab.start_embed_tickets()
+    try:
+        deadline = time.monotonic() + 5
+        while not first_sent.is_set():
+            qapp.processEvents()
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        # Reviewing still works while the first batch is in flight.
+        assert tab.is_embedding() and not tab._job_running()
+        tab.table.selectRow(0)
+        assert tab.mark_good_button.isEnabled() and tab.refresh_button.isEnabled()
+        assert not tab.embed_button.isEnabled() and not tab.embed_stop_button.isHidden()
+        tab.stop_embedding()
+    finally:
+        # A running QThread must not be destroyed, even when an assert fails.
+        release.set()
+        wait_until_idle(qapp, tab)
+
+    # The batch in flight was saved; the rest were never sent.
+    assert len(sent) == 1
+    assert stored.count_documents({"embedding": {"$exists": True}}) == 1
+    assert dialogs[-1][0] == "information" and "Not started (cancelled): 2" in dialogs[-1][1]
+    assert tab.embed_stop_button.isHidden() and tab.embed_button.isEnabled()
+
+
+def test_request_shutdown_stops_embedding_after_the_batch_in_flight(
+    qapp, configured, monkeypatch, dialogs, stored
+):
+    import threading
+
+    import numpy as np
+    from decision_engine import search
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "k")
+    monkeypatch.setattr(search, "check_vector_index", lambda *a: "missing")
+    monkeypatch.setattr(search, "ensure_vector_index", lambda *a: "created")
+    monkeypatch.setattr(triage_tab.embeddings, "batch_chars", lambda cfg: 1)
+    release, first_sent = threading.Event(), threading.Event()
+    sent = []
+
+    def slow_embed(texts, cfg, input_type="document"):
+        sent.extend(texts)
+        first_sent.set()
+        release.wait(5)
+        return np.zeros((len(texts), cfg.dimensions), dtype=np.float32), 1
+
+    monkeypatch.setattr(triage_tab.embeddings, "embed", slow_embed)
+    tab = make_tab(stored)
+    idle = []
+    tab.idle.connect(lambda: idle.append(1))
+    tab.start_embed_tickets()
+    try:
+        deadline = time.monotonic() + 5
+        while not first_sent.is_set():
+            qapp.processEvents()
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert not tab.request_shutdown()
+    finally:
+        release.set()
+        deadline = time.monotonic() + 5
+        while tab.is_busy():
+            qapp.processEvents()
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        qapp.processEvents()
+
+    # Shutdown let the batch in flight finish and save, then started no other.
+    assert idle == [1]
+    assert len(sent) == 1
+    assert stored.count_documents({"embedding": {"$exists": True}}) == 1
+    # Closing shows no completion dialog.
+    assert not any(kind == "information" for kind, _ in dialogs)
 
 
 # --- weekly review (misclassification_log and lessons_learned) ----------------------

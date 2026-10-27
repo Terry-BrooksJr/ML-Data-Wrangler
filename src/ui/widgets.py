@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -183,6 +184,8 @@ class Card(SiPanelCard):
 def heading(text: str) -> QLabel:
     label = QLabel(text)
     label.setProperty("role", "heading")
+    # Fixed height, so a stretched card gives its extra room to the body.
+    label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
     return label
 
 

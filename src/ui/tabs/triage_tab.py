@@ -14,19 +14,21 @@ from typing import Any, Callable, List, Optional
 from embedding import embeddings
 from decision_engine import ab_test, feedback, persistence, search, training_export
 from decision_engine.zendesk_status import (
+    ADDED_REVIEWS_KEY,
     mark_review_added,
     REVIEW_ADDED_KEY,
     review_added,
 )
 from decision_engine.guards import CLASSIFICATIONS
 from ui.dialogs.ab_test_dialog import ab_collections, ABTestDialog
-from ui import zendesk_links
+from ui import theme, zendesk_links
 from ui.dialogs.lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -43,7 +45,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from ui.utility import ThreadWorker, worker_thread
-from ui.widgets import button_row, Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
+from ui.widgets import Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
@@ -61,7 +63,6 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME": "no fallback if the primary model call fails",
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
-RECENT_REVIEW_LIMIT = 200
 REVIEW_ADDED_BUTTON = "Review Added to Zendesk"
 # SiliconUI's Fluent icon for copying (two overlapping squares).
 COPY_ICON = "ic_fluent_copy_regular"
@@ -79,7 +80,14 @@ COLUMNS = [
     "Confidence",
     "Reviewed (UTC)",
     "Model",
+    "Decision",
+    "Added to Zendesk",
 ]
+SUBJECT_MAX_WIDTH = 280
+# The most reviews the table loads: past this, its widgets use too much memory.
+REVIEW_ROW_LIMIT = 5000
+# The Decision column's text for each manual outcome; "pending" shows blank.
+DECISION_LABELS = {"good": "Correct", "bad": "Misclassified"}
 CONNECTION_HINT = (
     "Could not reach MongoDB. Check that you are on the VPN, that its exit IP "
     "is on the Atlas IP access list, and that the cluster is not paused."
@@ -127,11 +135,12 @@ def count_awaiting(tickets: Collection) -> int:
     return tickets.count_documents({"awaiting_review": True})
 
 
-def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> List[dict]:
-    """Returns the newest reviews across all tickets, newest first.
+def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[dict]:
+    """Returns the newest `limit` reviews across all tickets, newest first.
 
-    Each row is {"zendesk_id", "subject", "review"}, where review is one
-    agent_reviews entry exactly as the engine stored it.
+    Each row is {"zendesk_id", "subject", "outcomes", REVIEW_ADDED_KEY,
+    ADDED_REVIEWS_KEY, "review"}, where review is one agent_reviews entry
+    exactly as the engine stored it.
     """
     pipeline = [
         {"$match": {"agent_reviews.0": {"$exists": True}}},
@@ -145,11 +154,13 @@ def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> Lis
                 "subject": 1,
                 "outcomes": 1,
                 REVIEW_ADDED_KEY: 1,
+                ADDED_REVIEWS_KEY: 1,
                 "review": "$agent_reviews",
             }
         },
     ]
-    return list(tickets.aggregate(pipeline))
+    # A large sort can pass Atlas's in-memory cap, so let it spill to disk.
+    return list(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
 def format_review(row: dict) -> str:
@@ -197,7 +208,7 @@ def format_review(row: dict) -> str:
             "",
             f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
         ]
-    lines += ["", f"Review added to Zendesk: {'Yes' if review_added(row) else 'No'}"]
+    lines += ["", f"Review added to Zendesk: {'Yes' if row_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
             "",
@@ -215,11 +226,56 @@ def format_review(row: dict) -> str:
     return "\n".join(lines)
 
 
+def row_added(row: dict) -> bool:
+    """Whether this row's review was added to Zendesk."""
+    return review_added(row, row["review"].get("review_id"))
+
+
+# What a review row carries from its ticket, besides the review itself.
+TICKET_STATE_FIELDS = ("outcomes", REVIEW_ADDED_KEY, ADDED_REVIEWS_KEY)
+
+
 def latest_outcome(row: dict) -> Optional[dict]:
     """The newest outcome recorded for this row's review, or None."""
     review_id = row["review"].get("review_id")
     matches = [o for o in row.get("outcomes") or [] if o.get("review_id") == review_id]
     return matches[-1] if matches else None
+
+
+def decision_label(row: dict) -> str:
+    """"Correct" or "Misclassified" from the review's latest outcome, else ""."""
+    return DECISION_LABELS.get((latest_outcome(row) or {}).get("outcome"), "")
+
+
+def fully_handled(row: dict) -> bool:
+    """True once a review has a decision and is added to Zendesk; the table
+    greys these rows out."""
+    return bool(decision_label(row)) and row_added(row)
+
+
+def awaiting_decision(row: dict) -> bool:
+    """True while a review is neither marked correct or misclassified nor
+    added to Zendesk."""
+    return not decision_label(row) and not row_added(row)
+
+
+def step_awaiting(rows: List[dict], current: Optional[int], step: int) -> Optional[int]:
+    """The index of the nearest row awaiting a decision, or None.
+
+    Rows are newest review first, as recent_reviews returns them, so step 1
+    moves to the next older review and step -1 to the next newer one. With
+    nothing selected, step 1 starts at the newest review.
+    """
+    if current is None:
+        if step < 0:
+            return None
+        current = -1
+    index = current + step
+    while 0 <= index < len(rows):
+        if awaiting_decision(rows[index]):
+            return index
+        index += step
+    return None
 
 
 def ask_batch_size(parent: QWidget, awaiting: int, note: str) -> Optional[int]:
@@ -278,7 +334,8 @@ def batch_status(progress: dict, elapsed: float) -> str:
 
 
 class BatchRelay(QObject):
-    """Carries batch progress from the worker thread to the tab (queued, as it lives on the GUI thread)."""
+    """Carries batch or embedding progress from a worker thread to the tab
+    (queued, as it lives on the GUI thread)."""
 
     progress = pyqtSignal(object)
 
@@ -344,6 +401,13 @@ class TriageTab(QWidget):
         self._batch_relay = BatchRelay(self)
         self._batch_relay.progress.connect(self._on_batch_progress)
         self.review_one = review_one
+        # Embedding runs on its own thread so reviewing continues meanwhile.
+        # Stop is checked between batches; each batch is saved before the next.
+        self._embed_cancel = threading.Event()
+        self._embed_thread: Optional[QThread] = None
+        self._embed_worker: Optional[ThreadWorker] = None
+        self._embed_relay = BatchRelay(self)
+        self._embed_relay.progress.connect(self._on_embed_progress)
         self._thread: Optional[QThread] = None
         self._worker: Optional[ThreadWorker] = None
         self._on_done: Optional[Callable[[Any], None]] = None
@@ -387,12 +451,23 @@ class TriageTab(QWidget):
         one_row = QHBoxLayout()
         one_row.addWidget(self.ticket_id_input, stretch=1)
         one_row.addWidget(self.review_one_button)
+        one_row.addWidget(self.batch_button)
 
         self.embed_button = Button("Embed Tickets (Voyage AI)…")
         self.embed_button.setToolTip(
             "Stores a Voyage embedding on each new or changed ticket and creates the vector index."
         )
         self.embed_button.clicked.connect(self.start_embed_tickets)
+        one_row.addWidget(self.embed_button)
+        # Shown while embedding runs in the background.
+        self.embed_label = hint("")
+        self.embed_label.setVisible(False)
+        self.embed_stop_button = Button("Stop Embedding")
+        self.embed_stop_button.setToolTip(
+            "Finishes the batch being embedded, saves it, and leaves the rest for the next run."
+        )
+        self.embed_stop_button.clicked.connect(self.stop_embedding)
+        self.embed_stop_button.setVisible(False)
 
         # Range 0..0 makes the bar an indeterminate "busy" indicator:
         # run_review_batch reports no progress.
@@ -415,7 +490,7 @@ class TriageTab(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setSortingEnabled(True)
         self.table.itemSelectionChanged.connect(self.show_selected_review)
 
@@ -425,6 +500,16 @@ class TriageTab(QWidget):
             "Select a review to see its reasoning, note and draft message."
         )
 
+        self.previous_button = Button("Previous Ticket")
+        self.previous_button.setToolTip(
+            "The next newer review not yet marked correct, misclassified or added to Zendesk."
+        )
+        self.previous_button.clicked.connect(lambda: self.select_awaiting(-1))
+        self.next_button = Button("Next Ticket")
+        self.next_button.setToolTip(
+            "The next older review not yet marked correct, misclassified or added to Zendesk."
+        )
+        self.next_button.clicked.connect(lambda: self.select_awaiting(1))
         self.mark_good_button = Button("Mark Correct")
         self.mark_good_button.clicked.connect(self.mark_selected_correct)
         self.mark_bad_button = Button("Mark Misclassified…")
@@ -460,42 +545,58 @@ class TriageTab(QWidget):
             "compare the answers blind. Nothing is saved to the tickets."
         )
         self.ab_test_button.clicked.connect(self.open_ab_test)
+        # The detail pane sits beside the list, so its buttons wrap onto rows.
+        nav_row = QHBoxLayout()
+        nav_row.addWidget(self.previous_button)
+        nav_row.addWidget(self.next_button)
+        nav_row.addStretch()
+        nav_row.addWidget(self.zendesk_button)
+        nav_row.addWidget(self.copy_button)
         feedback_row = QHBoxLayout()
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
-        feedback_row.addWidget(self.zendesk_button)
         feedback_row.addWidget(self.review_added_button)
-        feedback_row.addWidget(self.copy_button)
         feedback_row.addStretch()
-        feedback_row.addWidget(self.ab_test_button)
-        feedback_row.addWidget(self.weekly_review_button)
-        feedback_row.addWidget(self.training_button)
-        feedback_row.addWidget(self.accuracy_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
         detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.addLayout(nav_row)
         detail_layout.addWidget(self.detail)
         detail_layout.addLayout(feedback_row)
 
-        splitter = QSplitter(QtCore.Qt.Vertical)
+        splitter = QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         splitter.addWidget(self.table)
         splitter.addWidget(detail_pane)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
+        # Start at 3:2; the sizes are ratios until the splitter is laid out.
+        splitter.setSizes([3000, 2000])
+
+        tools_row = QHBoxLayout()
+        tools_row.addStretch()
+        tools_row.addWidget(self.ab_test_button)
+        tools_row.addWidget(self.weekly_review_button)
+        tools_row.addWidget(self.training_button)
+        tools_row.addWidget(self.accuracy_button)
 
         review_card = Card("Review Tickets")
         review_card.body.addWidget(intro)
         review_card.body.addLayout(status_row)
         review_card.body.addLayout(one_row)
-        review_card.body.addLayout(button_row(self.batch_button, self.embed_button))
         review_card.body.addWidget(self.busy_bar)
         batch_row = QHBoxLayout()
         batch_row.addWidget(self.batch_label, stretch=1)
         batch_row.addWidget(self.stop_button)
         review_card.body.addLayout(batch_row)
+        embed_row = QHBoxLayout()
+        embed_row.addWidget(self.embed_label, stretch=1)
+        embed_row.addWidget(self.embed_stop_button)
+        review_card.body.addLayout(embed_row)
 
-        reviews_card = Card(f"Recent Reviews (newest {RECENT_REVIEW_LIMIT})")
+        reviews_card = Card("Reviews")
         reviews_card.body.addWidget(splitter)
+        reviews_card.body.addLayout(tools_row)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 12, 0, 0)
@@ -557,12 +658,20 @@ class TriageTab(QWidget):
                 logger.warning(line)
 
     def is_busy(self) -> bool:
-        """Returns True while a background job is running.
+        """Returns True while a background job or embedding is running.
 
         Callers such as the main window can use this to avoid closing the app
         mid-job.
         """
+        return self._job_running() or self.is_embedding()
+
+    def _job_running(self) -> bool:
+        """True while a review, refresh or other one-at-a-time job runs."""
         return self._thread is not None
+
+    def is_embedding(self) -> bool:
+        """True while ticket embedding runs in the background."""
+        return self._embed_thread is not None
 
     def request_shutdown(self) -> bool:
         """Prepares the tab for the window closing.
@@ -575,6 +684,7 @@ class TriageTab(QWidget):
         """
         self._closing = True
         self._cancel.set()
+        self._embed_cancel.set()
         if not self.is_busy():
             return True
         message = "Closing after the current job finishes…"
@@ -590,9 +700,15 @@ class TriageTab(QWidget):
         aboutToQuit): it freezes the window for the rest of the job, but a
         running QThread is never destroyed.
         """
+        self._cancel.set()
+        self._embed_cancel.set()
+        if self._embed_thread is not None:
+            self._embed_thread.quit()
+            self._embed_thread.wait()
+            self._embed_thread = None
+            self._embed_worker = None
         if self._thread is None:
             return
-        self._cancel.set()
         self._thread.quit()  # the thread's loop exits once the worker returns
         self._thread.wait()
         self._thread = None
@@ -615,12 +731,12 @@ class TriageTab(QWidget):
             self.batch_button,
             self.review_one_button,
             self.accuracy_button,
-            self.embed_button,
             self.weekly_review_button,
             self.ab_test_button,
             self.training_button,
         ):
             button.setEnabled(not busy)
+        self.embed_button.setEnabled(not busy and not self.is_embedding())
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
             button.setEnabled(not busy and has_selection)
@@ -628,6 +744,7 @@ class TriageTab(QWidget):
         self.zendesk_button.setEnabled(has_selection)
         self.copy_button.setEnabled(has_selection)
         self._enable_review_added(busy)
+        self._enable_navigation()
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
@@ -701,7 +818,7 @@ class TriageTab(QWidget):
         on_done, self._on_done, self._on_error = self._on_done, None, None
         if self._closing:
             # Don't start follow-up jobs or show dialogs while closing.
-            self.idle.emit()
+            self._emit_idle_when_done()
             return
         on_done(result)
 
@@ -718,12 +835,17 @@ class TriageTab(QWidget):
         on_error, self._on_done, self._on_error = self._on_error, None, None
         if self._closing:
             logger.error(f"Decision Engine job failed while closing: {message}")
-            self.idle.emit()
+            self._emit_idle_when_done()
             return
         self.status_label.setText("Last action failed; see the log.")
         QMessageBox.critical(self, "Decision Engine Error", message)
         if on_error is not None:
             on_error(message)
+
+    def _emit_idle_when_done(self) -> None:
+        """Emits `idle` once neither the job nor embedding is running."""
+        if not self.is_busy():
+            self.idle.emit()
 
     # --- actions ---------------------------------------------------------------
 
@@ -751,7 +873,10 @@ class TriageTab(QWidget):
                 refresh task.
         """
         awaiting, rows = loaded
-        self.status_label.setText(f"{awaiting} ticket(s) awaiting review.")
+        status = f"{awaiting} ticket(s) awaiting review."
+        if len(rows) >= REVIEW_ROW_LIMIT:
+            status += f" Showing the newest {REVIEW_ROW_LIMIT:,} reviews."
+        self.status_label.setText(status)
         self._rows = rows
         self._fill_table()
 
@@ -791,12 +916,27 @@ class TriageTab(QWidget):
         zendesk_ids = [ticket["zendesk_id"] for ticket in chosen]
         self._warn_optional_models()
         self._cancel.clear()  # a Stop pressed during an earlier batch
+
+        def review_chosen():
+            tickets = self.collection_factory()
+
+            def with_ticket_state(progress: dict) -> None:
+                # Read here, on the batch's thread: a re-reviewed ticket's new
+                # row must show its outcomes and Zendesk status like a refresh.
+                if progress.get("review") is not None:
+                    ticket = tickets.find_one(
+                        {"zendesk_id": progress["zendesk_id"]},
+                        {field: 1 for field in TICKET_STATE_FIELDS},
+                    )
+                    progress = {**progress, "ticket": ticket or {}}
+                self._batch_relay.progress.emit(progress)
+
+            return self.review_batch(
+                tickets, list(zendesk_ids), on_progress=with_ticket_state
+            )
+
         started = self._run(
-            lambda: self.review_batch(
-                self.collection_factory(),
-                list(zendesk_ids),
-                on_progress=self._batch_relay.progress.emit,
-            ),
+            review_chosen,
             f"Reviewing {count} ticket(s)",
             self._batch_done,
         )
@@ -828,7 +968,7 @@ class TriageTab(QWidget):
 
     def _on_batch_progress(self, progress: dict) -> None:
         """After each ticket: moves the bar, updates the counts and time left,
-        and adds a stored review to Recent Reviews."""
+        and adds a stored review to the Reviews table."""
         if self._batch is None:  # a late signal after the batch ended
             return
         self.busy_bar.setValue(progress["done"])
@@ -839,12 +979,14 @@ class TriageTab(QWidget):
         review = progress.get("review")
         if review is not None:
             zendesk_id = progress["zendesk_id"]
+            ticket = progress.get("ticket") or {}
             row = {
                 "zendesk_id": zendesk_id,
                 "subject": self._batch["subjects"].get(zendesk_id),
+                **{field: ticket[field] for field in TICKET_STATE_FIELDS if field in ticket},
                 "review": review,
             }
-            self._rows = [row, *self._rows][:RECENT_REVIEW_LIMIT]
+            self._rows = [row, *self._rows][:REVIEW_ROW_LIMIT]
             self._fill_table()
 
     def start_embed_tickets(self) -> None:
@@ -853,7 +995,7 @@ class TriageTab(QWidget):
         The index is checked first so a mismatch stops the run before any
         paid call; only the tickets in the approved list are sent.
         """
-        if not self._configured(EMBED_ENV, notify=True):
+        if self.is_embedding() or not self._configured(EMBED_ENV, notify=True):
             return
         try:
             cfg = embeddings.config()
@@ -890,7 +1032,13 @@ class TriageTab(QWidget):
         def embed_and_index():
             tickets = self.collection_factory()
             summary = embeddings.run_backfill(
-                tickets, cfg, plan, should_stop=self._cancel.is_set
+                tickets,
+                cfg,
+                plan,
+                should_stop=self._embed_cancel.is_set,
+                on_progress=lambda handled, total: self._embed_relay.progress.emit(
+                    (handled, total)
+                ),
             )
             # A VectorIndexMismatch here (the index changed in Atlas during the
             # run) propagates and is shown as an error, not a warning.
@@ -900,14 +1048,87 @@ class TriageTab(QWidget):
                 summary["index"] = f"skipped: {e}"
             return summary
 
-        self._run(
-            embed_and_index, f"Embedding {len(plan.embed)} ticket(s)", self._embed_done
-        )
+        self._run_embed(embed_and_index, len(plan.embed))
+
+    def _run_embed(self, task: Callable[[], dict], total: int) -> None:
+        """Runs the embedding `task` on its own thread, beside any other job."""
+        if self._closing or self.is_embedding():
+            return
+
+        def with_connection_hint():
+            try:
+                return task()
+            except ServerSelectionTimeoutError as e:
+                raise RuntimeError(CONNECTION_HINT) from e
+
+        self._embed_cancel.clear()  # a Stop pressed during an earlier run
+        self._embed_thread = worker_thread(self)
+        self._embed_worker = ThreadWorker(with_connection_hint, "Embedding tickets")
+        self._embed_worker.moveToThread(self._embed_thread)
+        self._embed_worker.finished.connect(self._embed_finished)
+        self._embed_worker.error.connect(self._embed_failed)
+        self._embed_thread.started.connect(self._embed_worker.run)
+        self._show_embedding(f"Embedding 0/{total} ticket(s) in the background…")
+        self._embed_thread.start()
+
+    def _show_embedding(self, text: str) -> None:
+        """Shows embedding progress and Stop, or hides both when text is empty."""
+        running = self.is_embedding()
+        self.embed_label.setText(text)
+        self.embed_label.setVisible(bool(text))
+        self.embed_stop_button.setVisible(running)
+        self.embed_stop_button.setEnabled(running and not self._embed_cancel.is_set())
+        self.embed_button.setEnabled(not running and not self._job_running())
+
+    def _on_embed_progress(self, progress) -> None:
+        if not self.is_embedding() or self._embed_cancel.is_set():
+            return
+        handled, total = progress
+        self._show_embedding(f"Embedding {handled}/{total} ticket(s) in the background…")
+
+    def stop_embedding(self) -> None:
+        """Stops embedding after the batch in flight is saved."""
+        if not self.is_embedding():
+            return
+        self._embed_cancel.set()
+        self._show_embedding("Stopping embedding after this batch is saved…")
+        logger.warning("Embedding: stop requested; finishing the current batch.")
+
+    def _stop_embed_thread(self) -> None:
+        self._embed_thread.quit()
+        self._embed_thread.wait()
+        self._embed_thread = None
+        self._embed_worker = None
+        self._show_embedding("")
+
+    def _embed_finished(self, summary: dict) -> None:
+        self._stop_embed_thread()
+        if self._closing:
+            self._emit_idle_when_done()
+            return
+        self._embed_done(summary)
+
+    def _embed_failed(self, message: str) -> None:
+        self._stop_embed_thread()
+        if self._closing:
+            logger.error(f"Embedding failed while closing: {message}")
+            self._emit_idle_when_done()
+            return
+        self.status_label.setText("Embedding failed; see the log.")
+        QMessageBox.critical(self, "Decision Engine Error", message)
 
     def _embed_done(self, summary: dict) -> None:
         message = embeddings.format_summary(summary)
         logger.success(message.replace("\n", "; "))
-        QMessageBox.information(self, "Embedding Complete", message)
+        stopped = summary.get("cancelled")
+        self.status_label.setText(
+            "Embedding stopped; the rest is left for the next run."
+            if stopped
+            else "Embedding complete."
+        )
+        QMessageBox.information(
+            self, "Embedding Stopped" if stopped else "Embedding Complete", message
+        )
 
     def _batch_done(self, summary) -> None:
         """Logs and announces the batch's end, then refreshes the list.
@@ -1009,7 +1230,9 @@ class TriageTab(QWidget):
         # Sorting is paused while filling, or rows reorder mid-insert.
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self._rows))
+        faint = QBrush(QColor(theme.TEXT_FAINT))
         for row_index, row in enumerate(self._rows):
+            handled = fully_handled(row)
             review = row["review"]
             reviewed_at = review.get("reviewed_at")
             values = [
@@ -1019,6 +1242,8 @@ class TriageTab(QWidget):
                 review.get("confidence"),
                 f"{reviewed_at:%Y-%m-%d %H:%M}" if reviewed_at else "",
                 review.get("model_version"),
+                decision_label(row),
+                "Yes" if row_added(row) else "No",
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem()
@@ -1027,6 +1252,8 @@ class TriageTab(QWidget):
                     QtCore.Qt.DisplayRole,
                     value if isinstance(value, (int, float)) else str(value or ""),
                 )
+                if handled:
+                    item.setForeground(faint)
                 if column == 0:
                     item.setData(QtCore.Qt.UserRole, row_index)
                     item.setData(REVIEW_ID_ROLE, str(review.get("review_id") or ""))
@@ -1036,6 +1263,11 @@ class TriageTab(QWidget):
         # defaults to column 0; reset it to newest review first.
         self.table.sortItems(COLUMNS.index("Reviewed (UTC)"), QtCore.Qt.DescendingOrder)
         self.table.resizeColumnsToContents()
+        # A long subject would push the other columns out of the list.
+        subject = COLUMNS.index("Subject")
+        self.table.setColumnWidth(
+            subject, min(self.table.columnWidth(subject), SUBJECT_MAX_WIDTH)
+        )
         # Rows added during a batch keep the review being read selected.
         if keep:
             for table_row in range(self.table.rowCount()):
@@ -1045,6 +1277,7 @@ class TriageTab(QWidget):
                     self.show_selected_review()
                     return
         self.detail.clear()
+        self._enable_navigation()
 
     def show_selected_review(self) -> None:
         """Shows the selected row's full review in the detail pane.
@@ -1054,12 +1287,13 @@ class TriageTab(QWidget):
         pane when nothing is selected.
         """
         row = self._selected_row()
-        enabled = row is not None and not self.is_busy()
+        enabled = row is not None and not self._job_running()
         self.mark_good_button.setEnabled(enabled)
         self.mark_bad_button.setEnabled(enabled)
         self.zendesk_button.setEnabled(row is not None)
         self.copy_button.setEnabled(row is not None)
-        self._enable_review_added(self.is_busy())
+        self._enable_review_added(self._job_running())
+        self._enable_navigation()
         if row is None:
             self.detail.clear()
             return
@@ -1086,7 +1320,7 @@ class TriageTab(QWidget):
         """Enabled for a selected ticket not yet marked, while no job runs."""
         row = self._selected_row()
         self.review_added_button.setEnabled(
-            not busy and row is not None and not review_added(row)
+            not busy and row is not None and not row_added(row)
         )
 
     def mark_selected_review_added(self) -> None:
@@ -1095,7 +1329,7 @@ class TriageTab(QWidget):
         row = self._selected_row()
         if row is None or not self._configured(READ_ENV, notify=True):
             return
-        zendesk_id = row["zendesk_id"]
+        zendesk_id, review_id = row["zendesk_id"], row["review"].get("review_id")
         answer = QMessageBox.question(
             self,
             REVIEW_ADDED_BUTTON,
@@ -1106,7 +1340,7 @@ class TriageTab(QWidget):
         if answer != QMessageBox.Yes:
             return
         self._run(
-            lambda: mark_review_added(self.collection_factory(), zendesk_id),
+            lambda: mark_review_added(self.collection_factory(), zendesk_id, review_id),
             f"Marking ticket {zendesk_id}",
             lambda found: self._feedback_done(
                 f"Ticket {zendesk_id}: review marked as added to Zendesk."
@@ -1115,14 +1349,42 @@ class TriageTab(QWidget):
             ),
         )
 
-    def _selected_row(self) -> Optional[dict]:
-        """The loaded row behind the selected table row, or None."""
+    def _enable_navigation(self) -> None:
+        """Enables Previous and Next only when there is a review to move to.
+
+        Moving only changes the selection, so both work while a job runs.
+        """
+        current = self._selected_index()
+        self.previous_button.setEnabled(
+            step_awaiting(self._rows, current, -1) is not None
+        )
+        self.next_button.setEnabled(step_awaiting(self._rows, current, 1) is not None)
+
+    def select_awaiting(self, step: int) -> None:
+        """Selects the nearest review awaiting a decision: step 1 is older,
+        -1 newer."""
+        target = step_awaiting(self._rows, self._selected_index(), step)
+        if target is None:
+            return
+        # The table may be sorted by any column; find the row holding target.
+        for table_row in range(self.table.rowCount()):
+            item = self.table.item(table_row, 0)
+            if item.data(QtCore.Qt.UserRole) == target:
+                self.table.selectRow(table_row)
+                self.table.scrollToItem(item)
+                return
+
+    def _selected_index(self) -> Optional[int]:
+        """The index into `self._rows` of the selected table row, or None."""
         selected = self.table.selectedItems() if hasattr(self, "table") else []
         if not selected:
             return None
-        return self._rows[
-            self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)
-        ]
+        return self.table.item(selected[0].row(), 0).data(QtCore.Qt.UserRole)
+
+    def _selected_row(self) -> Optional[dict]:
+        """The loaded row behind the selected table row, or None."""
+        index = self._selected_index()
+        return None if index is None else self._rows[index]
 
     # --- feedback ----------------------------------------------------------------
 
