@@ -18,6 +18,8 @@ from pymongo.errors import DuplicateKeyError
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from PyQt5.QtWidgets import QMessageBox
 
+from decision_engine.zendesk_status import REVIEW_ADDED_KEY
+
 # Control characters that XML 1.0 cannot represent, even escaped.
 # Zendesk custom field IDs (ticket["fields"] is a list of {"id", "value"}).
 REQUEST_TYPE_FIELD_ID = 27124341
@@ -846,6 +848,7 @@ class DataWrangler(QObject):
                     "reengage_attempts": [],
                     "agent_reviews": [],
                     "outcomes": [],
+                    REVIEW_ADDED_KEY: False,
                     "last_ingest": {
                         "at": now,
                         "new_comments": len(document["transcript"]),

@@ -13,6 +13,11 @@ from typing import Any, Callable, List, Optional
 
 import embeddings
 from decision_engine import ab_test, feedback, persistence, search, training_export
+from decision_engine.zendesk_status import (
+    mark_review_added,
+    REVIEW_ADDED_KEY,
+    review_added,
+)
 from decision_engine.guards import CLASSIFICATIONS
 from ab_test_dialog import ab_collections, ABTestDialog
 import zendesk_links
@@ -56,6 +61,7 @@ OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
 }
 RECENT_REVIEW_LIMIT = 200
+REVIEW_ADDED_BUTTON = "Review Added to Zendesk"
 # The training-data export's save-dialog filters and the format each picks.
 TRAINING_FORMATS = {
     "Fine-tuning JSONL (*.jsonl)": "jsonl",
@@ -135,6 +141,7 @@ def recent_reviews(tickets: Collection, limit: int = RECENT_REVIEW_LIMIT) -> Lis
                 "zendesk_id": 1,
                 "subject": 1,
                 "outcomes": 1,
+                REVIEW_ADDED_KEY: 1,
                 "review": "$agent_reviews",
             }
         },
@@ -187,6 +194,7 @@ def format_review(row: dict) -> str:
             "",
             f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
         ]
+    lines += ["", f"Review added to Zendesk: {'Yes' if review_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
             "",
@@ -421,6 +429,11 @@ class TriageTab(QWidget):
         self.zendesk_button = Button(zendesk_links.BUTTON_TEXT)
         self.zendesk_button.setToolTip(zendesk_links.BUTTON_TIP)
         self.zendesk_button.clicked.connect(self.view_selected_on_zendesk)
+        self.review_added_button = Button(REVIEW_ADDED_BUTTON)
+        self.review_added_button.setToolTip(
+            "Mark the ticket once you have copied its review into Zendesk by hand."
+        )
+        self.review_added_button.clicked.connect(self.mark_selected_review_added)
         self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
         self.training_button = Button("Export Training Data…")
@@ -444,6 +457,7 @@ class TriageTab(QWidget):
         feedback_row.addWidget(self.mark_good_button)
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addWidget(self.zendesk_button)
+        feedback_row.addWidget(self.review_added_button)
         feedback_row.addStretch()
         feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
@@ -604,6 +618,7 @@ class TriageTab(QWidget):
             button.setEnabled(not busy and has_selection)
         # Opening a link doesn't touch Mongo, so it works during a job too.
         self.zendesk_button.setEnabled(has_selection)
+        self._enable_review_added(busy)
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
         self.busy_bar.setFormat(label)
@@ -797,7 +812,8 @@ class TriageTab(QWidget):
         self._cancel.set()
         self.stop_button.setEnabled(False)
         self.batch_label.setText(
-            self.batch_label.text().split(" · about")[0] + " · stopping after this ticket…"
+            self.batch_label.text().split(" · about")[0]
+            + " · stopping after this ticket…"
         )
         logger.info("Decision Engine: batch will stop after the current ticket.")
 
@@ -891,7 +907,9 @@ class TriageTab(QWidget):
             summary: The batch's counts from run_review_batch, or None.
         """
         stopped_by_user = isinstance(summary, dict) and summary.get("cancelled")
-        logger.success("Review batch stopped." if stopped_by_user else "Review batch finished.")
+        logger.success(
+            "Review batch stopped." if stopped_by_user else "Review batch finished."
+        )
         message = (
             "Batch stopped after the current ticket; the rest are still awaiting review."
             if stopped_by_user
@@ -1014,6 +1032,8 @@ class TriageTab(QWidget):
             for table_row in range(self.table.rowCount()):
                 if self.table.item(table_row, 0).data(REVIEW_ID_ROLE) == keep:
                     self.table.selectRow(table_row)
+                    # Reselecting the same row emits no signal; show its new data.
+                    self.show_selected_review()
                     return
         self.detail.clear()
 
@@ -1029,16 +1049,53 @@ class TriageTab(QWidget):
         self.mark_good_button.setEnabled(enabled)
         self.mark_bad_button.setEnabled(enabled)
         self.zendesk_button.setEnabled(row is not None)
+        self._enable_review_added(self.is_busy())
         if row is None:
             self.detail.clear()
             return
-        self.detail.setPlainText(format_review(row))
+        text = format_review(row)
+        # Unchanged text is left alone, so the pane keeps its scroll position.
+        if self.detail.toPlainText() != text:
+            self.detail.setPlainText(text)
 
     def view_selected_on_zendesk(self) -> None:
         """Opens the selected review's ticket in Zendesk."""
         row = self._selected_row()
         if row is not None:
             zendesk_links.open_ticket(row.get("zendesk_id"))
+
+    def _enable_review_added(self, busy: bool) -> None:
+        """Enabled for a selected ticket not yet marked, while no job runs."""
+        row = self._selected_row()
+        self.review_added_button.setEnabled(
+            not busy and row is not None and not review_added(row)
+        )
+
+    def mark_selected_review_added(self) -> None:
+        """Asks for confirmation, then marks the selected ticket's review as
+        added to Zendesk."""
+        row = self._selected_row()
+        if row is None or not self._configured(READ_ENV, notify=True):
+            return
+        zendesk_id = row["zendesk_id"]
+        answer = QMessageBox.question(
+            self,
+            REVIEW_ADDED_BUTTON,
+            f"Has the review of ticket {zendesk_id} been manually added to Zendesk?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self._run(
+            lambda: mark_review_added(self.collection_factory(), zendesk_id),
+            f"Marking ticket {zendesk_id}",
+            lambda found: self._feedback_done(
+                f"Ticket {zendesk_id}: review marked as added to Zendesk."
+                if found
+                else f"Ticket {zendesk_id} is no longer in MongoDB; nothing was marked."
+            ),
+        )
 
     def _selected_row(self) -> Optional[dict]:
         """The loaded row behind the selected table row, or None."""
