@@ -241,7 +241,7 @@ and MongoDB.
 ### Using it from Python
 
 ```python
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 wrangler = DataWrangler()               # tickets-only.json + comments/ in the current directory
 wrangler.tickets_reshaped()
@@ -436,7 +436,7 @@ decision engine reads. It uses the same `MONGO_URI`, `MONGO_DB` and
 `MONGO_COLLECTION` settings as the engine.
 
 ```python
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 wrangler = DataWrangler()                  # tickets-only.json + comments/
 wrangler.write_tickets_to_mongo()          # every ticket in the export

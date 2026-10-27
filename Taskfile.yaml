@@ -191,7 +191,8 @@ tasks:
     platforms: [darwin, linux]
     sources:
       - "{{.SRC}}/**/*.py"
-      - "{{.SRC}}/zendesk_retag/*"
+      - "{{.SRC}}/tags/zendesk_retag/*"
+      - "{{.SRC}}/tags/*.md"
       - packaging/**/*
       - uv.lock
       - exclude: "{{.SRC}}/**/__pycache__/**"
