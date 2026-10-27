@@ -29,6 +29,7 @@ from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QObject, QThread
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -42,7 +43,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from ui.utility import ThreadWorker, worker_thread
-from ui.widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
+from ui.widgets import button_row, Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the
@@ -62,6 +63,8 @@ OPTIONAL_MODEL_ENV = {
 }
 RECENT_REVIEW_LIMIT = 200
 REVIEW_ADDED_BUTTON = "Review Added to Zendesk"
+# SiliconUI's Fluent icon for copying (two overlapping squares).
+COPY_ICON = "ic_fluent_copy_regular"
 # The training-data export's save-dialog filters and the format each picks.
 TRAINING_FORMATS = {
     "Fine-tuning JSONL (*.jsonl)": "jsonl",
@@ -434,6 +437,10 @@ class TriageTab(QWidget):
             "Mark the ticket once you have copied its review into Zendesk by hand."
         )
         self.review_added_button.clicked.connect(self.mark_selected_review_added)
+        self.copy_button = Button()
+        self.copy_button.setSvgIcon(fluent_icon(COPY_ICON))
+        self.copy_button.setToolTip("Copy the whole review to the clipboard.")
+        self.copy_button.clicked.connect(self.copy_selected_review)
         self.accuracy_button = Button("Accuracy Report")
         self.accuracy_button.clicked.connect(self.show_accuracy_report)
         self.training_button = Button("Export Training Data…")
@@ -458,6 +465,7 @@ class TriageTab(QWidget):
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addWidget(self.zendesk_button)
         feedback_row.addWidget(self.review_added_button)
+        feedback_row.addWidget(self.copy_button)
         feedback_row.addStretch()
         feedback_row.addWidget(self.ab_test_button)
         feedback_row.addWidget(self.weekly_review_button)
@@ -616,8 +624,9 @@ class TriageTab(QWidget):
         has_selection = self._selected_row() is not None
         for button in (self.mark_good_button, self.mark_bad_button):
             button.setEnabled(not busy and has_selection)
-        # Opening a link doesn't touch Mongo, so it works during a job too.
+        # Opening a link or copying doesn't touch Mongo, so they work during a job too.
         self.zendesk_button.setEnabled(has_selection)
+        self.copy_button.setEnabled(has_selection)
         self._enable_review_added(busy)
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
@@ -1049,6 +1058,7 @@ class TriageTab(QWidget):
         self.mark_good_button.setEnabled(enabled)
         self.mark_bad_button.setEnabled(enabled)
         self.zendesk_button.setEnabled(row is not None)
+        self.copy_button.setEnabled(row is not None)
         self._enable_review_added(self.is_busy())
         if row is None:
             self.detail.clear()
@@ -1063,6 +1073,14 @@ class TriageTab(QWidget):
         row = self._selected_row()
         if row is not None:
             zendesk_links.open_ticket(row.get("zendesk_id"))
+
+    def copy_selected_review(self) -> None:
+        """Copies the selected review, as shown in the detail pane, to the clipboard."""
+        row = self._selected_row()
+        if row is None:
+            return
+        QApplication.clipboard().setText(format_review(row))
+        self.status_label.setText(f"Review of ticket {row.get('zendesk_id')} copied.")
 
     def _enable_review_added(self, busy: bool) -> None:
         """Enabled for a selected ticket not yet marked, while no job runs."""
