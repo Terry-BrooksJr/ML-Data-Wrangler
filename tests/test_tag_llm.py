@@ -7,15 +7,15 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import embeddings
+from embedding import embeddings
 import numpy as np
 import pytest
-import tag_llm
-import tag_normalizer
-import tag_tab
+from tags import tag_llm
+from tags import tag_normalizer
+from ui.tabs import tag_tab
 from PyQt5.QtWidgets import QApplication, QFileDialog
-from tag_normalizer import collect, LLM, mapping
-from tag_tab import TagTab
+from tags.tag_normalizer import collect, LLM, mapping
+from ui.tabs.tag_tab import TagTab
 
 # The reference's own worked example (section 6).
 EXAMPLE_INPUT = [

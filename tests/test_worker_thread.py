@@ -5,7 +5,7 @@ import textwrap
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import utility
+from ui import utility
 
 
 def test_worker_threads_get_a_large_stack():
@@ -20,7 +20,7 @@ def test_numerical_code_runs_on_a_worker_thread():
     script = textwrap.dedent("""
         import numpy as np
         from PyQt5.QtCore import QCoreApplication
-        import utility
+        from ui import utility
 
         app = QCoreApplication([])
         results = []

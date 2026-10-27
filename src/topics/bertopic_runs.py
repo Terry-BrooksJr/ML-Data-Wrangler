@@ -28,9 +28,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import bertopic_model
-import topic_store
-from LDA_logic import tokenize
+from topics import bertopic_model
+from topics import topic_store
+from topics.LDA_logic import tokenize
 from loguru import logger
 from pymongo.collection import Collection
 
@@ -101,7 +101,7 @@ def train_and_save(
             )
         raise ValueError(
             "No tickets have an embedding made from their current text. "
-            "Embed them first: cd src && python -m embeddings backfill"
+            "Embed them first: cd src && python -m embedding.embeddings backfill"
         )
     status(f"Lemmatizing {len(corpus.ids)} tickets...")
     tokens = tokenize(nlp, stop_words, corpus.texts)
@@ -198,9 +198,9 @@ def upload(
     """Uploads the run when storage is configured; a failure becomes a warning on the run.
 
     Like the app's LDA upload: the model is already saved here, and
-    `python -m model_storage upload --bertopic RUN_ID` retries it.
+    `python -m core.model_storage upload --bertopic RUN_ID` retries it.
     """
-    import model_storage
+    from core import model_storage
 
     run.setdefault("warnings", [])
     try:
@@ -218,7 +218,7 @@ def upload(
         logger.exception(f"Could not upload BERTopic run {run['run_id']} to S3: {e}")
         run["warnings"].append(
             f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
-            f"Retry with: python -m model_storage upload --bertopic {run['run_id']}"
+            f"Retry with: python -m core.model_storage upload --bertopic {run['run_id']}"
         )
 
 
@@ -458,7 +458,7 @@ def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Pat
     Raises:
         ValueError: the run ID isn't a plain folder name.
     """
-    import model_storage
+    from core import model_storage
 
     base = (base_dir or bertopic_model.model_dir()).resolve()
     folder = (base / model_storage.check_run_id(run["run_id"])).resolve()
@@ -498,7 +498,7 @@ def ensure_local(
         ValueError: the run ID isn't a plain folder name.
         model_storage.UntrustedRun: the upload failed verification.
     """
-    import model_storage
+    from core import model_storage
 
     local = local_dir(run, base_dir)
     if not _complete(local):

@@ -6,7 +6,7 @@ classification. The model that most often puts same-category tickets
 together is the better choice for "similar tickets" and for picking
 classifier examples.
 
-    cd src && python -m embedding_eval EVAL_SET.json [--providers spacy voyage openai]
+    cd src && python -m embedding.embedding_eval EVAL_SET.json [--providers spacy voyage openai]
         [--text opening full] [-k 5] [--show-neighbours 3] [--yes]
 
 Voyage uses the app's embedding Settings (EMBEDDING_API_KEY, endpoint,
@@ -32,7 +32,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-import embeddings
+from embedding import embeddings
 import numpy as np
 from decision_engine.evaluation import load_eval_set
 from decision_engine.guards import CLASSIFICATIONS
@@ -302,7 +302,7 @@ def _positive_int(value: str) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m embedding_eval",
+        prog="python -m embedding.embedding_eval",
         description="Compare embedding models on a labelled evaluation set.",
     )
     parser.add_argument(
@@ -351,7 +351,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: List[str]) -> int:
     args = _parser().parse_args(argv)
-    import settings
+    from core import settings
 
     settings.load()  # .env and the app's saved Settings (EMBEDDING_API_KEY etc.)
     voyage_model = (

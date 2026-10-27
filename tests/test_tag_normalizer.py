@@ -8,11 +8,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
-import tag_normalizer
+from tags import tag_normalizer
 from PyQt5 import QtCore
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from tag_normalizer import clean_tag, collect, group_tags, mapping, parse_tags
-from tag_tab import TagTab
+from tags.tag_normalizer import clean_tag, collect, group_tags, mapping, parse_tags
+from ui.tabs.tag_tab import TagTab
 
 # Hand-made 3-d vectors: a car axis, a login axis and a billing axis.
 VECTORS = {

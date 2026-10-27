@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import bertopic_dialog
-import bertopic_model
-import bertopic_runs
+from ui.dialogs import bertopic_dialog
+from topics import bertopic_model
+from topics import bertopic_runs
 import mongomock
 import numpy as np
 import pytest
-import topic_store
+from topics import topic_store
 from PyQt5.QtWidgets import QApplication
 
 THEMES = [
@@ -362,7 +362,7 @@ OUTCOMES = ["client_education", "learnosity_bug", "possible_feature_enhancement"
 def _embedded_tickets(corpus):
     """mongomock tickets whose stored embeddings load_corpus accepts: subject
     text (no transcript), a matching text hash, and corpus.outcomes."""
-    import embeddings
+    from embedding import embeddings
 
     tickets = mongomock.MongoClient().support_db.tickets
     for zid, text, vector, outcome in zip(
@@ -433,7 +433,7 @@ def test_train_and_save_trains_only_on_the_chosen_outcomes(tmp_path, monkeypatch
 def test_assignment_blocked_by_another_process_is_recorded(tmp_path, monkeypatch):
     from datetime import timedelta
 
-    import embeddings
+    from embedding import embeddings
 
     corpus, tokens = _corpus()
     _patch_corpus(monkeypatch, corpus, tokens)

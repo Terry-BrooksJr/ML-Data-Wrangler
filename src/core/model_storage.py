@@ -19,9 +19,9 @@ Settings (see settings.SETTINGS): MODEL_BUCKET turns this on; B2_KEY_ID,
 B2_APPLICATION_KEY, MODEL_SIGNING_KEY, and B2_ENDPOINT_URL (blank for AWS S3);
 optional MODEL_PREFIX and MODEL_STORAGE_REGION.
 
-    cd src && python -m model_storage upload [RUN_ID ...]   # default: local runs not yet uploaded
-    cd src && python -m model_storage upload --bertopic [RUN_ID ...]   # BERTopic runs (bertopic_runs)
-    cd src && python -m model_storage new-key               # prints a new MODEL_SIGNING_KEY
+    cd src && python -m core.model_storage upload [RUN_ID ...]   # default: local runs not yet uploaded
+    cd src && python -m core.model_storage upload --bertopic [RUN_ID ...]   # BERTopic runs (bertopic_runs)
+    cd src && python -m core.model_storage new-key               # prints a new MODEL_SIGNING_KEY
 """
 
 import argparse
@@ -124,7 +124,7 @@ def config() -> Optional[Config]:
     if len(signing_key) < MIN_SIGNING_KEY_CHARS:
         raise StorageNotConfigured(
             f"MODEL_SIGNING_KEY must be at least {MIN_SIGNING_KEY_CHARS} characters, and the same on every computer "
-            "that shares models. Generate one with: python -m model_storage new-key"
+            "that shares models. Generate one with: python -m core.model_storage new-key"
         )
     endpoint = os.environ.get("B2_ENDPOINT_URL", "").strip() or None
     if not _endpoint_ok(endpoint):
@@ -302,7 +302,7 @@ def upload_run(run: dict, cfg: Config, client=None) -> dict:
 
 def upload_and_record(run: dict, cfg: Config, client=None) -> dict:
     """Uploads the run, then adds `storage` to the run and its local run.json."""
-    import topic_store
+    from topics import topic_store
 
     run["storage"] = upload_run(run, cfg, client)
     topic_store.write_run_file(run)
@@ -486,7 +486,7 @@ def record_storage(runs_collection, run: dict, storage: dict) -> None:
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m model_storage", description="Upload topic-model runs to S3."
+        prog="python -m core.model_storage", description="Upload topic-model runs to S3."
     )
     commands = parser.add_subparsers(dest="command", required=True)
     upload = commands.add_parser(
@@ -510,10 +510,10 @@ def main(argv: List[str]) -> int:
         print(secrets.token_urlsafe(48))
         return 0
 
-    import settings
+    from core import settings
 
     settings.load()
-    import topic_store
+    from topics import topic_store
 
     try:
         cfg = config()
@@ -527,8 +527,8 @@ def main(argv: List[str]) -> int:
         )
         return 2
     if args.bertopic:
-        import bertopic_model
-        import bertopic_runs
+        from topics import bertopic_model
+        from topics import bertopic_runs
 
         runs, run_dir, cfg = (
             bertopic_runs.list_runs(),
@@ -537,7 +537,7 @@ def main(argv: List[str]) -> int:
         )
         collection_name = bertopic_runs.runs_collection()
     elif args.tags:
-        import tag_runs
+        from tags import tag_runs
 
         runs, run_dir, cfg = (
             tag_runs.list_runs(),

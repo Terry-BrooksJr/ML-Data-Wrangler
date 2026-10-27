@@ -29,8 +29,8 @@ Short tags score high against each other with Voyage (unrelated pairs often
 reach 0.8), so its default threshold is 0.90; spaCy's averaged word vectors
 spread wider and miss looser synonyms ("oil change" ~ "car maintenance").
 
-    cd src && python -m tag_normalizer tags.txt                 # Voyage; sends the tags only
-    cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8 --out mapping.csv
+    cd src && python -m tags.tag_normalizer tags.txt                 # Voyage; sends the tags only
+    cd src && python -m tags.tag_normalizer tags.txt --backend spacy --threshold 0.8 --out mapping.csv
 """
 
 import argparse
@@ -250,7 +250,7 @@ def voyage_embedder() -> Embedder:
     Raises:
         embeddings.EmbeddingNotConfigured: if the key or another setting is missing.
     """
-    import embeddings
+    from embedding import embeddings
 
     cfg = embeddings.config()
     return lambda texts: embeddings.embed(texts, cfg, input_type="document")[0]
@@ -619,7 +619,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: List[str]) -> int:
     args = _parser().parse_args(argv)
     if args.backend in (VOYAGE, LLM):
-        import settings
+        from core import settings
 
         settings.load()
     if args.file == "-":
@@ -633,7 +633,7 @@ def main(argv: List[str]) -> int:
         return 1
     extra = None
     if args.backend == LLM:
-        import tag_llm
+        from tags import tag_llm
 
         candidates = []
         if not args.no_candidates:

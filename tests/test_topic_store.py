@@ -3,9 +3,9 @@ import pathlib
 
 import mongomock
 import pytest
-import topic_store
+from topics import topic_store
 from gensim.corpora.dictionary import Dictionary
-from LDA_logic import LatentDirichletAllocator
+from topics.LDA_logic import LatentDirichletAllocator
 from test_wrangler_mongo import data_dir, wrangler  # noqa: F401 (fixtures)
 
 TOKENS = [
@@ -322,7 +322,7 @@ def test_uploaded_run_downloads_loads_and_relocates_charts(
     trained, tmp_path, monkeypatch
 ):
     import boto3
-    import model_storage
+    from core import model_storage
     from moto import mock_aws
 
     for name, value in {
@@ -380,7 +380,7 @@ def test_recorded_model_dir_is_never_loaded(trained, tmp_path):
 def test_traversal_run_ids_are_refused_before_any_download(
     tmp_path, monkeypatch, run_id
 ):
-    import model_storage
+    from core import model_storage
 
     called = []
     monkeypatch.setattr(model_storage, "download_run", lambda *a, **k: called.append(1))
@@ -397,7 +397,7 @@ def test_traversal_run_ids_are_refused_before_any_download(
 def test_missing_dictionary_triggers_a_download(trained, tmp_path, monkeypatch):
     import shutil
 
-    import model_storage
+    from core import model_storage
 
     run = topic_store.save_run(trained, FakeNlp(), ["a"], base_dir=tmp_path)
     backup = tmp_path / "backup"

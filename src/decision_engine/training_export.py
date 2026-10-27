@@ -692,7 +692,7 @@ def main(argv: List[str]) -> int:
     args = build_parser().parse_args(argv)
 
     try:  # the app's saved Settings, like the app itself (run from src/)
-        import settings
+        from core import settings
 
         settings.load()
     except ImportError:

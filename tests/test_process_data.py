@@ -1,9 +1,9 @@
 import json
 
 import pytest
-import wrangler
+from core import wrangler
 from test_wrangler_mongo import COMMENTS, TICKET
-from wrangler import DataWrangler, process_progress
+from core.wrangler import DataWrangler, process_progress
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Callable, List, Optional
 
-import embeddings
+from embedding import embeddings
 from decision_engine import ab_test, feedback, persistence, search, training_export
 from decision_engine.zendesk_status import (
     mark_review_added,
@@ -19,9 +19,9 @@ from decision_engine.zendesk_status import (
     review_added,
 )
 from decision_engine.guards import CLASSIFICATIONS
-from ab_test_dialog import ab_collections, ABTestDialog
-import zendesk_links
-from lessons_dialog import WeeklyReviewDialog
+from ui.dialogs.ab_test_dialog import ab_collections, ABTestDialog
+from ui import zendesk_links
+from ui.dialogs.lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
 from pymongo.errors import ServerSelectionTimeoutError
@@ -41,8 +41,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from utility import ThreadWorker, worker_thread
-from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
+from ui.utility import ThreadWorker, worker_thread
+from ui.widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
 # model. The secondary and confirmation models are optional: when unset, the

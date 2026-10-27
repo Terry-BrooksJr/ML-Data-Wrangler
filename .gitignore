@@ -182,3 +182,4 @@ embedding_cache/
 
 # Task (Taskfile.yaml) checksums for sources/generates
 .task/
+.DS_Store

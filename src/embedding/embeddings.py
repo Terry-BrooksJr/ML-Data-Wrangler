@@ -19,8 +19,8 @@ Requests go through the voyageai client (voyageai.Client.embed), with its own
 retries off: embed() retries only failures where nothing was processed or
 billed, and the client's requests session refuses redirects.
 
-    cd src && python -m embeddings check            # one tiny call, no ticket text
-    cd src && python -m embeddings backfill [--yes] # paid; sends ticket text to Voyage
+    cd src && python -m embedding.embeddings check            # one tiny call, no ticket text
+    cd src && python -m embedding.embeddings backfill [--yes] # paid; sends ticket text to Voyage
 
 Lives outside decision_engine on purpose: that package must not import an
 HTTP client (see test_engine_never_references_zendesk_endpoints).
@@ -915,7 +915,7 @@ def describe_plan(plan: Plan, cfg: Config) -> str:
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m embeddings", description="Voyage AI ticket embeddings."
+        prog="python -m embedding.embeddings", description="Voyage AI ticket embeddings."
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check", help="embed one short test string (no ticket text)")
@@ -930,7 +930,7 @@ def main(argv: List[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    import settings
+    from core import settings
 
     settings.load()
     try:

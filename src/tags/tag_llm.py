@@ -52,7 +52,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import yaml
 from decision_engine import classify
-from tag_normalizer import clean_tag, Group, Tag, unit_rows
+from tags.tag_normalizer import clean_tag, Group, Tag, unit_rows
 
 REFERENCE_FILE = "tag_normalization_reference.md"
 PRIORITIES_FILE = "tag_normalization_priorities.md"

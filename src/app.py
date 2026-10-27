@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, List, Optional, Tuple, Union
 
-import settings
+from core import settings
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtCore import (
@@ -43,25 +43,25 @@ from PyQt5.QtWidgets import (
 settings.load()
 settings.use_workspace()
 
-import bertopic_model
-import bertopic_runs
-import chart_viewer
+from topics import bertopic_model
+from topics import bertopic_runs
+from ui import chart_viewer
 import en_core_web_lg
-import macos
-import model_storage
-import tag_normalizer
-import theme
-import topic_store
-from bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
+from ui import macos
+from core import model_storage
+from tags import tag_normalizer
+from ui import theme
+from topics import topic_store
+from ui.dialogs.bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
 from decision_engine.persistence import get_database, reset_clients
-from LDA_logic import LatentDirichletAllocator, stopwords
-from results_dialog import ResultsDialog
-from settings_dialog import SettingsDialog
-from tag_tab import TagTab
-from triage_tab import TriageTab
-from utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
-from widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
-from wrangler import DataWrangler, process_progress
+from topics.LDA_logic import LatentDirichletAllocator, stopwords
+from ui.dialogs.results_dialog import ResultsDialog
+from ui.dialogs.settings_dialog import SettingsDialog
+from ui.tabs.tag_tab import TagTab
+from ui.tabs.triage_tab import TriageTab
+from ui.utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
+from ui.widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
+from core.wrangler import DataWrangler, process_progress
 
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
@@ -697,7 +697,7 @@ class MainWindow(QMainWindow, QDialog):
         """Copies the saved run to S3 when MODEL_BUCKET is set. Runs on the worker thread.
 
         A failure becomes a warning on the run: the model is already saved
-        locally and can be uploaded later with `python -m model_storage upload`.
+        locally and can be uploaded later with `python -m core.model_storage upload`.
         """
         try:
             cfg = model_storage.config()
@@ -715,7 +715,7 @@ class MainWindow(QMainWindow, QDialog):
             logger.exception(f"Could not upload run {run['run_id']} to S3: {e}")
             run["warnings"].append(
                 f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
-                "Retry with: python -m model_storage upload " + run["run_id"]
+                "Retry with: python -m core.model_storage upload " + run["run_id"]
             )
 
     def _remember_allocator_error(self, message: str):

@@ -2,12 +2,12 @@
 
 import json
 
-import bertopic_model
-import bertopic_runs
-import model_storage
+from topics import bertopic_model
+from topics import bertopic_runs
+from core import model_storage
 import mongomock
 import pytest
-import topic_store
+from topics import topic_store
 from test_model_storage import BUCKET, env, s3  # noqa: F401  (fixtures)
 
 RUN_ID = "20261015T120000Z-bt0001"
@@ -98,7 +98,7 @@ def test_upload_problems_become_warnings(bert_dir, monkeypatch):
     )
     bertopic_runs.upload(run, model_storage.config)
     assert "offline" in run["warnings"][0]
-    assert f"python -m model_storage upload --bertopic {RUN_ID}" in run["warnings"][0]
+    assert f"python -m core.model_storage upload --bertopic {RUN_ID}" in run["warnings"][0]
 
 
 # --- Mongo ------------------------------------------------------------------------
@@ -258,7 +258,7 @@ def test_train_and_save_uploads_and_records(bert_dir, monkeypatch):
 
 
 def test_cli_uploads_bertopic_runs(s3, bert_dir, monkeypatch, capsys):
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     run = _bertopic_run(bert_dir)
 
     assert model_storage.main(["upload", "--bertopic"]) == 0
@@ -271,7 +271,7 @@ def test_cli_uploads_bertopic_runs(s3, bert_dir, monkeypatch, capsys):
 def test_cli_records_bertopic_uploads_in_the_bertopic_collection(
     s3, bert_dir, env, monkeypatch, capsys
 ):
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     env.setenv("MONGO_URI", "mongodb://test")
     db = mongomock.MongoClient().db
     import decision_engine.persistence

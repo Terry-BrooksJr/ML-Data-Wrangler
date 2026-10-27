@@ -4,7 +4,7 @@ import pathlib
 import sys
 
 import pytest
-import settings
+from core import settings
 
 
 @pytest.fixture
@@ -37,9 +37,9 @@ def test_blank_value_removes_setting(config):
 
 
 def test_saved_settings_apply_without_a_restart(config):
-    import bertopic_runs
-    import tag_runs
-    import topic_store
+    from topics import bertopic_runs
+    from tags import tag_runs
+    from topics import topic_store
     from decision_engine import classify, feedback
 
     settings.save(
@@ -277,7 +277,7 @@ def test_settings_refuse_ab_collection_names_that_clash(
 ):
     from PyQt5.QtWidgets import QMessageBox
 
-    import settings_dialog
+    from ui.dialogs import settings_dialog
 
     shown = []
     monkeypatch.setattr(

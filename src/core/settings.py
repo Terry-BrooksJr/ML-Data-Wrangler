@@ -138,7 +138,7 @@ SETTINGS: List[Setting] = [
         secret=True,
         help="Needed with a bucket. Signs uploaded models and verifies downloaded ones, which are only "
         "opened if the signature matches. Use the same key on every computer that shares models; "
-        "generate one with: python -m model_storage new-key",
+        "generate one with: python -m core.model_storage new-key",
     ),
     Setting(
         "B2_ENDPOINT_URL",

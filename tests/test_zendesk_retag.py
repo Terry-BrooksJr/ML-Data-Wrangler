@@ -10,7 +10,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-import tag_normalizer
+from tags import tag_normalizer
 
 # Ticket id -> (status, tags) in the fake account.
 TICKETS = {

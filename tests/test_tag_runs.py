@@ -7,11 +7,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import mongomock
 import numpy as np
 import pytest
-import tag_normalizer
-import tag_runs
+from tags import tag_normalizer
+from tags import tag_runs
 from PyQt5.QtWidgets import QApplication, QInputDialog, QMessageBox
-from tag_normalizer import collect, group_tags, mapping, Previous, with_successors
-from tag_tab import TagTab
+from tags.tag_normalizer import collect, group_tags, mapping, Previous, with_successors
+from ui.tabs.tag_tab import TagTab
 from test_tag_normalizer import fake_embed, VECTORS
 
 VECTORS.update({"vehicle care": [0.97, 0.05, 0.1], "pw reset": [0.05, 0.98, 0.0]})
@@ -253,7 +253,7 @@ from test_model_storage import BUCKET, env, s3  # noqa: E402,F401  (fixtures)
 
 
 def test_upload_then_download_on_another_computer(s3, db, tmp_path):
-    import model_storage
+    from core import model_storage
     import shutil
 
     tags, vectors, groups, mapped = run_parts(["oil change", "car maintenance"])
@@ -276,7 +276,7 @@ def test_upload_then_download_on_another_computer(s3, db, tmp_path):
 
 
 def test_upload_failure_is_a_warning_with_the_retry_command(env, tmp_path, monkeypatch):
-    import model_storage
+    from core import model_storage
 
     def fail(*args, **kwargs):
         raise RuntimeError("bucket unreachable")

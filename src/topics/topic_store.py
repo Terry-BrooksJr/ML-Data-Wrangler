@@ -23,7 +23,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import gensim
 from gensim.corpora.dictionary import Dictionary
 from gensim.models.ldamodel import LdaModel
-from LDA_logic import LatentDirichletAllocator, REMOVED_POS, tokenize
+from topics.LDA_logic import LatentDirichletAllocator, REMOVED_POS, tokenize
 from loguru import logger
 from pymongo.collection import Collection
 
@@ -225,7 +225,7 @@ def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Pat
     Raises:
         ValueError: the run ID isn't a plain folder name.
     """
-    import model_storage
+    from core import model_storage
 
     base = (base_dir or model_dir()).resolve()
     folder = (base / model_storage.check_run_id(run["run_id"])).resolve()
@@ -317,7 +317,7 @@ def ensure_local(run: dict, base_dir: Optional[pathlib.Path] = None) -> dict:
             raise FileNotFoundError(
                 f"Run {run['run_id']}'s model files aren't on this computer and it was never uploaded."
             )
-        import model_storage
+        from core import model_storage
 
         cfg = model_storage.config()
         if cfg is None:
@@ -490,7 +490,7 @@ def assign_from_saved_run(
     Args:
         query: Which tickets to assign; defaults to all of them.
     """
-    from wrangler import DataWrangler
+    from core.wrangler import DataWrangler
 
     model, dictionary = load_run_model(run)
     docs = list(

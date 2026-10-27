@@ -24,7 +24,7 @@ find the themes inside one outcome. Each saved topic lists how many of its
 tickets have each outcome, and the IDs of the tickets nearest its centre;
 no ticket text is saved with a run.
 
-    cd src && python -m bertopic_model [--min-cluster-size N] [--nr-topics N]
+    cd src && python -m topics.bertopic_model [--min-cluster-size N] [--nr-topics N]
         [--keep-outliers] [--seed N] [--compare-lda RUN_ID] [--assign]
         [--outcome OUTCOME ...]   (--outcome none for tickets with no outcome)
 """
@@ -39,9 +39,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import embeddings
+from embedding import embeddings
 import numpy as np
-import topic_store
+from topics import topic_store
 from loguru import logger
 from pymongo.collection import Collection
 
@@ -643,7 +643,7 @@ def describe_assignment(summary: dict, run_id: str) -> str:
         how = "Stopped early" if summary.get("status") == "partial" else "Not started"
         text += (
             f" {how}: {summary.get('error')} Finish it with "
-            f"`cd src && python -m bertopic_model --assign-run {run_id}`."
+            f"`cd src && python -m topics.bertopic_model --assign-run {run_id}`."
         )
     return text
 
@@ -709,7 +709,7 @@ def _positive_int(value: str) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m bertopic_model",
+        prog="python -m topics.bertopic_model",
         description="Topic-model tickets with BERTopic on their stored embeddings.",
     )
     parser.add_argument(
@@ -764,12 +764,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: List[str]) -> int:
     args = _parser().parse_args(argv)
-    import settings
+    from core import settings
 
     settings.load()  # .env and the app's saved Settings (MONGO_URI etc.)
     import en_core_web_lg
-    from LDA_logic import stopwords, tokenize
-    from wrangler import DataWrangler
+    from topics.LDA_logic import stopwords, tokenize
+    from core.wrangler import DataWrangler
 
     tickets = DataWrangler.get_tickets_collection()
     if args.assign_run:
@@ -793,7 +793,7 @@ def main(argv: List[str]) -> int:
     )
     print(f"{len(corpus.ids)} tickets with a current embedding; skipped: {skipped}")
     if corpus.skipped.get("no_embedding") or corpus.skipped.get("stale"):
-        print("  (python -m embeddings backfill embeds the missing and stale ones)")
+        print("  (python -m embedding.embeddings backfill embeds the missing and stale ones)")
 
     nlp = en_core_web_lg.load()
     stop_words = stopwords.words("english")

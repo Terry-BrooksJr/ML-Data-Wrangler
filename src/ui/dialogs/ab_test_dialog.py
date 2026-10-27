@@ -17,7 +17,7 @@ import math
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import zendesk_links
+from ui import zendesk_links
 from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig
 from decision_engine.identity import current_user
@@ -46,7 +46,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from widgets import (
+from ui.widgets import (
     Button,
     Card,
     CheckBox,

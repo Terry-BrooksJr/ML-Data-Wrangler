@@ -46,7 +46,7 @@ def backfill(tickets: Collection) -> int:
 
 
 if __name__ == "__main__":
-    import settings
+    from core import settings
 
     from .persistence import get_tickets_collection
 
