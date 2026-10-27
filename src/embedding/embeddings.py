@@ -780,6 +780,7 @@ def run_backfill(
     plan: Plan,
     should_stop: Optional[Callable[[], bool]] = None,
     embed_fn: Optional[Callable[[List[str], Config], Tuple[np.ndarray, int]]] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """Embeds the tickets in an approved plan and clears its empty ones.
 
@@ -788,6 +789,9 @@ def run_backfill(
     keeps what was done. A write is skipped if the ticket's subject or
     transcript changed since the plan (counted as `changed`; the next
     backfill picks it up).
+
+    `on_progress(handled, total)` is called after each batch is written, on
+    the calling thread.
 
     Returns:
         {"embedded", "changed", "cleared", "tokens", "cancelled", "complete"}:
@@ -835,6 +839,8 @@ def run_backfill(
                 )
                 summary["embedded" if result.matched_count else "changed"] += 1
             logger.info(f"Embedded {summary['embedded']}/{len(texts)} ticket(s).")
+            if on_progress:
+                on_progress(end, len(texts))
     summary["complete"] = True
     return summary
 
