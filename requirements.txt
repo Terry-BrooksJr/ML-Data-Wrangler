@@ -468,7 +468,7 @@ seaborn==0.13.2
     # via ml-data-wrangler
 sentence-transformers==6.1.0 ; sys_platform == 'never'
     # via bertopic
-setuptools==84.0.0
+setuptools==84.1.0
     # via
     #   pyldavis
     #   spacy
