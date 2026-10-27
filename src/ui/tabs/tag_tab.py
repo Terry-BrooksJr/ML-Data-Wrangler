@@ -22,11 +22,11 @@ import pathlib
 from datetime import datetime
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
-import embeddings
+from embedding import embeddings
 import numpy as np
-import tag_llm
-import tag_normalizer
-import tag_runs
+from tags import tag_llm
+from tags import tag_normalizer
+from tags import tag_runs
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QThread
@@ -44,9 +44,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tag_normalizer import Group, LLM, Previous, SPACY, Tag, VOYAGE
-from utility import ThreadWorker, worker_thread
-from widgets import (
+from tags.tag_normalizer import Group, LLM, Previous, SPACY, Tag, VOYAGE
+from ui.utility import ThreadWorker, worker_thread
+from ui.widgets import (
     Button,
     Card,
     CheckBox,
@@ -82,7 +82,7 @@ def _default_database():
 
 
 def _default_storage():
-    import model_storage
+    from core import model_storage
 
     return model_storage.config()
 

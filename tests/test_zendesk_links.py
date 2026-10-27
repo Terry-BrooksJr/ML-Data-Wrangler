@@ -1,4 +1,4 @@
-import zendesk_links
+from ui import zendesk_links
 
 
 def test_ticket_url_takes_ticket_numbers_only(monkeypatch):

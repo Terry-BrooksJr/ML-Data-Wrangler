@@ -3,8 +3,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-import theme
-import widgets
+from ui import theme
+from ui import widgets
 from PyQt5.QtGui import QPalette
 from PyQt5.QtWidgets import QApplication, QGraphicsOpacityEffect
 

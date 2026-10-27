@@ -2,8 +2,8 @@ import json
 from datetime import datetime, timezone
 import pathlib
 
-import bertopic_model
-import embeddings
+from topics import bertopic_model
+from embedding import embeddings
 import mongomock
 import numpy as np
 import pytest
@@ -274,7 +274,7 @@ def test_save_run_writes_model_assignments_and_details(trained, tmp_path):
 
 
 def test_saved_runs_stay_out_of_the_lda_run_list(monkeypatch, tmp_path):
-    import topic_store
+    from topics import topic_store
 
     monkeypatch.setenv("TOPIC_MODEL_DIR", str(tmp_path / "topic_models"))
     monkeypatch.delenv("BERTOPIC_MODEL_DIR", raising=False)
@@ -441,7 +441,7 @@ def test_newest_run_keeps_its_topics_whatever_order_runs_write(order):
 def test_assignment_waits_for_no_one_else():
     from datetime import timedelta
 
-    import embeddings
+    from embedding import embeddings
 
     tickets = _assign_tickets()
     tickets.database[embeddings.LOCK_COLLECTION].insert_one(

@@ -98,14 +98,14 @@ tasks:
     preconditions:
       - sh: test {{len .CLI_ARGS_LIST}} -gt 0
         msg: "Name a tag file: task tags -- FILE (or task tags -- --help)"
-    cmd: uv run --project {{shellQuote .ROOT_DIR}} python -m tag_normalizer{{.ARGS}}
+    cmd: uv run --project {{shellQuote .ROOT_DIR}} python -m tags.tag_normalizer{{.ARGS}}
 
   embed:check:
     desc: One tiny Voyage call to test the embedding key (no ticket text)
     aliases: [ec]
     deps: [_uv]
     dir: "{{.SRC}}"
-    cmd: uv run python -m embeddings check
+    cmd: uv run python -m embedding.embeddings check
 
   embed:backfill:
     desc: Embed new or changed tickets with Voyage (paid; sends ticket text)
@@ -113,7 +113,7 @@ tasks:
     deps: [_uv]
     dir: "{{.SRC}}"
     prompt: This sends ticket text to Voyage AI and is billed. Continue?
-    cmd: uv run python -m embeddings backfill{{.ARGS}}
+    cmd: uv run python -m embedding.embeddings backfill{{.ARGS}}
 
   # --- test -------------------------------------------------------------------------
 
@@ -191,7 +191,8 @@ tasks:
     platforms: [darwin, linux]
     sources:
       - "{{.SRC}}/**/*.py"
-      - "{{.SRC}}/zendesk_retag/*"
+      - "{{.SRC}}/tags/zendesk_retag/*"
+      - "{{.SRC}}/tags/*.md"
       - packaging/**/*
       - uv.lock
       - exclude: "{{.SRC}}/**/__pycache__/**"

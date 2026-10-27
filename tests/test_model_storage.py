@@ -2,10 +2,10 @@ import json
 import os
 
 import boto3
-import model_storage
+from core import model_storage
 import mongomock
 import pytest
-import topic_store
+from topics import topic_store
 from moto import mock_aws
 
 BUCKET = "lasso-models"
@@ -462,7 +462,7 @@ def test_incomplete_local_copy_is_moved_aside(s3, tmp_path):
 def test_cli_uploads_runs_not_yet_uploaded_and_records_them(
     s3, tmp_path, env, monkeypatch, capsys
 ):
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     env.setenv("MONGO_URI", "mongodb://test")
     runs = mongomock.MongoClient().db[topic_store.runs_collection()]
     import decision_engine.persistence
@@ -509,7 +509,7 @@ def test_cli_keeps_an_existing_mongo_record(s3, tmp_path, monkeypatch):
 
 def test_cli_needs_a_bucket(env, monkeypatch, capsys):
     env.delenv("MODEL_BUCKET")
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     assert model_storage.main(["upload"]) == 2
     assert "MODEL_BUCKET is not set" in capsys.readouterr().err
 
@@ -534,7 +534,7 @@ def test_downloaded_run_json_is_rewritten_for_this_computer(
     assert saved["charts"]["lda_html"] == str(local / "charts" / "lda_model.html")
 
     # The sequence from the review: a default upload must not pick the downloaded run.
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     assert model_storage.main(["upload"]) == 0
     assert "Every local run is already uploaded." in capsys.readouterr().out
     [listed] = topic_store.list_runs()

@@ -9,9 +9,9 @@ import pathlib
 import webbrowser
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-import bertopic_model
-import bertopic_runs
-import topic_store
+from topics import bertopic_model
+from topics import bertopic_runs
+from topics import topic_store
 from loguru import logger
 from PyQt5.QtWidgets import (
     QDialog,
@@ -27,8 +27,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from utility import ThreadWorker, worker_thread
-from widgets import button_row, Button, CheckBox, ComboBox, heading, hint, use_si_scrollbars
+from ui.utility import ThreadWorker, worker_thread
+from ui.widgets import button_row, Button, CheckBox, ComboBox, heading, hint, use_si_scrollbars
 
 
 class BertopicOptionsDialog(QDialog):

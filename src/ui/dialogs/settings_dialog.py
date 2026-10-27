@@ -4,10 +4,10 @@ from itertools import groupby
 from typing import Dict
 from urllib.parse import urlsplit
 
-import settings
+from core import settings
 from decision_engine.ab_test import collection_name_problem
 from decision_engine.classify import api_url_problem, is_loopback_url
-from embeddings import ALLOWED_DIMENSIONS, parse_dimensions
+from embedding.embeddings import ALLOWED_DIMENSIONS, parse_dimensions
 from loguru import logger
 from PyQt5.QtWidgets import (
     QAction,
@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from widgets import Card, hint, LineEdit, use_si_scrollbars
+from ui.widgets import Card, hint, LineEdit, use_si_scrollbars
 
 # Width of the label part of each field, so a group's fields line up.
 TITLE_WIDTH = 190

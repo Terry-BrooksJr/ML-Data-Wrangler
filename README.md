@@ -5,12 +5,32 @@ The repo holds two separate pieces of work that read the same Zendesk ticket dat
 
 | Component | Location | What it does |
 |---|---|---|
-| **Data wrangler + LDA** | `src/wrangler.py`, `src/LDA_logic.py`, `src/app.py` | A PyQt5 desktop app. It reshapes Zendesk API exports (`tickets-only.json`, `comments/`) into a cleaned corpus, trains gensim LDA topic models and visualises them. `DataWrangler.ticket_to_xml()` also emits tickets as XML that validates against `ticket_schema.xsd`. |
+| **Data wrangler + LDA** | `src/core/wrangler.py`, `src/topics/LDA_logic.py`, `src/app.py` | A PyQt5 desktop app. It reshapes Zendesk API exports (`tickets-only.json`, `comments/`) into a cleaned corpus, trains gensim LDA topic models and visualises them. `DataWrangler.ticket_to_xml()` also emits tickets as XML that validates against `ticket_schema.xsd`. |
 | **Triage decision engine** | `src/decision_engine/` | An LLM classifier that reads one mapped ticket from Mongo and recommends a single triage action. |
 
 The two are **not** the same concern. LDA is unsupervised, offline topic
 modelling. The decision engine is a live classifier against a fixed taxonomy.
 No zero-shot or fine-tuning code exists yet.
+
+## Source layout
+
+`src/` is the import root (tests and `python -m` commands run from it), with
+`app.py`, the desktop app's entry point, at the top and everything else in a
+package by what it does:
+
+| Package | What's in it |
+|---|---|
+| `core/` | `settings` (app settings), `wrangler` (Zendesk export → corpus, XML and MongoDB), `model_storage` (topic-model runs on S3) |
+| `embedding/` | `embeddings` (Voyage AI ticket embeddings and the vector index), `embedding_eval` |
+| `topics/` | `LDA_logic`, `bertopic_model`, `bertopic_runs`, `topic_store` |
+| `tags/` | `tag_normalizer`, `tag_llm`, `tag_runs`, the prompt references, and `zendesk_retag/` (scripts a person runs against Zendesk) |
+| `decision_engine/` | The triage classifier, feedback, A/B tests and training-data export (no Qt) |
+| `ui/` | Shared Qt pieces: `theme`, `widgets`, `utility` (worker threads), `macos`, `chart_viewer`, `zendesk_links` |
+| `ui/tabs/` | The main window's tabs: `tag_tab`, `triage_tab` |
+| `ui/dialogs/` | `ab_test_dialog`, `bertopic_dialog`, `lessons_dialog`, `results_dialog`, `settings_dialog` |
+
+Imports are absolute from `src/`, e.g. `from core import settings` or
+`from ui.widgets import Button`.
 
 ## Setup
 
@@ -116,9 +136,9 @@ instead of retraining: the only difference would be the random seed.
 
 The app is styled with [PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI)
 (GPL-3.0, like PyQt5 itself). Its buttons, combo boxes, checkboxes, progress
-bars, scroll bars and cards are SiliconUI widgets (`src/widgets.py`); the
+bars, scroll bars and cards are SiliconUI widgets (`src/ui/widgets.py`); the
 plain Qt widgets around them (tabs, tables, text boxes, dialogs) get a
-stylesheet built from SiliconUI's colour tokens (`src/theme.py`). SiliconUI's
+stylesheet built from SiliconUI's colour tokens (`src/ui/theme.py`). SiliconUI's
 widgets come only in dark, so there is no longer a light or native theme and
 the Theme setting is gone; a saved `LASSO_THEME` is ignored.
 
@@ -130,7 +150,7 @@ from GitHub at a pinned commit. To try a newer one, change `rev` under
 
 **Train BERTopic Model…** groups the tickets in MongoDB by meaning, using the
 Voyage embeddings already stored on each ticket (run
-`cd src && python -m embeddings backfill` first; tickets whose embedding is
+`cd src && python -m embedding.embeddings backfill` first; tickets whose embedding is
 missing or older than their text are left out). It asks for a minimum topic
 size (default 1% of tickets, at least 10), a number of topics to merge down to
 (default: keep all found), whether to keep outliers as topic -1, an optional
@@ -148,8 +168,8 @@ MongoDB's `bertopic_run_log` (`BERTOPIC_RUNS_COLLECTION`; LDA runs go to
 `s3://<bucket>/<MODEL_PREFIX>bertopic/<run_id>/`. **Show Previous BERTopic
 Run…** lists runs from MongoDB and this computer, and downloads and verifies
 one whose files aren't here before showing its charts. Retry a failed upload
-with `cd src && python -m model_storage upload --bertopic [RUN_ID ...]`. The
-same can be run from the command line: `cd src && python -m bertopic_model --help`.
+with `cd src && python -m core.model_storage upload --bertopic [RUN_ID ...]`. The
+same can be run from the command line: `cd src && python -m topics.bertopic_model --help`.
 
 #### Finding themes within an outcome
 
@@ -165,7 +185,7 @@ Topic List…** in the results window writes a CSV with one row per topic
 (size, outcomes, top words, example tickets and, read from MongoDB, their
 subjects) and blank `proposed_name` and `decision` columns to curate the
 topics into a reporting list. From the command line:
-`cd src && python -m bertopic_model --outcome client_education` (repeat
+`cd src && python -m topics.bertopic_model --outcome client_education` (repeat
 `--outcome` for several; `--outcome none` for tickets with no outcome).
 
 Writing each ticket's topic to `embedding_topic`:
@@ -176,7 +196,7 @@ Writing each ticket's topic to `embedding_topic`:
 - **Interruptions are recorded.** Writes go in batches. The run records
   whether assignment completed (`assignment.status`, with counts) in
   `run.json` and the run log. A partial or blocked assignment is finished
-  with `cd src && python -m bertopic_model --assign-run RUN_ID`.
+  with `cd src && python -m topics.bertopic_model --assign-run RUN_ID`.
 
 The exported topic list prefixes any cell that starts like a spreadsheet
 formula (`=`, `+`, `-`, `@`) with `'`, so opening it can't run a formula
@@ -195,7 +215,7 @@ and MongoDB.
   `https://s3.us-west-004.backblazeb2.com`); the region is read from it.
   AWS S3: leave the endpoint blank and set the region.
 - **Signing key:** use the same key on every computer that shares models
-  (`cd src && python -m model_storage new-key` makes one). Model files are
+  (`cd src && python -m core.model_storage new-key` makes one). Model files are
   Python pickles, which run code when loaded, so a downloaded run is only
   opened if its manifest's signature verifies with this key and every file
   matches its listed size and hash. Someone who can edit MongoDB or the bucket
@@ -204,7 +224,7 @@ and MongoDB.
   never from a path a run record names.
 - A failed upload doesn't lose the run: it stays saved locally and the app
   shows a warning. Retry, or upload runs trained before this was set up, with
-  `cd src && python -m model_storage upload [RUN_ID ...]` (this also adds the
+  `cd src && python -m core.model_storage upload [RUN_ID ...]` (this also adds the
   run to MongoDB if it isn't there yet).
 - A run whose files aren't on this computer (trained elsewhere, or the folder
   was cleared) is downloaded from its upload when you open it with Show
@@ -221,7 +241,7 @@ and MongoDB.
 ### Using it from Python
 
 ```python
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 wrangler = DataWrangler()               # tickets-only.json + comments/ in the current directory
 wrangler.tickets_reshaped()
@@ -277,8 +297,8 @@ names the group. Untick **Keep facet__value tags apart** to allow it.
 The same from the command line:
 
 ```bash
-cd src && python -m tag_normalizer tags.csv --out tag_mapping.csv
-cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
+cd src && python -m tags.tag_normalizer tags.csv --out tag_mapping.csv
+cd src && python -m tags.tag_normalizer tags.txt --backend spacy --threshold 0.8
 ```
 
 ### Saved runs and normalized tags
@@ -287,7 +307,7 @@ cd src && python -m tag_normalizer tags.txt --backend spacy --threshold 0.8
 under `tag_normalizer_runs/` (`TAG_RUN_DIR`) holds the tags, their vectors and
 the mapping (CSV and JSON); with model storage set up it is uploaded with a
 signed manifest to `s3://<bucket>/<MODEL_PREFIX>tag_normalizer/<run_id>/`
-(retry a failed upload with `cd src && python -m model_storage upload --tags RUN_ID`);
+(retry a failed upload with `cd src && python -m core.model_storage upload --tags RUN_ID`);
 and it is recorded in MongoDB's `tag_normalization_run_log`
 (`TAG_RUNS_COLLECTION`) with its settings, your renames and unticked tags,
 and every tag it changed. **Previous Runs…** lists runs from MongoDB and
@@ -328,10 +348,10 @@ Without `MONGO_URI` the tab works as before and Save Run keeps the folder
 
 The third option, **Language model**, sends the tags (with how often each was
 seen) to a model that follows
-[`src/tag_normalization_reference.md`](src/tag_normalization_reference.md).
+[`src/tags/tag_normalization_reference.md`](src/tags/tag_normalization_reference.md).
 That file holds the rules R1-R11, the tag registry, known overlap clusters and
 the JSON output contract, and is sent as the model's instructions.
-[`src/tag_normalization_priorities.md`](src/tag_normalization_priorities.md)
+[`src/tags/tag_normalization_priorities.md`](src/tags/tag_normalization_priorities.md)
 follows it and wins where they differ. The goal is discoverability: merge tags
 that name the same concept even when they share no words, coin a new tag when
 that names the concept best, and never rename a tag only to change its format.
@@ -378,7 +398,7 @@ request holds at most 1,000 tags; split longer lists, since splitting hides
 merges across the parts.
 
 ```bash
-cd src && python -m tag_normalizer tags.csv --backend llm --out tag_mapping.json
+cd src && python -m tags.tag_normalizer tags.csv --backend llm --out tag_mapping.json
 ```
 
 ### Retagging tickets in Zendesk
@@ -406,7 +426,7 @@ so it can fire triggers that look at tags. The folder's `README.txt` has the
 full steps.
 
 ```bash
-cd src && python -m tag_normalizer tags.csv --scripts ../zendesk_retag_run
+cd src && python -m tags.tag_normalizer tags.csv --scripts ../zendesk_retag_run
 ```
 
 ## Writing tickets to MongoDB
@@ -416,7 +436,7 @@ decision engine reads. It uses the same `MONGO_URI`, `MONGO_DB` and
 `MONGO_COLLECTION` settings as the engine.
 
 ```python
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 wrangler = DataWrangler()                  # tickets-only.json + comments/
 wrangler.write_tickets_to_mongo()          # every ticket in the export
@@ -732,18 +752,18 @@ may already have been billed) and redirects refused.
 From the command line:
 
 ```bash
-cd src && python -m embeddings check      # one tiny call to test the key; no ticket text
-cd src && python -m embeddings backfill   # same as the button
+cd src && python -m embedding.embeddings check      # one tiny call to test the key; no ticket text
+cd src && python -m embedding.embeddings backfill   # same as the button
 ```
 
 ### Comparing embedding models
 
-`src/embedding_eval.py` compares Voyage with other models on labelled tickets. It embeds every ticket in a labelled evaluation set
+`src/embedding/embedding_eval.py` compares Voyage with other models on labelled tickets. It embeds every ticket in a labelled evaluation set
 (the same file `decision_engine.evaluation` uses) with each model and checks
 how often a ticket's nearest neighbours share its classification.
 
 ```bash
-cd src && python -m embedding_eval ../eval_sets/backlog_sample.json --text opening full --show-neighbours 5
+cd src && python -m embedding.embedding_eval ../eval_sets/backlog_sample.json --text opening full --show-neighbours 5
 ```
 
 - Models: spaCy `en_core_web_lg` (free, local), Voyage (the app's embedding

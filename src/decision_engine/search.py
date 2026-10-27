@@ -4,7 +4,7 @@ Needs an Atlas cluster or the mongodb/mongodb-atlas-local Docker image: a
 plain mongod has no $search or search indexes.
 
 Also creates the vector index over each ticket's `embedding`, which
-src/embeddings.py fills in from Voyage AI (ensure_vector_index). Nothing
+src/embedding/embeddings.py fills in from Voyage AI (ensure_vector_index). Nothing
 queries it yet.
 
     python -m decision_engine.search ensure [--wait]

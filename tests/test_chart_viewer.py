@@ -1,7 +1,7 @@
 import http.client
 import urllib.parse
 
-import chart_viewer
+from ui import chart_viewer
 import pytest
 
 

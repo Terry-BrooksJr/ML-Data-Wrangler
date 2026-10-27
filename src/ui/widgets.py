@@ -8,7 +8,7 @@ currentData, setChecked, toggled, text, returnPressed.
 
 from typing import Optional
 
-import theme  # noqa: F401  (imports siui quietly; see theme.py)
+from ui import theme  # noqa: F401  (imports siui quietly; see theme.py)
 from PyQt5.QtCore import QEvent, QObject, QSize
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (

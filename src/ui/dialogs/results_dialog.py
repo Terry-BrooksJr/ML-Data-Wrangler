@@ -8,7 +8,7 @@ the browser, sandboxed (chart_viewer).
 import pathlib
 from typing import List, Optional, Tuple
 
-import chart_viewer
+from ui import chart_viewer
 from loguru import logger
 from PyQt5 import QtCore
 from PyQt5.QtGui import QPixmap
@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from widgets import Button, heading, hint, use_si_scrollbars
+from ui.widgets import Button, heading, hint, use_si_scrollbars
 
 PLOT_WIDTH = 560
 

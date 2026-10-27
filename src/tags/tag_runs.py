@@ -44,11 +44,11 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
-import tag_normalizer
-import topic_store
+from tags import tag_normalizer
+from topics import topic_store
 from loguru import logger
 from pymongo.collection import Collection
-from tag_normalizer import Group, Previous, Tag
+from tags.tag_normalizer import Group, Previous, Tag
 
 METHOD = "tag_normalizer"
 # Under MODEL_PREFIX in the bucket, apart from the topic-model runs.
@@ -86,7 +86,7 @@ def embedding_info(backend: str) -> dict:
     if backend == tag_normalizer.SPACY:
         return {"backend": backend, "model": "en_core_web_lg"}
     try:
-        import embeddings
+        from embedding import embeddings
 
         cfg = embeddings.config()
         return {"backend": backend, "model": cfg.model, "dimensions": cfg.dimensions}
@@ -294,7 +294,7 @@ def storage_config(cfg):
 
 def upload(run: dict, storage: Callable[[], Optional[object]], client=None) -> None:
     """Uploads the run when storage is configured; a failure becomes a warning on the run."""
-    import model_storage
+    from core import model_storage
 
     run.setdefault("warnings", [])
     try:
@@ -311,7 +311,7 @@ def upload(run: dict, storage: Callable[[], Optional[object]], client=None) -> N
         logger.exception(f"Could not upload Tag Normalizer run {run['run_id']} to S3: {e}")
         run["warnings"].append(
             f"Saved locally, but the upload to s3://{cfg.bucket} failed: {e}. "
-            f"Retry with: python -m model_storage upload --tags {run['run_id']}"
+            f"Retry with: python -m core.model_storage upload --tags {run['run_id']}"
         )
 
 
@@ -422,7 +422,7 @@ def local_dir(run: dict, base_dir: Optional[pathlib.Path] = None) -> pathlib.Pat
     Raises:
         ValueError: the run ID isn't a plain folder name.
     """
-    import model_storage
+    from core import model_storage
 
     base = (base_dir or run_dir()).resolve()
     folder = (base / model_storage.check_run_id(run["run_id"])).resolve()
@@ -463,7 +463,7 @@ def ensure_local(
         ValueError: the run ID isn't a plain folder name.
         model_storage.UntrustedRun: the upload failed verification.
     """
-    import model_storage
+    from core import model_storage
 
     local = local_dir(run, base_dir)
     if not _complete(local):

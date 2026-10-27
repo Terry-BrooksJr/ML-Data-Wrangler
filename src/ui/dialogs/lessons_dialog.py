@@ -11,7 +11,7 @@ import getpass
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
-import zendesk_links
+from ui import zendesk_links
 from decision_engine import feedback
 from loguru import logger
 from pymongo.collection import Collection
@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from widgets import Button, Card, hint, LineEdit, use_si_scrollbars
+from ui.widgets import Button, Card, hint, LineEdit, use_si_scrollbars
 
 LOG_COLUMNS = [
     "Ticket",

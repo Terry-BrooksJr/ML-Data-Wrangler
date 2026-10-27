@@ -3,10 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-import results_dialog
+from ui.dialogs import results_dialog
 from PyQt5.QtGui import QColor, QImage
 from PyQt5.QtWidgets import QApplication
-from results_dialog import format_topics, ResultsDialog
+from ui.dialogs.results_dialog import format_topics, ResultsDialog
 
 TOPICS = [(3, 0.6, ["import", "fails"]), (0, 0.4, ["login", "sso"])]
 

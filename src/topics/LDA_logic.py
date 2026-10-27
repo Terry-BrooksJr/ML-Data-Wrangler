@@ -20,7 +20,7 @@ from nltk.corpus import stopwords
 from numpy.random import RandomState
 from PyQt5.QtCore import pyqtSignal, QMutex, QObject
 from spacy.language import Language
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 try:
     stopwords.words("english")

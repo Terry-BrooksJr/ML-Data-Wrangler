@@ -3,7 +3,7 @@ import io
 import json
 from types import SimpleNamespace
 
-import embedding_eval as ee
+from embedding import embedding_eval as ee
 import numpy as np
 import pytest
 from fixtures import CATEGORY_FIXTURES
@@ -113,7 +113,7 @@ def fake_candidates(monkeypatch):
         }
 
     monkeypatch.setattr(ee, "candidates", fake)
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     return calls
 
 

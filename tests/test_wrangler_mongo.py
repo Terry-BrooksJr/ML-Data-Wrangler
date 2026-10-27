@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import mongomock
 import pytest
 from decision_engine.payload import build_ticket_payload
-from wrangler import DataWrangler
+from core.wrangler import DataWrangler
 
 TICKET = {
     "id": 101,
@@ -182,7 +182,7 @@ def test_stored_document_feeds_decision_engine(wrangler, tickets):
 
 # --- HTML entity cleaning ------------------------------------------------------
 
-from wrangler import clean_text  # noqa: E402
+from core.wrangler import clean_text  # noqa: E402
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import embeddings
+from embedding import embeddings
 import mongomock
 import numpy as np
 import pytest
@@ -906,7 +906,7 @@ def cli(env, tickets, monkeypatch):
     """embeddings.main wired to the mongomock tickets, with embed calls recorded."""
     import decision_engine.persistence
 
-    monkeypatch.setattr("settings.load", lambda: None)
+    monkeypatch.setattr("core.settings.load", lambda: None)
     monkeypatch.setattr(
         decision_engine.persistence, "get_tickets_collection", lambda: tickets
     )

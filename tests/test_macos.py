@@ -3,7 +3,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-import macos
+from ui import macos
 import pytest
 
 
@@ -16,7 +16,8 @@ def test_does_nothing_off_macos(monkeypatch):
 def test_sets_the_bundle_name_macos_shows():
     # In a child process: the main bundle's name is process-wide.
     script = textwrap.dedent("""
-        import ctypes, macos
+        import ctypes
+        from ui import macos
         assert macos.set_app_name("Lasso")
         cls, sel, send = macos._runtime()
         bundle = send(ctypes.c_void_p)(cls(b"NSBundle"), sel(b"mainBundle"))

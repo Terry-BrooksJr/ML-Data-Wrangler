@@ -5,16 +5,16 @@ from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import ab_test_dialog
+from ui.dialogs import ab_test_dialog
 import mongomock
 import pytest
-import triage_tab
+from ui.tabs import triage_tab
 from decision_engine import pricing
 from decision_engine.zendesk_status import REVIEW_ADDED_KEY
 from fixtures import CATEGORY_FIXTURES
 from pymongo.errors import ServerSelectionTimeoutError
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from triage_tab import count_awaiting, format_review, recent_reviews, TriageTab
+from ui.tabs.triage_tab import count_awaiting, format_review, recent_reviews, TriageTab
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
 
