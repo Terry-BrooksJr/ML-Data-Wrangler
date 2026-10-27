@@ -71,7 +71,7 @@ if sys.platform == "darwin":
         icon=ICON,
         bundle_identifier="com.learnosity.lasso",
         info_plist={
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": "1.0.0",
             "NSHighResolutionCapable": True,
         },
     )
