@@ -6,7 +6,14 @@ sample with export_labelling_sample, filling in each "expected", and keeping
 the file out of git if it holds real customer text.
 
     python -m decision_engine.evaluation sample OUT.json [N]   # needs MONGO_URI
+    python -m decision_engine.evaluation balanced OUT.json [PER_CATEGORY]
+    python -m decision_engine.evaluation agree A.json B.json   # two labellers
     python -m decision_engine.evaluation run EVAL_SET.json     # paid model calls
+
+A random sample rarely holds a leadership case, so `balanced` picks up to
+PER_CATEGORY (default 15) reviewable tickets per category the engine last
+gave them, and every leadership case. `agree` compares two people's labels
+of the same tickets: where they disagree, the taxonomy is unclear.
 """
 
 import json
@@ -75,6 +82,99 @@ def export_labelling_sample(
     with open(path, "w") as f:
         json.dump(cases, f, indent=2, default=str)
     return len(cases)
+
+
+PER_CATEGORY = 15
+
+
+def _labelling_case(tickets: Collection, zendesk_id: str) -> dict:
+    doc = tickets.find_one({"zendesk_id": zendesk_id})
+    for field in _DROPPED_FIELDS:
+        doc.pop(field, None)
+    return {"ticket": doc, "expected": None, "note": ""}
+
+
+def export_balanced_sample(
+    tickets: Collection,
+    path: str,
+    per_category: int = PER_CATEGORY,
+    seed: Optional[int] = None,
+) -> Dict[str, int]:
+    """Writes a labelling sample balanced across categories.
+
+    Tickets are grouped by their latest review's classification; only
+    reviewable ones (not Solved or Closed) with a review are used. Up to
+    per_category come from each group, and every escalate_leadership one.
+    The engine's answer is left out (agent_reviews is dropped), so it can't
+    sway the labeller; cases are shuffled for the same reason.
+
+    Returns:
+        How many tickets were taken from each category.
+    """
+    from .persistence import REVIEWABLE
+
+    groups: Dict[str, List[str]] = {c: [] for c in CLASSIFICATIONS}
+    query = {"agent_reviews.0": {"$exists": True}, **REVIEWABLE}
+    for doc in tickets.find(query, {"zendesk_id": 1, "agent_reviews": 1}):
+        latest = doc["agent_reviews"][-1].get("classification")
+        if latest in groups:
+            groups[latest].append(doc["zendesk_id"])
+    rng = random.Random(seed)
+    chosen: Dict[str, List[str]] = {}
+    for category, ids in groups.items():
+        ids.sort()
+        take = len(ids) if category == "escalate_leadership" else per_category
+        chosen[category] = rng.sample(ids, min(take, len(ids)))
+    cases = [_labelling_case(tickets, i) for ids in chosen.values() for i in ids]
+    rng.shuffle(cases)
+    with open(path, "w") as f:
+        json.dump(cases, f, indent=2, default=str)
+    return {category: len(ids) for category, ids in chosen.items()}
+
+
+def agreement(cases_a: Iterable[dict], cases_b: Iterable[dict]) -> dict:
+    """How far two labellers agree on the tickets both labelled.
+
+    Returns:
+        {"compared", "agreement" (share of equal labels), "kappa" (Cohen's,
+        agreement beyond chance; None when undefined), "disagreements":
+        [{"zendesk_id", "a", "b"}]}.
+    """
+
+    def labels(cases):
+        return {
+            str(case["ticket"]["zendesk_id"]): case.get("expected")
+            for case in cases
+            if case.get("expected") in CLASSIFICATIONS
+        }
+
+    a, b = labels(cases_a), labels(cases_b)
+    shared = sorted(set(a) & set(b))
+    if not shared:
+        return {"compared": 0, "agreement": None, "kappa": None, "disagreements": []}
+    observed = sum(a[t] == b[t] for t in shared) / len(shared)
+    count_a, count_b = Counter(a[t] for t in shared), Counter(b[t] for t in shared)
+    expected = sum(count_a[c] * count_b[c] for c in CLASSIFICATIONS) / len(shared) ** 2
+    return {
+        "compared": len(shared),
+        "agreement": observed,
+        "kappa": None if expected == 1 else (observed - expected) / (1 - expected),
+        "disagreements": [
+            {"zendesk_id": t, "a": a[t], "b": b[t]} for t in shared if a[t] != b[t]
+        ],
+    }
+
+
+def format_agreement(result: dict) -> str:
+    if not result["compared"]:
+        return "No ticket was labelled in both files."
+    kappa = "n/a" if result["kappa"] is None else f"{result['kappa']:.2f}"
+    lines = [
+        f"{result['compared']} tickets labelled by both: "
+        f"{result['agreement']:.0%} agree (Cohen's kappa {kappa})."
+    ]
+    lines += [f"  {d['zendesk_id']}: {d['a']} vs {d['b']}" for d in result["disagreements"]]
+    return "\n".join(lines)
 
 
 def evaluate(
@@ -169,6 +269,22 @@ def main(argv: List[str]) -> int:
             get_tickets_collection(), argv[1], int(argv[2]) if len(argv) > 2 else 50
         )
         print(f"Wrote {count} tickets to {argv[1]}; fill in each 'expected'.")
+        return 0
+    if len(argv) >= 2 and argv[0] == "balanced":
+        from .persistence import get_tickets_collection
+
+        counts = export_balanced_sample(
+            get_tickets_collection(),
+            argv[1],
+            int(argv[2]) if len(argv) > 2 else PER_CATEGORY,
+        )
+        shown = ", ".join(f"{c} {n}" for c, n in counts.items())
+        print(f"Wrote {sum(counts.values())} tickets to {argv[1]} ({shown}).")
+        return 0
+    if len(argv) >= 3 and argv[0] == "agree":
+        # Partly labelled files are fine: only tickets both labelled count.
+        with open(argv[1]) as a, open(argv[2]) as b:
+            print(format_agreement(agreement(json.load(a), json.load(b))))
         return 0
     print(__doc__)
     return 2

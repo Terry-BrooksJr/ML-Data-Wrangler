@@ -312,3 +312,64 @@ def test_solved_and_closed_tickets_are_not_reviewed(status, reviewed):
     assert (ticket["zendesk_id"] in persistence.awaiting_ids(tickets)) == reviewed
     claimed = persistence.claim_ticket(tickets, ticket["zendesk_id"], "w")
     assert (claimed is not None) == reviewed
+
+
+# --- labelling and the roster ----------------------------------------------
+
+
+def reviewed(zendesk_id, classification, status="open"):
+    return {
+        "zendesk_id": zendesk_id,
+        "status": status,
+        "subject": "s",
+        "requester_id": "secret",
+        "agent_reviews": [{"classification": "flag_solve"}, {"classification": classification}],
+    }
+
+
+def test_balanced_sample_caps_each_category_but_keeps_every_leadership_case(tmp_path):
+    from decision_engine import evaluation
+
+    tickets = mongomock.MongoClient().support_db.tickets
+    tickets.insert_many(
+        [reviewed(f"s{i}", "flag_solve") for i in range(5)]
+        + [reviewed(f"l{i}", "escalate_leadership") for i in range(4)]
+        + [reviewed("closed", "on_track", status="closed"), {"zendesk_id": "new"}]
+    )
+    path = tmp_path / "sample.json"
+
+    counts = evaluation.export_balanced_sample(tickets, str(path), per_category=2, seed=1)
+
+    assert counts["flag_solve"] == 2 and counts["escalate_leadership"] == 4
+    assert counts["on_track"] == 0
+    cases = json.loads(path.read_text())
+    assert len(cases) == 6
+    assert all("agent_reviews" not in c["ticket"] and "requester_id" not in c["ticket"] for c in cases)
+
+
+def test_agreement_between_two_labellers():
+    from decision_engine import evaluation
+
+    def labelled(**labels):
+        return [{"ticket": {"zendesk_id": t}, "expected": c} for t, c in labels.items()]
+
+    a = labelled(t1="flag_solve", t2="flag_solve", t3="on_track", t4="flag_reengage")
+    b = labelled(t1="flag_solve", t2="on_track", t3="on_track", t5="flag_solve")
+    result = evaluation.agreement(a, b)
+
+    assert result["compared"] == 3
+    assert result["agreement"] == pytest.approx(2 / 3)
+    assert result["kappa"] == pytest.approx((2 / 3 - 4 / 9) / (1 - 4 / 9))
+    assert result["disagreements"] == [{"zendesk_id": "t2", "a": "flag_solve", "b": "on_track"}]
+    assert "67% agree" in evaluation.format_agreement(result)
+    assert evaluation.agreement(a, [])["compared"] == 0
+
+
+def test_roster_review_is_due_after_a_quarter():
+    from datetime import timedelta
+
+    from decision_engine import leadership
+
+    reviewed_on = leadership.ROSTER_REVIEWED
+    assert not leadership.roster_review_due(reviewed_on + timedelta(days=92))
+    assert leadership.roster_review_due(reviewed_on + timedelta(days=93))
