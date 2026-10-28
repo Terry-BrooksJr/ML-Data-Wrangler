@@ -133,17 +133,9 @@ def test_payload_wraps_bodies_and_omits_raw_xml():
         assert "is_internal_note" in entry
 
 
-def test_payload_serialises_datetimes_in_reengage_attempts():
-    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_reengage"])
-    ticket["reengage_attempts"] = [
-        {
-            "attempt_number": 1,
-            "drafted_at": ticket["transcript"][0]["timestamp"],
-            "sent_at": None,
-            "final_attempt": False,
-        }
-    ]
-    json.loads(build_ticket_payload(ticket).split("\n\n", 1)[1])
+def test_payload_leaves_out_stored_reengage_attempts():
+    # The prompt lists them as unavailable: re-engages are read from the transcript.
+    assert "reengage_attempts" not in payload_data(CATEGORY_FIXTURES["flag_reengage"])
 
 
 # --- classify --------------------------------------------------------------
@@ -575,6 +567,8 @@ RICH = "1085778551"  # VP of Support
         (STEPHEN, "Horacio Balserio, Rich Shupe", "Allain Dollete, Rich Shupe"),
         (ALLAIN, "Allain Dollete, Rich Shupe", "Rich Shupe"),
         ("12289991012893", "Rich Shupe", "Horacio Balserio, Rich Shupe"),
+        # Led by Rich Shupe himself: named once.
+        ("12289975534365", "Rich Shupe, Rich Shupe", "Rich Shupe"),
     ],
 )
 def test_leadership_recipients_follow_the_assignee(fake_model, assignee, given, expected):

@@ -33,7 +33,6 @@ def _ticket(zendesk_id, subject, transcript, **extra):
         "priority": None,
         "status": "open",
         "tags": [],
-        "jira_ids": [],
         "raw_xml": "<Ticket><Id>%s</Id></Ticket>" % zendesk_id,
         "transcript": transcript,
         "reengage_attempts": [],

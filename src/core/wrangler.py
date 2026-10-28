@@ -795,9 +795,9 @@ class DataWrangler(QObject):
             # TODO(open item #8): no stable customer identifier is agreed yet,
             # and the export has no requester email for the interim key.
             "customer_id": None,
-            # TODO(open item #7): Jira IDs need the confirmed integration
-            # comment format before they can be extracted.
-            "jira_ids": [],
+            # Jira links aren't in the ticket export: they are imported
+            # separately into jira_links (decision_engine.jira_links), which
+            # this document leaves out so a re-ingest doesn't clear them.
             "raw_xml": self.ticket_to_xml(ticket),
             "transcript": transcript,
             "created_at": self._parse_zendesk_time(ticket.get("created_at")),
