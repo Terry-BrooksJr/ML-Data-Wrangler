@@ -6,7 +6,8 @@ naming the wrong people (guards.apply_guards), so the two can't disagree.
 
 Rules (from the leadership escalation brief):
 - Rich Shupe, VP of Support, is a recipient unless he owns the ticket.
-- An engineer's Team Lead is a recipient too.
+- An engineer's Team Lead is a recipient too. Rich Shupe leads some
+  engineers himself (Internal Projects); he is named once.
 - The owner is never a recipient.
 - An assignee not in the roster (or none) goes to Rich Shupe and needs a
   mapping review; a ticket Rich Shupe owns has no recipient and needs a
@@ -42,9 +43,16 @@ ROSTER: Tuple[Person, ...] = (
     Person("12289991012893", "Will Griffiths", ENGINEER_ROLE, "Horacio Balserio"),
     Person("384720516977", "Anthony Mai", ENGINEER_ROLE, "Horacio Balserio"),
     Person("387134954297", "Chris Short", ENGINEER_ROLE, "Horacio Balserio"),
+    # Internal Projects Support Engineer, led by Rich Shupe directly.
+    Person("12289975534365", "Terry Brooks", ENGINEER_ROLE, "Rich Shupe"),
 )
 VP_SUPPORT = next(p.name for p in ROSTER if p.role == VP_ROLE)
 _BY_ID = {p.user_id: p for p in ROSTER}
+
+
+def is_support(user_id) -> bool:
+    """True if user_id is someone on the roster (anyone in Support)."""
+    return owner(user_id) is not None
 
 
 def owner(assignee) -> Optional[Person]:
@@ -70,7 +78,8 @@ def recipients_for(assignee) -> Tuple[List[str], Optional[str]]:
         )
     names = [person.team_lead] if person.team_lead else []
     names.append(VP_SUPPORT)
-    return [n for n in names if n != person.name], None
+    # dict.fromkeys keeps the order and names a lead who is also the VP once.
+    return [n for n in dict.fromkeys(names) if n != person.name], None
 
 
 def format_recipients(names: List[str]) -> Optional[str]:

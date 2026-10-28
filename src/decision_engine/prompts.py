@@ -4,10 +4,9 @@ This file is the prompt's reference copy. It began as section 4.1 of the
 AI-coder integration brief (no longer in the repo), with open item #1
 (leadership @mention recipients) since filled in as "Leadership recipients",
 its table rendered from leadership.py. Do not paraphrase or compress it: the
-precedence and exclusion wording is doing real work. The [PLACEHOLDER: ...] for available signals is
-intentionally left unfilled.
-
-TODO(open item #4): confirmed list of available signals.
+precedence and exclusion wording is doing real work. "Available signals"
+is the confirmed list (open item #4, settled in the taxonomy worksheet of
+2026-10-28); keep it in step with payload.py.
 """
 
 import hashlib
@@ -153,6 +152,7 @@ Rules:
 Recipients by owner:
 - An engineer on Allain Dollete's team → Allain Dollete, Rich Shupe
 - An engineer on Horacio Balserio's team → Horacio Balserio, Rich Shupe
+- An engineer whose Team Lead is Rich Shupe → Rich Shupe
 - Allain Dollete or Horacio Balserio → Rich Shupe
 - Rich Shupe → nobody; routing review needed
 - An unidentified owner → Rich Shupe; mapping review needed
@@ -187,11 +187,29 @@ transcript otherwise justifies. Judge severity primarily from the transcript.
 
 ## Available signals
 
-[PLACEHOLDER: confirmed list from worksheet section 4 — e.g. full transcript,
-customer tier, ticket age, prior ticket count, existing tags, sentiment/CSAT,
-SLA due date, linked Jira issues. Do not assume a signal is available unless
-confirmed here; if a trigger condition depends on an unconfirmed signal,
-lower confidence accordingly rather than assuming presence.]
+The ticket data gives you exactly these. Do not assume any other signal; if
+a trigger depends on one listed as unavailable, judge it only from what the
+transcript itself says, and lower confidence accordingly.
+
+Available:
+- The full transcript: public comments and internal notes, each with its
+  author ID, timestamp and author role. Roles: "requester" (the customer who
+  opened the ticket), "support" (someone in the Leadership recipients table:
+  the whole Support team), "jira_integration" (comments posted by the Jira
+  integration), "internal" (Learnosity staff outside Support), or null
+  (unknown: anyone else, often the customer's colleagues).
+- Status, priority, created and updated times, existing tags, assignee.
+- CSAT, only when the transcript shows a satisfaction rating was offered
+  and given.
+- jira_links: the Jira issues linked to the ticket and when each was linked.
+  A link says nothing about the issue's status or activity: whether it was
+  released, resolved or moving can only come from comments in the
+  transcript (usually jira_integration comments).
+
+Not available (never assume them): Jira issue status or activity beyond the
+transcript, Aha feature request status, customer tier or plan, SLA due
+dates or contract terms, the customer's other tickets, and any record of
+re-engage attempts outside the transcript.
 
 ## Output format
 
