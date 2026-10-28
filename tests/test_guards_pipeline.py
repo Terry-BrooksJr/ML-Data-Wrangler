@@ -373,3 +373,39 @@ def test_roster_review_is_due_after_a_quarter():
     reviewed_on = leadership.ROSTER_REVIEWED
     assert not leadership.roster_review_due(reviewed_on + timedelta(days=92))
     assert leadership.roster_review_due(reviewed_on + timedelta(days=93))
+
+
+# --- engine settings -------------------------------------------------------
+
+
+def test_engine_settings_come_from_the_environment(monkeypatch):
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "p")
+    monkeypatch.setenv("DECISION_ENGINE_MAX_TOKENS", "20000")
+    monkeypatch.setenv("DECISION_ENGINE_EFFORT", "High")
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "300")
+    config = classify.EngineConfig.from_env()
+    assert (config.max_tokens, config.effort) == (20000, "high")
+    assert classify.request_timeout() == 300.0
+
+
+@pytest.mark.parametrize("value", ["", "lots", "0", "-5"])
+def test_unusable_max_tokens_falls_back_to_the_default(monkeypatch, value):
+    monkeypatch.setenv("DECISION_ENGINE_MAX_TOKENS", value)
+    assert classify.max_tokens_setting() == classify.MAX_TOKENS == 16000
+
+
+def test_unknown_effort_is_ignored(monkeypatch):
+    monkeypatch.setenv("DECISION_ENGINE_EFFORT", "extreme")
+    assert classify.effort_setting() is None
+
+
+def test_engine_settings_are_in_the_settings_dialog():
+    from core import settings
+
+    names = {s.name for s in settings.SETTINGS}
+    assert {
+        "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
+        "DECISION_ENGINE_MAX_TOKENS",
+        "DECISION_ENGINE_EFFORT",
+        "DECISION_ENGINE_TIMEOUT_SECONDS",
+    } <= names

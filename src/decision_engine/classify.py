@@ -30,9 +30,11 @@ CHEAPER_INFERENCE_BASE_URL = (
 # TODO(#15): confirm the model ID Cheaper Inference expects. The brief specifies
 # "claude-opus-4.8"; Anthropic's own ID for that model is "claude-opus-4-8".
 DEFAULT_MODEL = "claude-opus-4.8"
-# Reasoning, an internal note and a drafted message must all fit; a reply cut
-# off at this limit is an engine error, not an abstention.
-MAX_TOKENS = 4096
+# Reasoning, an internal note and a drafted message must all fit, and so must
+# thinking on models that always think (Claude Opus 5.5, Sonnet 5.5); a reply
+# cut off at this limit is an engine error, not an abstention. Only the
+# tokens used are billed.
+MAX_TOKENS = 16000
 REQUEST_TIMEOUT_SECONDS = 120.0
 MAX_RETRIES = 3  # the SDK retries only 408/409/429/5xx and connection errors
 CONFIRMATION_CONFIDENCE_FLOOR = 75  # below this, re-check with the
@@ -73,6 +75,43 @@ def secondary_model() -> Optional[str]:
 def confirmation_model() -> Optional[str]:
     """Re-classifies manual-triage and low-confidence results."""
     return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
+
+
+def _setting_number(name: str, default, kind=int, minimum=1):
+    """A numeric setting from the environment; default when unset or invalid."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = kind(raw)
+    except ValueError:
+        value = None
+    if value is None or value < minimum:
+        logger.warning(f"{name}={raw!r} isn't a number of at least {minimum}; using {default}.")
+        return default
+    return value
+
+
+def max_tokens_setting() -> int:
+    """DECISION_ENGINE_MAX_TOKENS, or MAX_TOKENS."""
+    return _setting_number("DECISION_ENGINE_MAX_TOKENS", MAX_TOKENS)
+
+
+def effort_setting() -> Optional[str]:
+    """DECISION_ENGINE_EFFORT, or None (each model's default). Sent to every
+    model in the chain, and only Claude models accept it."""
+    effort = (os.environ.get("DECISION_ENGINE_EFFORT") or "").strip().lower()
+    if effort and effort not in EFFORT_LEVELS:
+        logger.warning(f"DECISION_ENGINE_EFFORT={effort!r} isn't one of {', '.join(EFFORT_LEVELS)}; ignored.")
+        return None
+    return effort or None
+
+
+def request_timeout() -> float:
+    """DECISION_ENGINE_TIMEOUT_SECONDS, or REQUEST_TIMEOUT_SECONDS."""
+    return _setting_number(
+        "DECISION_ENGINE_TIMEOUT_SECONDS", REQUEST_TIMEOUT_SECONDS, kind=float
+    )
 
 
 def arbiter_model() -> Optional[str]:
@@ -124,6 +163,8 @@ class EngineConfig:
             primary_model(),
             secondary_model(),
             confirmation_model(),
+            max_tokens=max_tokens_setting(),
+            effort=effort_setting(),
             arbiter=arbiter_model(),
         )
 
@@ -243,7 +284,7 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(
         api_key=os.environ["CHEAPER_INFERENCE_API_KEY"],
         base_url=api_base_url(),
-        timeout=REQUEST_TIMEOUT_SECONDS,
+        timeout=request_timeout(),
         max_retries=MAX_RETRIES,
     )
 
