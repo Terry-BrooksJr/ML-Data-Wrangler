@@ -13,7 +13,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.database import Database
 
-from . import decisions
+from . import decisions, leadership
 from .classify import classify_ticket, EngineError, get_client, is_fatal
 from .payload import build_ticket_payload, support_comment_times
 
@@ -426,6 +426,12 @@ def run_review_batch(
     """
     tickets = tickets if tickets is not None else get_tickets_collection()
     worker = worker or default_worker_id()
+    if leadership.roster_review_due():
+        # Escalations follow the roster, so a stale one misroutes them.
+        logger.warning(
+            f"The leadership roster was last reviewed {leadership.ROSTER_REVIEWED}: "
+            "check it against the team and update leadership.py."
+        )
     summary = {
         "classified": 0,
         "manual_fallback": 0,

@@ -15,6 +15,7 @@ Rules (from the leadership escalation brief):
 """
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import List, Optional, Tuple
 
 VP_ROLE = "VP of Support"
@@ -46,6 +47,17 @@ ROSTER: Tuple[Person, ...] = (
     # Internal Projects Support Engineer, led by Rich Shupe directly.
     Person("12289975534365", "Terry Brooks", ENGINEER_ROLE, "Rich Shupe"),
 )
+# When someone last confirmed the roster against the real team. Terry
+# Brooks reviews it quarterly (taxonomy worksheet, E5); update this date then.
+ROSTER_REVIEWED = date(2026, 10, 28)
+ROSTER_REVIEW_INTERVAL = timedelta(days=92)
+
+
+def roster_review_due(today: Optional[date] = None) -> bool:
+    """True once a quarter has passed since ROSTER_REVIEWED."""
+    return (today or date.today()) - ROSTER_REVIEWED > ROSTER_REVIEW_INTERVAL
+
+
 VP_SUPPORT = next(p.name for p in ROSTER if p.role == VP_ROLE)
 _BY_ID = {p.user_id: p for p in ROSTER}
 
