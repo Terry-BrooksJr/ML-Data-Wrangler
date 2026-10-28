@@ -137,6 +137,8 @@ def _review_entry(
         "classification": result["classification"],
         "confidence": result["confidence"],
         "signals_matched": result.get("signals_matched", []),
+        # The attempts the model counted in the current stall, by timestamp.
+        "reengage_attempts": result.get("reengage_attempts", []),
         "reasoning": result.get("reasoning", ""),
         "tag_applied": result.get("tag"),
         "internal_note": result.get("internal_note", ""),

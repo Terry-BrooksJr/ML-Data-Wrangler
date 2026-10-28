@@ -1187,6 +1187,7 @@ def test_evaluate_builds_confusion_matrix():
         "90003": "flag_solve",
         "90004": "flag_solve",
         "90005": None,
+        "90006": "on_track",
     }
 
     def fake_classify(payload):
@@ -1199,11 +1200,11 @@ def test_evaluate_builds_confusion_matrix():
 
     assert report["matrix"]["flag_reengage"]["flag_solve"] == 1
     assert report["matrix"]["manual_triage"][evaluation.ERROR_LABEL] == 1
-    assert report["accuracy"] == 3 / 5
+    assert report["accuracy"] == 4 / 6
     assert report["per_category"]["flag_solve"]["precision"] == 0.5
     assert report["per_category"]["flag_reengage"]["recall"] == 0.0
     assert len(report["mistakes"]) == 2
-    assert "Overall accuracy: 60%" in evaluation.format_report(report)
+    assert "Overall accuracy: 67%" in evaluation.format_report(report)
 
 
 def test_load_eval_set_rejects_unlabelled(tmp_path):

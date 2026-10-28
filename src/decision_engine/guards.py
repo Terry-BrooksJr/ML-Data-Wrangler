@@ -15,6 +15,7 @@ CLASSIFICATIONS = (
     "escalation_internal",
     "flag_reengage",
     "flag_solve",
+    "on_track",
     "manual_triage",
 )
 SOLVE_CONFIDENCE_FLOOR = 75  # mirrors the prompt's own stated bar — enforced
@@ -92,6 +93,10 @@ def validate_reply(reply) -> dict:
     if not isinstance(signals, list) or not all(isinstance(s, str) for s in signals):
         problems.append("signals_matched must be a list of strings")
 
+    attempts = reply.get("reengage_attempts", [])
+    if not isinstance(attempts, list) or not all(isinstance(a, str) for a in attempts):
+        problems.append("reengage_attempts must be a list of strings")
+
     for key in _OPTIONAL_TEXT:
         if reply.get(key) is not None and not isinstance(reply[key], str):
             problems.append(f"{key} must be a string or null")
@@ -102,6 +107,7 @@ def validate_reply(reply) -> dict:
     result = dict(reply)
     result["confidence"] = int(round(confidence))
     result["signals_matched"] = signals
+    result["reengage_attempts"] = attempts
     for key in _OPTIONAL_TEXT:
         result.setdefault(key, None)
     return result

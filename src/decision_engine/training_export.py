@@ -69,6 +69,7 @@ ANSWER_FIELDS = (
     "classification",
     "confidence",
     "signals_matched",
+    "reengage_attempts",
     "reasoning",
     "tag",
     "internal_note",
