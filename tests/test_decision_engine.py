@@ -11,6 +11,7 @@ import mongomock
 from bson import ObjectId
 import pytest
 from decision_engine import classify, evaluation, feedback, persistence
+from decision_engine.guards import TRIGGER_PREFIXES
 from decision_engine.payload import build_ticket_payload
 from decision_engine.prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
 from fixtures import CATEGORY_FIXTURES, NOW, PRECEDENCE_CONFLICT
@@ -76,7 +77,8 @@ def model_reply(classification, confidence=90, **extra):
         "ticket_id": "x",
         "classification": classification,
         "confidence": confidence,
-        "signals_matched": ["test signal"],
+        # A trigger ID of the category's own kind (guards.TRIGGER_PREFIXES).
+        "signals_matched": [TRIGGER_PREFIXES.get(classification, "X")[0] + "1"],
         "reasoning": "test reasoning",
         "tag": classification,
         "internal_note": "note",
@@ -157,16 +159,16 @@ def test_non_json_response_is_an_engine_error(fake_model):
 
 
 def test_low_confidence_solve_is_downgraded(fake_model):
-    fake_model(model_reply("flag_solve", confidence=74))
+    fake_model(model_reply("flag_solve", confidence=79))
     result = classify.classify_ticket("payload")
 
     assert result["classification"] == "manual_triage"
     assert result["tag"] == "manual_triage"
-    assert result["reasoning"].startswith("Downgraded from flag_solve: confidence 74")
+    assert result["reasoning"].startswith("Downgraded from flag_solve: confidence 79")
 
 
 def test_solve_at_floor_is_kept(fake_model):
-    fake_model(model_reply("flag_solve", confidence=75))
+    fake_model(model_reply("flag_solve", confidence=80))
     assert classify.classify_ticket("payload")["classification"] == "flag_solve"
 
 
@@ -799,7 +801,7 @@ def test_lost_claim_does_not_save(fake_model, tickets, monkeypatch):
     ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
     tickets.insert_one(ticket)
 
-    def steal(payload, reengage_count=0, assignee=None):
+    def steal(payload, reengage_count=0, assignee=None, **_):
         tickets.update_one(
             {"zendesk_id": ticket["zendesk_id"]},
             {"$set": {"review_claim.worker": "other"}},
@@ -817,7 +819,7 @@ def test_reassigned_ticket_is_left_for_its_new_owner(fake_model, tickets, monkey
     tickets.insert_one(ticket)
     seen = []
 
-    def reassign_mid_call(payload, reengage_count=0, assignee=None):
+    def reassign_mid_call(payload, reengage_count=0, assignee=None, **_):
         seen.append(assignee)
         # A Zendesk refresh lands while the model is answering.
         tickets.update_one(

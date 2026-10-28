@@ -57,7 +57,7 @@ from .classify import (
     REQUEST_TIMEOUT_SECONDS,
 )
 from .guards import CLASSIFICATIONS
-from .payload import build_ticket_payload
+from .payload import build_ticket_payload, support_comment_times
 from .prompts import PROMPT_VERSION
 
 VARIANTS = ("A", "B")
@@ -81,6 +81,8 @@ _KEPT_FIELDS = (
     "leadership_recipient",
     "tag",
     "guard_overrides",
+    # Set when the variant's models disagreed (classify.arbitrate).
+    "arbitration",
     "model_version",
     # Set on answers from decision models: a classification and confidence,
     # with each category's probability, and no text.
@@ -93,9 +95,10 @@ _SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status")
 # A claim (and an in-flight lock) older than this is treated as abandoned:
 # its worker stopped. It is renewed before each variant's calls, so it must
 # outlast one variant's worst case: primary, secondary and confirmation
-# calls, each with the client's timeout and retries, plus a margin.
+# calls and the arbiter's two, each with the client's timeout and retries,
+# plus a margin.
 CLAIM_TTL = timedelta(
-    seconds=3 * REQUEST_TIMEOUT_SECONDS * (MAX_RETRIES + 1)
+    seconds=5 * REQUEST_TIMEOUT_SECONDS * (MAX_RETRIES + 1)
 ) + timedelta(minutes=5)
 # MongoDB refuses documents over 16 MiB; a result whose ticket is this big
 # is left out of the run (and reported) rather than failing the whole run.
@@ -265,6 +268,7 @@ def _snapshot(ticket: dict, as_of: datetime) -> dict:
         "payload": build_ticket_payload(ticket, as_of=as_of),
         "reengage_count": reengage_count,
         "assignee": assignee,
+        "support_comment_times": support_comment_times(ticket),
         "as_of": as_of,
         "content_hash": hashlib.sha256(fingerprint.encode()).hexdigest(),
         "ticket": {key: ticket.get(key) for key in _SNAPSHOT_FIELDS},
@@ -413,7 +417,12 @@ def models_of(*configs: EngineConfig) -> List[str]:
     """Every model the configurations can call, each once."""
     models = []
     for config in configs:
-        for model in (config.primary, config.secondary, config.confirmation):
+        for model in (
+            config.primary,
+            config.secondary,
+            config.confirmation,
+            config.arbiter,
+        ):
             if model and model not in models:
                 models.append(model)
     return models
@@ -919,6 +928,8 @@ def _ask(doc: dict, variant: str, key: str, attempt: int, ctx: "_RunContext"):
                 doc["payload"],
                 reengage_count=doc.get("reengage_count", 0),
                 assignee=doc.get("assignee"),
+                # None for a result snapshotted before it was kept: unchecked.
+                support_comment_times=doc.get("support_comment_times"),
                 config=ctx.configs[variant],
                 allow_decision_models=True,
             ),
@@ -1568,6 +1579,9 @@ def _config_args(parser: argparse.ArgumentParser, variant: str) -> None:
     parser.add_argument(
         f"--{lower}-confirmation", help=f"{variant}'s confirmation model; '' for none"
     )
+    parser.add_argument(
+        f"--{lower}-arbiter", help=f"{variant}'s arbiter model; '' for none"
+    )
     parser.add_argument(f"--{lower}-max-tokens", type=int)
     parser.add_argument(
         f"--{lower}-effort",
@@ -1580,7 +1594,14 @@ def _config_from(
     args: argparse.Namespace, variant: str, base: EngineConfig
 ) -> EngineConfig:
     values = base.to_dict()
-    for field in ("primary", "secondary", "confirmation", "max_tokens", "effort"):
+    for field in (
+        "primary",
+        "secondary",
+        "confirmation",
+        "arbiter",
+        "max_tokens",
+        "effort",
+    ):
         given = getattr(args, f"{variant.lower()}_{field}")
         if given is not None:
             values[field] = None if (field == "effort" and given == "none") else given

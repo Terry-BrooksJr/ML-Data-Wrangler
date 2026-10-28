@@ -169,6 +169,7 @@ def decide(
     ticket_payload: str,
     reengage_count: int = 0,
     assignee: Optional[str] = None,
+    support_comment_times=None,
 ) -> dict:
     """Classifies a ticket with a decision model.
 
@@ -263,7 +264,13 @@ def decide(
         "probabilities": probabilities,
         "decision_only": True,
     }
-    apply_guards(result, reengage_count, assignee, classification_only=True)
+    apply_guards(
+        result,
+        reengage_count,
+        assignee,
+        classification_only=True,
+        support_comment_times=support_comment_times,
+    )
     result["model_version"] = model
     result["audit"] = audit
     return result

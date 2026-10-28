@@ -1,9 +1,9 @@
 import html
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
-from .authors import author_role
+from .authors import author_role, SUPPORT
 from .jira_links import JIRA_LINKS_KEY
 
 
@@ -18,6 +18,19 @@ def wrap_untrusted(text: Optional[str]) -> str:
     can't close the wrapper early and have what follows read as instructions.
     """
     return f"<customer_text>{html.escape(text or '', quote=False)}</customer_text>"
+
+
+def support_comment_times(ticket_doc: dict) -> List[str]:
+    """Timestamps, as the payload shows them, of Support's comments: the only
+    ones that can be re-engagement attempts (public ones to the customer,
+    internal notes to an internal party). guards.apply_guards checks the
+    model's citations against them."""
+    return [
+        _iso(c.get("timestamp"))
+        for c in ticket_doc.get("transcript", [])
+        if c.get("timestamp") is not None
+        and author_role(c.get("author"), c.get("role")) == SUPPORT
+    ]
 
 
 def build_ticket_payload(ticket_doc: dict, as_of: Optional[datetime] = None) -> str:

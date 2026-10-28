@@ -6,7 +6,9 @@ apply_guards then overrides a valid reply that breaks a hard rule, recording
 each override in `reasoning` and `guard_overrides`.
 """
 
-from typing import List, Optional
+import re
+from datetime import datetime
+from typing import Iterable, List, Optional, Set
 
 from . import leadership
 
@@ -18,10 +20,27 @@ CLASSIFICATIONS = (
     "on_track",
     "manual_triage",
 )
-SOLVE_CONFIDENCE_FLOOR = 75  # mirrors the prompt's own stated bar — enforced
-# here as a hard backstop, not just trusted from
-# the model's self-report
-REENGAGE_LIMIT = 2  # the prompt's ceiling: at most two re-engage attempts
+# Confidence bars from the prompt, enforced here as a hard backstop rather
+# than trusted from the model's self-report.
+SOLVE_CONFIDENCE_FLOOR = 80
+LEADERSHIP_CONFIDENCE_FLOOR = 80  # below it: the owner, with a visibility note
+ACTION_CONFIDENCE_FLOOR = 70  # escalation_internal and flag_reengage
+REENGAGE_LIMIT = 2  # the prompt's ceiling: at most two attempts per stall
+# What an internal note starts with when Leadership should see a ticket the
+# owner handles (the prompt asks for it too).
+LEADERSHIP_VISIBILITY = "Leadership visibility:"
+# The trigger IDs (prompts.py) that can justify each category. An owner
+# escalation may cite a Leadership trigger: the prompt sends a Leadership
+# case below its confidence bar to the owner.
+TRIGGER_PREFIXES = {
+    "escalate_leadership": "L",
+    "escalation_internal": "OL",
+    "flag_reengage": "R",
+    "flag_solve": "S",
+}
+# How many triggers each letter has in the prompt (L1-L9, ...).
+TRIGGER_COUNTS = {"L": 9, "O": 7, "R": 7, "S": 7}
+_TRIGGER_ID = re.compile(r"\s*([LORS])(\d+)\b")
 
 _OPTIONAL_TEXT = (
     "internal_note",
@@ -139,41 +158,151 @@ def _route_leadership(result: dict, assignee: Optional[str]) -> None:
         _override(result, f"Added the routing review note: {review}")
 
 
+def _instant(text) -> Optional[datetime]:
+    """A timestamp string as a datetime, so "Z" and "+00:00" compare equal."""
+    try:
+        return datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def cited_triggers(signals: Iterable[str]) -> Set[str]:
+    """The letters of the real trigger IDs among signals_matched
+    ("R1", "R1: no reply" -> "R"); an ID the prompt doesn't define (S99) is ignored."""
+    return {
+        m.group(1)
+        for m in map(_TRIGGER_ID.match, signals)
+        if m and 1 <= int(m.group(2)) <= TRIGGER_COUNTS[m.group(1)]
+    }
+
+
+def _verified_attempts(result: dict, support_comment_times) -> List[str]:
+    """The cited re-engage attempts that are public comments from Support.
+
+    With support_comment_times None (not known), every cited attempt counts.
+    """
+    cited = result.get("reengage_attempts") or []
+    if support_comment_times is None:
+        return list(cited)
+    known = {_instant(t) for t in support_comment_times} - {None}
+    verified, seen = [], set()
+    for attempt in cited:
+        instant = _instant(attempt)
+        # Each comment counts once, however its time is written.
+        if instant in known and instant not in seen:
+            seen.add(instant)
+            verified.append(attempt)
+    if len(verified) < len(cited):
+        _override(
+            result,
+            f"Ignored {len(cited) - len(verified)} cited re-engage attempt(s) that "
+            "aren't distinct comments from Support.",
+        )
+    return verified
+
+
 def apply_guards(
     result: dict,
     reengage_count: int = 0,
     assignee: Optional[str] = None,
     classification_only: bool = False,
+    support_comment_times: Optional[Iterable[str]] = None,
 ) -> dict:
     """Overrides a validated reply that breaks a hard rule.
 
     Args:
         result: A reply that passed validate_reply. Modified in place.
-        reengage_count: How many re-engage attempts the ticket already has.
+        reengage_count: Re-engage attempts recorded outside the transcript
+            (none are today); the larger of this and the verified attempts
+            the model cites counts toward the limit.
         assignee: The ticket's assignee (Zendesk user ID) the reply was made
             for; it decides a leadership escalation's recipients. None means
             the ticket has no assignee.
         classification_only: The answer comes from a model that can't write
             text (decisions.decide), so a flag_reengage without a draft
-            message is kept rather than downgraded.
+            message is kept rather than downgraded, and no trigger IDs are
+            required.
+        support_comment_times: Timestamps of the ticket's public comments
+            from Support; cited re-engage attempts must be among them.
 
     Returns:
         The same dict.
     """
     model_classification = result["classification"]
     model_tag = result.get("tag")
-    if result["classification"] == "flag_reengage" and reengage_count >= REENGAGE_LIMIT:
+    confidence = result["confidence"]
+
+    allowed = TRIGGER_PREFIXES.get(model_classification)
+    if (
+        allowed
+        and not classification_only
+        and not set(allowed) & cited_triggers(result.get("signals_matched") or [])
+    ):
+        result["classification"] = "manual_triage"
+        _override(
+            result,
+            f"Downgraded from {model_classification}: no {' or '.join(allowed)} "
+            "trigger ID in signals_matched.",
+        )
+
+    if result["classification"] == "flag_solve" and confidence < SOLVE_CONFIDENCE_FLOOR:
+        result["classification"] = "manual_triage"
+        _override(
+            result,
+            f"Downgraded from flag_solve: confidence {confidence} "
+            f"is below the {SOLVE_CONFIDENCE_FLOOR} floor.",
+        )
+
+    if (
+        result["classification"] in ("escalation_internal", "flag_reengage")
+        and confidence < ACTION_CONFIDENCE_FLOOR
+    ):
+        _override(
+            result,
+            f"Downgraded from {result['classification']}: confidence {confidence} "
+            f"is below the {ACTION_CONFIDENCE_FLOOR} floor.",
+        )
+        result["classification"] = "manual_triage"
+
+    if (
+        result["classification"] == "escalate_leadership"
+        and confidence < LEADERSHIP_CONFIDENCE_FLOOR
+    ):
+        # A missed leadership concern costs more than a misrouted one: the
+        # owner gets it, with a note Leadership will see.
+        result["classification"] = "escalation_internal"
+        suspected = sorted(
+            s for s in result.get("signals_matched") or [] if s.strip().startswith("L")
+        )
+        note = result.get("internal_note") or ""
+        if not note.startswith(LEADERSHIP_VISIBILITY):
+            result["internal_note"] = (
+                f"{LEADERSHIP_VISIBILITY} possible leadership concern "
+                f"({', '.join(suspected) or 'unspecified'}), confidence {confidence}, "
+                f"below the {LEADERSHIP_CONFIDENCE_FLOOR} bar."
+                + (f"\n\n{note}" if note else "")
+            )
+        _override(
+            result,
+            f"Escalated to the owner instead of Leadership: confidence {confidence} "
+            f"is below the {LEADERSHIP_CONFIDENCE_FLOOR} floor.",
+        )
+
+    attempts = _verified_attempts(result, support_comment_times)
+    result["reengage_attempts"] = attempts
+    attempt_count = max(reengage_count, len(attempts))
+    if result["classification"] == "flag_reengage" and attempt_count >= REENGAGE_LIMIT:
         drafted = result.get("draft_message")
         result["classification"] = "escalation_internal"
         result["draft_message"] = None
         result["internal_note"] = (
-            f"Re-engage limit reached ({reengage_count} attempts already). The owner must decide whether to "
+            f"Re-engage limit reached ({attempt_count} attempts already). The owner must decide whether to "
             "keep pursuing or close."
             + (f"\n\nThe model drafted this follow-up:\n{drafted}" if drafted else "")
         )
         _override(
             result,
-            f"Escalated instead of flag_reengage: the ticket already has {reengage_count} re-engage "
+            f"Escalated instead of flag_reengage: the ticket already has {attempt_count} re-engage "
             f"attempts (limit {REENGAGE_LIMIT}).",
         )
 
@@ -185,17 +314,6 @@ def apply_guards(
         result["classification"] = "manual_triage"
         _override(
             result, "Downgraded from flag_reengage: no draft_message was provided."
-        )
-
-    if (
-        result["classification"] == "flag_solve"
-        and result["confidence"] < SOLVE_CONFIDENCE_FLOOR
-    ):
-        result["classification"] = "manual_triage"
-        _override(
-            result,
-            f"Downgraded from flag_solve: confidence {result['confidence']} "
-            f"is below the {SOLVE_CONFIDENCE_FLOOR} floor.",
         )
 
     if result["classification"] != "escalate_leadership" and result.get(
