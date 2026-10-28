@@ -15,7 +15,7 @@ from pymongo.database import Database
 
 from . import decisions
 from .classify import classify_ticket, EngineError, get_client, is_fatal
-from .payload import build_ticket_payload
+from .payload import build_ticket_payload, support_comment_times
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
 # the queue; after this many failed attempts it is routed to manual triage.
@@ -31,6 +31,11 @@ MAX_TICKET_BYTES = 15 * 1024 * 1024 + 512 * 1024
 
 class ReviewTooLarge(ValueError):
     """The ticket is too large to take another review, even trimmed."""
+# Zendesk statuses the engine doesn't review (taxonomy worksheet, F4): a
+# Solved ticket reopens by itself within 7 days, and a Closed one is final.
+# They stay stored, for topic modelling of outcomes.
+SKIPPED_STATUSES = ("solved", "closed")
+REVIEWABLE = {"status": {"$nin": list(SKIPPED_STATUSES)}}
 # A claim older than this is treated as abandoned (its worker crashed).
 CLAIM_TTL = timedelta(minutes=15)
 
@@ -74,13 +79,14 @@ def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[
 
     Returns:
         The claimed document, or None if it is missing, not awaiting review,
-        or claimed by another worker.
+        Solved or Closed, or claimed by another worker.
     """
     now = datetime.now(timezone.utc)
     return tickets.find_one_and_update(
         {
             "zendesk_id": zendesk_id,
             "awaiting_review": True,
+            **REVIEWABLE,
             "$or": [
                 {"review_claim": {"$exists": False}},
                 {"review_claim": None},
@@ -146,6 +152,8 @@ def _review_entry(
         "leadership_recipient": result.get("leadership_recipient"),
         # Set when the confirmation model replaced the first answer.
         "confirmation_of": result.get("confirmation_of"),
+        # Set when the models disagreed (classify.arbitrate).
+        "arbitration": result.get("arbitration"),
         # Set when a code check overrode the model (guards.apply_guards).
         "guard_overrides": result.get("guard_overrides", []),
         # Set when the engine gave up after repeated failures; distinguishes
@@ -209,6 +217,7 @@ def process_one_ticket(
             payload,
             reengage_count=len(ticket_doc.get("reengage_attempts") or []),
             assignee=ticket_doc.get("assignee"),
+            support_comment_times=support_comment_times(ticket_doc),
         )
     except Exception as e:
         if is_fatal(e):
@@ -369,9 +378,11 @@ def _oldest_first(zendesk_id) -> tuple:
 
 
 def awaiting_tickets(tickets: Collection) -> List[dict]:
-    """Every ticket awaiting review, oldest first, as {"zendesk_id", "subject"}."""
+    """Every reviewable ticket awaiting review (not Solved or Closed), oldest
+    first, as {"zendesk_id", "subject"}."""
     docs = tickets.find(
-        {"awaiting_review": True}, {"_id": 0, "zendesk_id": 1, "subject": 1}
+        {"awaiting_review": True, **REVIEWABLE},
+        {"_id": 0, "zendesk_id": 1, "subject": 1},
     )
     return sorted(docs, key=lambda doc: _oldest_first(doc["zendesk_id"]))
 

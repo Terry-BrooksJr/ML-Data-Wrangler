@@ -90,6 +90,13 @@ SETTINGS: List[Setting] = [
         help="Re-checks manual-triage and low-confidence results. Leave blank to skip.",
     ),
     Setting(
+        "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
+        "Arbiter model",
+        "Decision Engine (Cheaper Inference)",
+        help="Rules when the confirmation model disagrees with the first answer. "
+        "Leave blank to send disagreements to manual triage.",
+    ),
+    Setting(
         "DECISION_MODELS",
         "Decision models",
         "Decision Engine (Cheaper Inference)",

@@ -61,6 +61,7 @@ class FakeEngine:
         assignee=None,
         config=None,
         allow_decision_models=False,
+        support_comment_times=None,
     ):
         assert allow_decision_models  # A/B tests may compare decision models
         self.calls.append((payload, config))

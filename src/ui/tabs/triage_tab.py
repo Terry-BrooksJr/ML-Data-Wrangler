@@ -48,8 +48,8 @@ from ui.utility import ThreadWorker, worker_thread
 from ui.widgets import Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
 
 # Reading reviews only touches Mongo; classifying also needs the primary
-# model. The secondary and confirmation models are optional: when unset, the
-# engine skips that step.
+# model. The secondary, confirmation and arbiter models are optional: when
+# unset, the engine skips that step.
 READ_ENV = ("MONGO_URI",)
 REVIEW_ENV = READ_ENV + (
     "CHEAPER_INFERENCE_API_KEY",
@@ -62,6 +62,7 @@ EMBED_ENV = READ_ENV + ("EMBEDDING_API_KEY",)
 OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME": "no fallback if the primary model call fails",
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
+    "CHEAPER_INFERENCE_ARBITER_MODEL_NAME": "a disagreement between models goes straight to manual triage",
 }
 REVIEW_ADDED_BUTTON = "Review Added to Zendesk"
 # SiliconUI's Fluent icon for copying (two overlapping squares).
@@ -194,6 +195,15 @@ def format_review(row: dict) -> str:
             "",
             f"Confirmed: replaced {first.get('classification')} (confidence {first.get('confidence')}) "
             f"from {first.get('model_version')}",
+        ]
+    if review.get("arbitration"):
+        ruling = review["arbitration"]
+        lines += [
+            "",
+            f"Arbitration ({ruling.get('model') or 'no arbiter'}): preferred "
+            f"{ruling.get('preferred') or '-'} on the reasoning, ruled "
+            f"{ruling.get('ruling') or '-'} on the ticket"
+            + (f" ({ruling['error']})" if ruling.get("error") else ""),
         ]
     if review.get("leadership_recipient"):
         lines += ["", f"Leadership recipient: {review['leadership_recipient']}"]

@@ -272,6 +272,8 @@ class ConfigForm(QWidget):
         self.secondary.setPlaceholderText("none")
         self.confirmation = QLineEdit(config.confirmation or "")
         self.confirmation.setPlaceholderText("none")
+        self.arbiter = QLineEdit(config.arbiter or "")
+        self.arbiter.setPlaceholderText("none: disagreements go to manual triage")
         self.max_tokens = QSpinBox()
         self.max_tokens.setRange(256, MAX_TOKENS_LIMIT)
         self.max_tokens.setSingleStep(1024)
@@ -290,6 +292,7 @@ class ConfigForm(QWidget):
         form.addRow("Primary model", self.primary)
         form.addRow("Secondary model", self.secondary)
         form.addRow("Confirmation model", self.confirmation)
+        form.addRow("Arbiter model", self.arbiter)
         form.addRow("Max tokens", self.max_tokens)
         form.addRow("Effort", self.effort)
 
@@ -299,6 +302,7 @@ class ConfigForm(QWidget):
             primary=self.primary.text().strip(),
             secondary=self.secondary.text().strip() or None,
             confirmation=self.confirmation.text().strip() or None,
+            arbiter=self.arbiter.text().strip() or None,
             max_tokens=self.max_tokens.value(),
             effort=self.effort.currentData(),
         )
@@ -413,7 +417,7 @@ class NewRunDialog(QDialog):
         self.b_form = ConfigForm(current)
         self.price_table = PriceTable(live_prices or {})
         for form in (self.a_form, self.b_form):
-            for field in (form.primary, form.secondary, form.confirmation):
+            for field in (form.primary, form.secondary, form.confirmation, form.arbiter):
                 field.textChanged.connect(lambda _: self._refresh_prices())
         self._refresh_prices()
         price_card = Card("Prices (US dollars per million tokens)")
@@ -494,7 +498,7 @@ class NewRunDialog(QDialog):
     def _refresh_prices(self) -> None:
         models = []
         for form in (self.a_form, self.b_form):
-            for field in (form.primary, form.secondary, form.confirmation):
+            for field in (form.primary, form.secondary, form.confirmation, form.arbiter):
                 model = field.text().strip()
                 if model and model not in models:
                     models.append(model)
