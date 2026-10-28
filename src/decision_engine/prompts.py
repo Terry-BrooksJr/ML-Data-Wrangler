@@ -70,8 +70,9 @@ IDs you matched in signals_matched.
    - O1: Customer asked the assignee a question or made a request with no
      response in 48 business hours
    - O2: The linked Jira bug has had no meaningful action for 28 calendar days
-     (two sprints) since filing, and the assigned product engineer needs to
-     be engaged
+     (two sprints) — measured from its last jira_integration or other comment
+     about it, or from when it was linked if there is none — and the
+     assigned product engineer needs to be engaged
    - O3: Blocked on an internal dependency (another team, a release, a vendor)
      with no visible movement and no ETA to give the customer, and a
      re-engage of that party has already gone unanswered
@@ -106,7 +107,8 @@ IDs you matched in signals_matched.
    - R5: Support committed to a follow-up by a specific date; that date has
      passed with no update sent
    - R6: No public comment from any party for 72 business hours, but the
-     underlying issue is unresolved
+     underlying issue is unresolved (not for On-hold tickets: see "Time and
+     status")
    - R7: A scheduled action (migration, import, release-dependent fix) has
      come due and needs confirmation
    Ceiling: at most 2 re-engagement attempts per stall, at least 48 business
@@ -128,8 +130,9 @@ IDs you matched in signals_matched.
    and any reply from the customer in that time reopens it.
    Trigger if ANY of:
    - S1: Customer clearly confirms no further assistance is needed
-   - S2: Support delivered investigation results + recommendations that
-     answer everything asked, with no fix or follow-up still expected
+   - S2: Support delivered investigation results + recommendations (or a
+     workaround) that answer everything asked, with no fix or follow-up
+     still expected — even before the customer confirms it
    - S3: A jira_integration comment (or another comment) confirms the linked
      feature was released
    - S4: A comment confirms the linked defect was resolved and deployed, OR
@@ -180,11 +183,15 @@ Count attempts from the transcript (there is no other record):
 1. Find where the ticket stalled. Look only at the current stall: an
    earlier stall that ended (the other party answered, gave what was asked,
    or the work moved) is resolved, and its attempts don't count.
-2. List the public comments from Support (role "support") since the stall
-   began that meet the definition above. Report their timestamps, exactly as
-   they appear in the transcript, in reengage_attempts.
+2. List the comments from Support (role "support") since the stall began
+   that meet the definition above: public comments to re-engage the
+   customer, and public comments or internal notes addressed to an internal
+   party to re-engage them. Report their timestamps, exactly as they appear
+   in the transcript, in reengage_attempts, each once.
 3. 0 or 1 attempt, and the window since the last one has run out → Re-engage
-   (the next attempt; the 2nd is final). 2 attempts with no answer → O4.
+   (the next attempt; the 2nd is final). 2 attempts, and the 2nd has gone
+   unanswered for its window (48 business hours) → O4. Still inside a
+   window → On track.
 
 ## Time and status
 
