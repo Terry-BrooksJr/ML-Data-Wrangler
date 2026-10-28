@@ -14,7 +14,7 @@ from decision_engine import classify, evaluation, feedback, persistence
 from decision_engine.guards import TRIGGER_PREFIXES
 from decision_engine.payload import build_ticket_payload
 from decision_engine.prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
-from fixtures import CATEGORY_FIXTURES, PRECEDENCE_CONFLICT
+from fixtures import CATEGORY_FIXTURES, NOW, PRECEDENCE_CONFLICT
 
 
 def fake_response(text, stop_reason="end_turn"):
@@ -1263,7 +1263,8 @@ def test_live_labelled_set_report():
     ids=list(CATEGORY_FIXTURES) + ["precedence_conflict"],
 )
 def test_live_classification(ticket, expected):
-    result = classify.classify_ticket(build_ticket_payload(ticket))
+    # The fixtures' times are relative to fixtures.NOW, so "now" is that too.
+    result = classify.classify_ticket(build_ticket_payload(ticket, as_of=NOW))
     assert result["classification"] == expected, result.get("reasoning")
 
 
