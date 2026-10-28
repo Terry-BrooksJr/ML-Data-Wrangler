@@ -78,7 +78,7 @@ def model_reply(classification, confidence=90, **extra):
         "classification": classification,
         "confidence": confidence,
         # A trigger ID of the category's own kind (guards.TRIGGER_PREFIXES).
-        "signals_matched": [TRIGGER_PREFIXES.get(classification, "X") + "1"],
+        "signals_matched": [TRIGGER_PREFIXES.get(classification, "X")[0] + "1"],
         "reasoning": "test reasoning",
         "tag": classification,
         "internal_note": "note",

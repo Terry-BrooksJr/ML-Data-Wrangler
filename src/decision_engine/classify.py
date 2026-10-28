@@ -522,8 +522,8 @@ def judge_answers(
     """
     shown = "\n\n".join(
         f"Answer {label}: {answer['classification']} "
-        f"(confidence {answer.get('confidence')}, triggers "
-        f"{', '.join(answer.get('signals_matched') or []) or 'none'})\n"
+        f"(confidence {answer.get('confidence')})\n"
+        f"Triggers: {wrap_untrusted(', '.join(answer.get('signals_matched') or []) or 'none')}\n"
         f"Reasoning: {wrap_untrusted(answer.get('reasoning'))}"
         for label, answer in zip("AB", (first, second))
     )

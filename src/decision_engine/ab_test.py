@@ -81,6 +81,8 @@ _KEPT_FIELDS = (
     "leadership_recipient",
     "tag",
     "guard_overrides",
+    # Set when the variant's models disagreed (classify.arbitrate).
+    "arbitration",
     "model_version",
     # Set on answers from decision models: a classification and confidence,
     # with each category's probability, and no text.
