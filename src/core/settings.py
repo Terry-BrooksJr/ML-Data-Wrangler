@@ -107,6 +107,28 @@ SETTINGS: List[Setting] = [
         ),
     ),
     Setting(
+        "DECISION_ENGINE_MAX_TOKENS",
+        "Max tokens",
+        "Decision Engine (Cheaper Inference)",
+        default="16000",
+        help="The reply limit for every model call, thinking included. A reply cut off "
+        "here is an engine error. Only the tokens used are billed.",
+    ),
+    Setting(
+        "DECISION_ENGINE_EFFORT",
+        "Effort",
+        "Decision Engine (Cheaper Inference)",
+        help="low, medium, high, xhigh or max; blank uses each model's default. Sent to "
+        "every model, and only Claude models accept it: leave blank if any model isn't Claude.",
+    ),
+    Setting(
+        "DECISION_ENGINE_TIMEOUT_SECONDS",
+        "Request timeout (seconds)",
+        "Decision Engine (Cheaper Inference)",
+        default="120",
+        help="How long one model call may take before it is retried.",
+    ),
+    Setting(
         "TAG_NORMALIZER_MODEL",
         "Tag Normalizer model",
         "Decision Engine (Cheaper Inference)",
