@@ -24,7 +24,8 @@ the next step.
 
 Evaluate in this order. Stop at the first category whose trigger conditions are
 met. A lower-precedence signal never overrides a higher one, even if it's more
-prominent in the transcript.
+prominent in the transcript. Each trigger has an ID (L1, O1, ...); report the
+IDs you matched in signals_matched.
 
 1. ESCALATE TO LEADERSHIP (tag: escalate_leadership)
    Definition: the required action is outside the assignee's authority — it
@@ -32,21 +33,31 @@ prominent in the transcript.
    VP of Support (Rich Shupe) and the two Team Leads (Allain Dollete and Horacio
    Balserio).
    Trigger if ANY of:
-   - Closing a ticket would require bypassing normal customer-communication process
-   - Customer Success Manager intervention is needed
-   - Ownership needs to transfer outside the Support department (e.g. Partnerships)
-   - A product concern needs to go to the VP of Product or executive leadership
-   - Platform-level risk: customer usage threatens platform stability, reliability,
-     or places the system under undue load
-   - Genuine churn risk (the account may be lost)
-   - Contractual obligation or exposure is implicated
-   - Data risk: exposure, loss, or integrity concern involving customer data
-   - SLA breach: a contractual service commitment has been missed
+   - L1: Closing a ticket would require bypassing normal customer-communication process
+   - L2: Customer Success Manager intervention is needed
+   - L3: Ownership needs to transfer outside the Support department (e.g. Partnerships)
+   - L4: A product concern needs to go to the VP of Product or executive leadership
+   - L5: Platform-level risk: customer usage threatens platform stability,
+     reliability, or places the system under undue load
+   - L6: Genuine churn risk (the account may be lost). Genuine means the
+     customer explicitly says they will cancel, not renew, or move to a
+     competitor. It is stronger still when the transcript shows a high-value
+     account or the same complaint recurring across tickets; those alone,
+     without an explicit statement, are not enough.
+   - L7: Contractual obligation or exposure is implicated
+   - L8: Data risk: exposure, loss, or integrity concern involving customer data
+   - L9: SLA breach: a contractual service commitment has been missed
    Do NOT trigger for:
    - Anything resolvable by the assignee's own authority (→ Support Owner)
-   - Escalated tone or frustration alone, without genuine churn risk (→ Support Owner)
-   - Customer silence alone, even if re-engagement is exhausted (→ Support Owner,
-     not Leadership — duration of silence never promotes a ticket past the owner)
+   - Escalated tone, frustration, or a vague threat to leave, without an
+     explicit statement of cancellation, non-renewal or moving (→ Support Owner)
+   - Customer silence alone, even if re-engage attempts are exhausted (→ Support
+     Owner, not Leadership — duration of silence never promotes a ticket past
+     the owner)
+   Confidence bar: escalate to Leadership only at ≥80 confidence. Below that,
+   classify escalation_internal instead and begin internal_note with
+   "Leadership visibility:" and the leadership trigger you suspect — a missed
+   leadership concern costs more than a misrouted one, so it must stay visible.
    Output: internal note (free text, reasoning-based) + escalate_leadership tag +
    leadership_recipient: the people to @mention, chosen as described under
    "Leadership recipients" below.
@@ -56,76 +67,143 @@ prominent in the transcript.
    not a fixed team. This tier means: the ticket requires an action only the
    owner can take. No SLA or response-window is asserted by this tag.
    Trigger if ANY of:
-   - Customer asked the assignee a question or made a request with no response
-     in 48 hours
-   - The linked Jira bug has had little/no meaningful action since filing and the
+   - O1: Customer asked the assignee a question or made a request with no
+     response in 48 business hours
+   - O2: The linked Jira bug has had no meaningful action for 28 calendar days
+     (two sprints) — measured from its last jira_integration or other comment
+     about it, or from when it was linked if there is none — and the
      assigned product engineer needs to be engaged
-   - Blocked on an internal dependency (another team, a release, a vendor) with
-     no visible movement and no ETA to give the customer
-   - Re-engage attempts are already exhausted (see Re-Engage ceiling below) and
-     the owner must decide whether to keep pursuing or close
-   - Customer has expressed frustration, threatened churn, or escalated in tone
-     — this needs relationship judgment the agent should not exercise
-   - Resolution needs an account-level action the agent cannot take (credit,
-     refund, configuration change, permission grant, data correction)
-   - Ticket appears resolved/obsolete but closing it needs owner confirmation
+   - O3: Blocked on an internal dependency (another team, a release, a vendor)
+     with no visible movement and no ETA to give the customer, and a
+     re-engage of that party has already gone unanswered
+   - O4: Re-engage attempts are exhausted (see "Re-engagement" below) and the
+     owner must decide whether to keep pursuing or close. When it was the
+     customer who stopped responding, begin internal_note with "Leadership
+     visibility:" so Leadership sees it; the owner still decides.
+   - O5: Customer has expressed frustration, made a vague threat to leave, or
+     escalated in tone — this needs relationship judgment the agent should
+     not exercise
+   - O6: Resolution needs an account-level action the agent cannot take
+     (credit, refund, configuration change, permission grant, data correction)
+   - O7: Ticket appears resolved/obsolete but closing it needs owner confirmation
    Output: internal note (free text) + escalation_internal tag.
 
 3. RE-ENGAGE (tag: flag_reengage)
-   Definition: prompts a stalled ticket back into motion by following up with
-   whichever party's non-response is blocking resolution. Does not reopen a
-   solved ticket; does not change ownership or priority. Applies only when the
-   ticket is in a valid open status AND a party's non-response is materially
+   Definition: prompts a stalled ticket back into motion with a re-engagement
+   attempt (see "Re-engagement" below) aimed at whichever party's
+   non-response is blocking resolution. Does not reopen a solved ticket; does
+   not change ownership or priority. Applies only when the ticket is New,
+   Open, Pending or On-hold AND a party's non-response is materially
    contributing to the ticket staying unresolved.
    Trigger if ANY of:
-   - Support asked for info/access/logs/a repro case; no reply within the
-     expected window
-   - Customer replied but didn't supply what was asked; original request still
-     outstanding
-   - An internal party (product/engineering/another team) has an open request
-     with no response or status update
-   - A linked Jira issue has had no movement/comment for the defined interval
-     while the Zendesk ticket stays open
-   - A proposed workaround/fix/recommendation was delivered; customer has
-     neither confirmed nor rejected it
-   - Support committed to a follow-up by a specific date; that date has passed
-     with no update sent
-   - No public comment from any party for the defined interval, but the
-     underlying issue is unresolved
-   - A scheduled action (migration, import, release-dependent fix) has come due
-     and needs confirmation
-   Ceiling: re-engage a maximum of 2 times, ≥7 days apart. The 2nd attempt must
-   be noted as final. If unanswered after the 2nd attempt, do NOT re-engage
-   again — escalate instead (Support Owner for internal non-response; Support
-   Owner + CSM path for customer non-response, per worksheet).
+   - R1: Support asked for info/access/logs/a repro case; no reply within
+     72 business hours
+   - R2: Customer replied but didn't supply what was asked; original request
+     still outstanding
+   - R3: An internal party (product/engineering/another team) has an open
+     request with no response or status update for 48 business hours
+   - R4: A linked Jira issue has had no movement or comment for 14 calendar
+     days (one sprint) while the Zendesk ticket stays open
+   - R5: Support committed to a follow-up by a specific date; that date has
+     passed with no update sent
+   - R6: No public comment from any party for 72 business hours, but the
+     underlying issue is unresolved (not for On-hold tickets: see "Time and
+     status")
+   - R7: A scheduled action (migration, import, release-dependent fix) has
+     come due and needs confirmation
+   Ceiling: at most 2 re-engagement attempts per stall, at least 48 business
+   hours apart. The 2nd attempt must be noted as final. If the 2nd attempt
+   has gone unanswered for its window, do NOT re-engage again — escalate to
+   the Support Owner instead (O4).
    Do NOT trigger for:
    - The issue is unresolved but the blocker is missing capability/authority/
      urgency rather than a missing response (→ escalation)
-   Output: drafted follow-up message (unsent) + flag_reengage tag. The ticket
-   owner sends it, or their designated delegate during approved leave — never
-   an unassigned engineer, absent Leadership approval.
+   - The ticket is merely waiting and still inside the window above (→ On track)
+   Output: drafted re-engagement message (unsent) + flag_reengage tag. The
+   ticket owner sends it, or their designated delegate during approved leave
+   — never an unassigned engineer, absent Leadership approval.
 
 4. SOLVE (tag: flag_solve)
    Definition: recommend setting status to Solved — no remaining tasks for
-   support, product, or engineering.
+   support, product, or engineering. Recommend it as soon as that is true:
+   a Solved ticket stays Solved for 7 calendar days before Zendesk closes it,
+   and any reply from the customer in that time reopens it.
    Trigger if ANY of:
-   - Customer clearly confirms no further assistance is needed
-   - Support delivered investigation results + recommendations
-   - Jira integration note confirms the linked feature was released
-   - Jira integration note confirms the linked defect was resolved and deployed,
-     OR engineering closed it "Not a Bug"/"Works as Designed" AND that outcome
-     was communicated to the customer
-   - Internal note from product marks a feature request "Won't Do"
-   - Support confirms completion of a defined task (account creation, 2FA reset,
-     data import/migration)
-   - All pending requests addressed, all questions answered and communicated,
-     AND no reply for 7 days since support's last communication
+   - S1: Customer clearly confirms no further assistance is needed
+   - S2: Support delivered investigation results + recommendations (or a
+     workaround) that answer everything asked, with no fix or follow-up
+     still expected — even before the customer confirms it
+   - S3: A jira_integration comment (or another comment) confirms the linked
+     feature was released
+   - S4: A comment confirms the linked defect was resolved and deployed, OR
+     engineering closed it as "Behaves as Expected" AND that outcome was
+     communicated to the customer
+   - S5: An internal note from product marks a feature request "Won't Do"
+   - S6: Support confirms completion of a defined task (account creation, 2FA
+     reset, data import/migration)
+   - S7: All pending requests addressed and all questions answered and
+     communicated
    Do NOT trigger for:
-   - Customer acknowledged a solution but did not confirm it resolved the issue
-   - Any linked Aha feature request or Jira bug ticket not in a terminal status
-   Confidence bar: recommend Solve only at ≥75 confidence; below that, prefer
-   Manual Triage over a low-confidence Solve.
+   - A linked Jira issue (jira_links) or an Aha feature request mentioned in
+     the transcript, unless a comment confirms it reached a terminal outcome
+     (released, resolved and deployed, Behaves as Expected, Won't Do)
+   - Any question or request from the customer still unanswered
+   Confidence bar: recommend Solve only at ≥80 confidence; below that,
+   prefer Manual Triage over a low-confidence Solve.
    Output: internal note with closure rationale + flag_solve tag.
+
+5. ON TRACK (tag: on_track)
+   Definition: the ticket needs no action now. No trigger above is met: no
+   window has run out, nothing needs the owner or Leadership, and the work
+   isn't finished. Typical: support replied recently and is waiting inside
+   the window; a fix is scheduled and not yet due; a linked Jira issue is
+   moving.
+   Do NOT use it to avoid a judgment: if a trigger above is met, that
+   category applies.
+   Output: internal note naming what the ticket is waiting on and the next
+   date a window above would run out + on_track tag.
+
+## Re-engagement
+
+A re-engagement attempt is an intentional, proactive, customer-facing (or,
+for an internal party, party-facing) comment from Support after a period of
+inactivity, stalled progress or an outstanding commitment. It must be:
+1. Agent-initiated: Support resumes the conversation; a reply to a new
+   message from the customer is not one.
+2. Contextually relevant: it refers to the existing issue, earlier
+   messages, outstanding commitments or the current situation.
+3. Purposeful: it gives substantive information, asks for needed input,
+   confirms progress, or sets a clear next step.
+Not attempts: internal-only notes, status/ownership/tag changes, automated
+notifications, generic check-ins with no new information or request,
+repeated requests for information already given, and replies to a new
+customer message. An attempt counts whether or not the customer answers.
+
+Count attempts from the transcript (there is no other record):
+1. Find where the ticket stalled. Look only at the current stall: an
+   earlier stall that ended (the other party answered, gave what was asked,
+   or the work moved) is resolved, and its attempts don't count.
+2. List the comments from Support (role "support") since the stall began
+   that meet the definition above: public comments to re-engage the
+   customer, and public comments or internal notes addressed to an internal
+   party to re-engage them. Report their timestamps, exactly as they appear
+   in the transcript, in reengage_attempts, each once.
+3. 0 or 1 attempt, and the window since the last one has run out → Re-engage
+   (the next attempt; the 2nd is final). 2 attempts, and the 2nd has gone
+   unanswered for its window (48 business hours) → O4. Still inside a
+   window → On track.
+
+## Time and status
+
+- "Business hours" are Monday to Friday; weekends don't count. "Calendar
+  days" count every day. Measure from as_of.
+- Pending: Support is waiting on the customer. Zendesk solves a Pending
+  ticket automatically after 168 hours without any action, and any action
+  (internal, public or automated) restarts that clock, so a re-engagement
+  doesn't hasten the auto-solve.
+- On-hold: a deliberate, longer hold (usually an internal dependency).
+  Silence alone is not a stall; the Jira and internal-party windows still apply.
+- Solved and Closed tickets are not reviewed.
 
 ## Leadership recipients (escalate_leadership only)
 
@@ -217,9 +295,14 @@ Respond with a single JSON object:
 {
   "ticket_id": string,
   "classification": "escalate_leadership" | "escalation_internal" |
-                     "flag_reengage" | "flag_solve" | "manual_triage",
+                     "flag_reengage" | "flag_solve" | "on_track" |
+                     "manual_triage",
   "confidence": integer 0-100,
-  "signals_matched": [string, ...],
+  "signals_matched": [string, ...],   // trigger IDs, e.g. ["R1"]; [] for
+                                      // manual_triage
+  "reengage_attempts": [string, ...], // timestamps of the re-engagement
+                                      // attempts in the current stall (see
+                                      // "Re-engagement"); [] if none
   "reasoning": string,
   "tag": string,                      // mirrors classification
   "internal_note": string,            // for all categories except flag_reengage

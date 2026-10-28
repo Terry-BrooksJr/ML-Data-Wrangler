@@ -74,6 +74,7 @@ _KEPT_FIELDS = (
     "classification",
     "confidence",
     "signals_matched",
+    "reengage_attempts",
     "reasoning",
     "internal_note",
     "draft_message",

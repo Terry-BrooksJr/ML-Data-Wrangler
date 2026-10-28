@@ -69,6 +69,7 @@ ANSWER_FIELDS = (
     "classification",
     "confidence",
     "signals_matched",
+    "reengage_attempts",
     "reasoning",
     "tag",
     "internal_note",
@@ -124,6 +125,8 @@ def answer_of(source: dict, ticket_id: str) -> dict:
     """The target answer, in the engine's output format. A review stores its
     tag as tag_applied."""
     answer = {field: source.get(field) for field in ANSWER_FIELDS}
+    # Answers saved before the field existed export it as the list it is now.
+    answer["reengage_attempts"] = answer["reengage_attempts"] or []
     answer["ticket_id"] = ticket_id
     answer["tag"] = (
         source.get("tag") or source.get("tag_applied") or answer["classification"]

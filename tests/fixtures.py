@@ -114,6 +114,23 @@ FLAG_SOLVE = _ticket(
     ],
 )
 
+ON_TRACK = _ticket(
+    "90006",
+    "Import job slow for large item banks",
+    [
+        _comment(
+            "Customer", "customer", "Our nightly import of 40k items is slow.", 2
+        ),
+        _comment(
+            "Support Owner A",
+            "agent",
+            "Thanks, could you send the job ID and the time it started?",
+            1,
+        ),
+    ],
+    status="pending",
+)
+
 MANUAL_TRIAGE = _ticket(
     "90005",
     "help",
@@ -150,5 +167,6 @@ CATEGORY_FIXTURES = {
     "escalation_internal": ESCALATION_INTERNAL,
     "flag_reengage": FLAG_REENGAGE,
     "flag_solve": FLAG_SOLVE,
+    "on_track": ON_TRACK,
     "manual_triage": MANUAL_TRIAGE,
 }

@@ -13,7 +13,7 @@ import pytest
 from decision_engine import classify, evaluation, feedback, persistence
 from decision_engine.payload import build_ticket_payload
 from decision_engine.prompts import PROMPT_VERSION, SYSTEM_INSTRUCTIONS
-from fixtures import CATEGORY_FIXTURES, PRECEDENCE_CONFLICT
+from fixtures import CATEGORY_FIXTURES, NOW, PRECEDENCE_CONFLICT
 
 
 def fake_response(text, stop_reason="end_turn"):
@@ -1187,6 +1187,7 @@ def test_evaluate_builds_confusion_matrix():
         "90003": "flag_solve",
         "90004": "flag_solve",
         "90005": None,
+        "90006": "on_track",
     }
 
     def fake_classify(payload):
@@ -1199,11 +1200,11 @@ def test_evaluate_builds_confusion_matrix():
 
     assert report["matrix"]["flag_reengage"]["flag_solve"] == 1
     assert report["matrix"]["manual_triage"][evaluation.ERROR_LABEL] == 1
-    assert report["accuracy"] == 3 / 5
+    assert report["accuracy"] == 4 / 6
     assert report["per_category"]["flag_solve"]["precision"] == 0.5
     assert report["per_category"]["flag_reengage"]["recall"] == 0.0
     assert len(report["mistakes"]) == 2
-    assert "Overall accuracy: 60%" in evaluation.format_report(report)
+    assert "Overall accuracy: 67%" in evaluation.format_report(report)
 
 
 def test_load_eval_set_rejects_unlabelled(tmp_path):
@@ -1260,7 +1261,8 @@ def test_live_labelled_set_report():
     ids=list(CATEGORY_FIXTURES) + ["precedence_conflict"],
 )
 def test_live_classification(ticket, expected):
-    result = classify.classify_ticket(build_ticket_payload(ticket))
+    # The fixtures' times are relative to fixtures.NOW, so "now" is that too.
+    result = classify.classify_ticket(build_ticket_payload(ticket, as_of=NOW))
     assert result["classification"] == expected, result.get("reasoning")
 
 

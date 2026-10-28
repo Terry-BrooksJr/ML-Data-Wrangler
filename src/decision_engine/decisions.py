@@ -40,6 +40,7 @@ CHOICE_LABELS = {
     "escalation_internal": "2. Escalate to the support owner",
     "flag_reengage": "3. Re-engage",
     "flag_solve": "4. Solve",
+    "on_track": "5. On track: no action needed now",
     "manual_triage": "Manual triage",
 }
 # Sections of the engine's prompt that only matter to a model writing a full
