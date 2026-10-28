@@ -21,14 +21,14 @@ def wrap_untrusted(text: Optional[str]) -> str:
 
 
 def support_comment_times(ticket_doc: dict) -> List[str]:
-    """Timestamps, as the payload shows them, of the public comments from
-    Support: the only comments that can be re-engagement attempts
-    (guards.apply_guards checks the model's citations against them)."""
+    """Timestamps, as the payload shows them, of Support's comments: the only
+    ones that can be re-engagement attempts (public ones to the customer,
+    internal notes to an internal party). guards.apply_guards checks the
+    model's citations against them."""
     return [
         _iso(c.get("timestamp"))
         for c in ticket_doc.get("transcript", [])
-        if not c.get("is_internal_note")
-        and c.get("timestamp") is not None
+        if c.get("timestamp") is not None
         and author_role(c.get("author"), c.get("role")) == SUPPORT
     ]
 

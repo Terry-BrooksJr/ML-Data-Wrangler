@@ -38,6 +38,8 @@ def guarded(classification, confidence=90, support_times=None, **extra):
         (["R1", "S2"], "flag_solve"),
         (["R1"], "manual_triage"),
         (["solved"], "manual_triage"),
+        (["S99"], "manual_triage"),
+        (["S0"], "manual_triage"),
         ([], "manual_triage"),
     ],
 )
@@ -121,6 +123,27 @@ def test_unverified_attempts_are_dropped_and_dont_count():
     assert any("Ignored 1 cited re-engage" in o for o in result["guard_overrides"])
 
 
+def test_the_same_comment_cited_twice_counts_once():
+    result = guarded(
+        "flag_reengage",
+        reengage_attempts=[T1, "2026-10-01T10:00:00Z"],
+        support_times=[T1],
+    )
+    assert result["classification"] == "flag_reengage"
+    assert result["reengage_attempts"] == [T1]
+
+
+def test_a_compliant_low_confidence_leadership_answer_is_kept():
+    # What the prompt asks for below the Leadership bar: the owner, citing L.
+    result = guarded(
+        "escalation_internal",
+        75,
+        signals_matched=["L6"],
+        internal_note="Leadership visibility: says they won't renew.",
+    )
+    assert result["classification"] == "escalation_internal"
+
+
 def test_attempts_are_trusted_when_support_times_are_unknown():
     result = guarded("flag_reengage", reengage_attempts=[T1, T2])
     assert result["classification"] == "escalation_internal"
@@ -135,7 +158,11 @@ def test_support_comment_times_are_public_support_comments():
             {"author": "888", "timestamp": "2026-10-04T10:00:00+00:00"},
         ]
     }
-    assert support_comment_times(ticket) == ["2026-10-01T10:00:00+00:00"]
+    # Internal notes count: they re-engage internal parties.
+    assert support_comment_times(ticket) == [
+        "2026-10-01T10:00:00+00:00",
+        "2026-10-02T10:00:00+00:00",
+    ]
 
 
 # --- arbitration -----------------------------------------------------------
@@ -206,7 +233,7 @@ def test_the_judging_call_does_not_see_the_ticket(engine):
     classify.classify_ticket("SECRET TICKET PAYLOAD", config=config)
 
     judge = calls[2]
-    assert "SECRET TICKET PAYLOAD" not in json.dumps(judge["messages"])
+    assert "SECRET TICKET PAYLOAD" not in json.dumps(judge)
     assert judge["system"][1]["text"] == classify.JUDGE_INSTRUCTIONS
 
 

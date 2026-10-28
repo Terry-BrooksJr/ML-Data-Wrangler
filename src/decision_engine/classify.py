@@ -1,7 +1,7 @@
 """Zendesk ticket triage decision engine (Module 2).
 
 Reads mapped ticket documents from Mongo, asks an LLM (via Cheaper Inference)
-for one of five triage classifications, and appends the result to
+for one of six triage classifications, and appends the result to
 tickets.agent_reviews. Never writes to Zendesk; write-back is Module 3.
 """
 
@@ -522,8 +522,8 @@ def judge_answers(
     """
     shown = "\n\n".join(
         f"Answer {label}: {answer['classification']} "
-        f"(confidence {answer.get('confidence')}, triggers "
-        f"{', '.join(answer.get('signals_matched') or []) or 'none'})\n"
+        f"(confidence {answer.get('confidence')})\n"
+        f"Triggers: {wrap_untrusted(', '.join(answer.get('signals_matched') or []) or 'none')}\n"
         f"Reasoning: {wrap_untrusted(answer.get('reasoning'))}"
         for label, answer in zip("AB", (first, second))
     )

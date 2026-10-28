@@ -131,9 +131,10 @@ def count_awaiting(tickets: Collection) -> int:
         tickets: The MongoDB tickets collection.
 
     Returns:
-        The number of documents where `awaiting_review` is True.
+        The number of reviewable documents (not Solved or Closed) where
+        `awaiting_review` is True: the tickets the queue lists.
     """
-    return tickets.count_documents({"awaiting_review": True})
+    return tickets.count_documents({"awaiting_review": True, **persistence.REVIEWABLE})
 
 
 def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[dict]:

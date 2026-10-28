@@ -29,14 +29,18 @@ REENGAGE_LIMIT = 2  # the prompt's ceiling: at most two attempts per stall
 # What an internal note starts with when Leadership should see a ticket the
 # owner handles (the prompt asks for it too).
 LEADERSHIP_VISIBILITY = "Leadership visibility:"
-# The trigger IDs (prompts.py) that can justify each category.
+# The trigger IDs (prompts.py) that can justify each category. An owner
+# escalation may cite a Leadership trigger: the prompt sends a Leadership
+# case below its confidence bar to the owner.
 TRIGGER_PREFIXES = {
     "escalate_leadership": "L",
-    "escalation_internal": "O",
+    "escalation_internal": "OL",
     "flag_reengage": "R",
     "flag_solve": "S",
 }
-_TRIGGER_ID = re.compile(r"\s*([LORS])\d+\b")
+# How many triggers each letter has in the prompt (L1-L9, ...).
+TRIGGER_COUNTS = {"L": 9, "O": 7, "R": 7, "S": 7}
+_TRIGGER_ID = re.compile(r"\s*([LORS])(\d+)\b")
 
 _OPTIONAL_TEXT = (
     "internal_note",
@@ -163,8 +167,13 @@ def _instant(text) -> Optional[datetime]:
 
 
 def cited_triggers(signals: Iterable[str]) -> Set[str]:
-    """The trigger-ID letters among signals_matched ("R1", "R1: no reply" -> "R")."""
-    return {m.group(1) for m in map(_TRIGGER_ID.match, signals) if m}
+    """The letters of the real trigger IDs among signals_matched
+    ("R1", "R1: no reply" -> "R"); an ID the prompt doesn't define (S99) is ignored."""
+    return {
+        m.group(1)
+        for m in map(_TRIGGER_ID.match, signals)
+        if m and 1 <= int(m.group(2)) <= TRIGGER_COUNTS[m.group(1)]
+    }
 
 
 def _verified_attempts(result: dict, support_comment_times) -> List[str]:
@@ -176,12 +185,18 @@ def _verified_attempts(result: dict, support_comment_times) -> List[str]:
     if support_comment_times is None:
         return list(cited)
     known = {_instant(t) for t in support_comment_times} - {None}
-    verified = [a for a in cited if _instant(a) in known]
+    verified, seen = [], set()
+    for attempt in cited:
+        instant = _instant(attempt)
+        # Each comment counts once, however its time is written.
+        if instant in known and instant not in seen:
+            seen.add(instant)
+            verified.append(attempt)
     if len(verified) < len(cited):
         _override(
             result,
             f"Ignored {len(cited) - len(verified)} cited re-engage attempt(s) that "
-            "aren't public comments from Support.",
+            "aren't distinct comments from Support.",
         )
     return verified
 
@@ -217,16 +232,17 @@ def apply_guards(
     model_tag = result.get("tag")
     confidence = result["confidence"]
 
-    prefix = TRIGGER_PREFIXES.get(model_classification)
+    allowed = TRIGGER_PREFIXES.get(model_classification)
     if (
-        prefix
+        allowed
         and not classification_only
-        and prefix not in cited_triggers(result.get("signals_matched") or [])
+        and not set(allowed) & cited_triggers(result.get("signals_matched") or [])
     ):
         result["classification"] = "manual_triage"
         _override(
             result,
-            f"Downgraded from {model_classification}: no {prefix} trigger ID in signals_matched.",
+            f"Downgraded from {model_classification}: no {' or '.join(allowed)} "
+            "trigger ID in signals_matched.",
         )
 
     if result["classification"] == "flag_solve" and confidence < SOLVE_CONFIDENCE_FLOOR:
