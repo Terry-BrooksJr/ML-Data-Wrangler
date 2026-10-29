@@ -93,8 +93,9 @@ SETTINGS: List[Setting] = [
         "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
         "Arbiter model",
         "Decision Engine (Cheaper Inference)",
+        required=True,
         help="Rules when the confirmation model disagrees with the first answer. "
-        "Leave blank to send disagreements to manual triage.",
+        "Use a model other than the primary and confirmation models.",
     ),
     Setting(
         "DECISION_MODELS",
@@ -132,7 +133,8 @@ SETTINGS: List[Setting] = [
         "TAG_NORMALIZER_MODEL",
         "Tag Normalizer model",
         "Decision Engine (Cheaper Inference)",
-        help="Used by the Tag Normalizer's language-model option. Leave blank to use the primary model.",
+        required=True,
+        help="Used by the Tag Normalizer's language-model option.",
     ),
     Setting(
         "DECISION_ENGINE_MODEL",

@@ -35,8 +35,8 @@ classifications (decision_engine.guards):
 
 Requests go through the decision engine's client (Cheaper Inference: the
 same API key, https-only URL check and retries). The model is
-TAG_NORMALIZER_MODEL, else CHEAPER_INFERENCE_PRIMARY_MODEL_NAME. Only the tag
-names and counts are sent, never ticket text.
+TAG_NORMALIZER_MODEL, a required setting. Only the tag names and counts are
+sent, never ticket text.
 """
 
 import json
@@ -133,7 +133,15 @@ def split_ignored(tags: List[Tag]) -> Tuple[List[Tag], List[Tag]]:
 
 
 def model_name() -> str:
-    return os.environ.get("TAG_NORMALIZER_MODEL") or classify.primary_model()
+    """TAG_NORMALIZER_MODEL.
+
+    Raises:
+        TagModelError: it isn't set.
+    """
+    model = (os.environ.get("TAG_NORMALIZER_MODEL") or "").strip()
+    if not model:
+        raise TagModelError("Set the Tag Normalizer model in Settings first.")
+    return model
 
 
 @lru_cache(maxsize=1)

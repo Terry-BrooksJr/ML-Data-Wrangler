@@ -341,6 +341,13 @@ class TagTab(QWidget):
         Zendesk AI tags are never embedded or sent (tag_llm.split_ignored).
         Earlier decisions (normalized_tags) are not applied to model runs.
         """
+        if not os.environ.get("TAG_NORMALIZER_MODEL", "").strip():
+            QMessageBox.warning(
+                self,
+                "Tag Normalizer model not set",
+                "Set the Tag Normalizer model in Settings to use the language model.",
+            )
+            return False
         to_embed, _ = tag_llm.split_ignored(tags)
         missing = [t.text for t in to_embed if (VOYAGE, t.text) not in self._cache]
         known = {

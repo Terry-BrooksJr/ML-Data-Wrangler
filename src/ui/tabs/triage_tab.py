@@ -47,14 +47,15 @@ from PyQt5.QtWidgets import (
 from ui.utility import ThreadWorker, worker_thread
 from ui.widgets import Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
 
-# Reading reviews only touches Mongo; classifying also needs the primary
-# model. The secondary, confirmation and arbiter models are optional: when
+# Reading reviews only touches Mongo; classifying also needs the primary and
+# arbiter models. The secondary and confirmation models are optional: when
 # unset, the engine skips that step.
 READ_ENV = ("MONGO_URI",)
 REVIEW_ENV = READ_ENV + (
     "CHEAPER_INFERENCE_API_KEY",
     "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
+    "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
 )
 # Embedding tickets reads and writes Mongo and calls Voyage AI.
 EMBED_ENV = READ_ENV + ("EMBEDDING_API_KEY",)
@@ -62,7 +63,6 @@ EMBED_ENV = READ_ENV + ("EMBEDDING_API_KEY",)
 OPTIONAL_MODEL_ENV = {
     "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME": "no fallback if the primary model call fails",
     "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME": "manual-triage and low-confidence results won't be re-checked",
-    "CHEAPER_INFERENCE_ARBITER_MODEL_NAME": "a disagreement between models goes straight to manual triage",
 }
 REVIEW_ADDED_BUTTON = "Review Added to Zendesk"
 # SiliconUI's Fluent icon for copying (two overlapping squares).

@@ -101,6 +101,11 @@ def _env_read(node):
     return None
 
 
+def test_arbiter_and_tag_models_are_required():
+    required = {s.name for s in settings.SETTINGS if s.required}
+    assert {"CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "TAG_NORMALIZER_MODEL"} <= required
+
+
 def test_missing_required(config, monkeypatch):
     required = [s.name for s in settings.SETTINGS if s.required]
     assert settings.missing_required() == required
