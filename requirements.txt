@@ -182,7 +182,7 @@ joblib==1.6.0
     #   scikit-learn
 jsonpatch==1.35 ; python_full_version != '3.13.*'
     # via langchain-core
-jsonpointer==3.2.1 ; python_full_version != '3.13.*'
+jsonpointer==3.5 ; python_full_version != '3.13.*'
     # via jsonpatch
 kiwisolver==1.5.1
     # via matplotlib
