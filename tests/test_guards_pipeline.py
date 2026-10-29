@@ -523,3 +523,20 @@ def test_claims_saved_before_expiry_was_recorded_still_expire_by_age(monkeypatch
     old = datetime.now(timezone.utc) - ab_test.claim_ttl() - timedelta(minutes=1)
     results.insert_one({"_id": 1, "claim": {"worker": "gone", "at": old}})
     assert ab_test._claim(results, 1, "new")
+
+
+def test_every_trigger_has_a_name():
+    expected = {
+        f"{letter}{n}" for letter, count in guards.TRIGGER_COUNTS.items()
+        for n in range(1, count + 1)
+    }
+    assert set(guards.TRIGGER_NAMES) == expected
+
+
+def test_signals_show_their_trigger_name():
+    assert guards.describe_signal("L6") == "L6 — Genuine churn risk"
+    assert guards.describe_signal("R1: no reply since May 2") == (
+        "R1 — No reply to Support's request in 72 business hours (no reply since May 2)"
+    )
+    assert guards.describe_signal("S99") == "S99"
+    assert guards.describe_signal("signal a") == "signal a"

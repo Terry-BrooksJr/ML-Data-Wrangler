@@ -407,14 +407,22 @@ def current() -> Dict[str, str]:
 
 
 def missing_required() -> List[str]:
-    """Names of required settings that are unset or empty."""
-    return [s.name for s in SETTINGS if s.required and not os.environ.get(s.name)]
+    """Names of required settings that are unset, empty or only whitespace."""
+    return [
+        s.name
+        for s in SETTINGS
+        if s.required and not os.environ.get(s.name, "").strip()
+    ]
 
 
 # What stops working when a group's required settings are missing.
 _MISSING_EFFECTS = {
     "MongoDB": "Write Tickets to MongoDB, recording topic runs in MongoDB, and the Decision Engine",
     "Decision Engine (Cheaper Inference)": "the Decision Engine (classifying tickets)",
+}
+# Settings whose group's effect would overstate what they disable.
+_MISSING_SETTING_EFFECTS = {
+    "TAG_NORMALIZER_MODEL": "the Tag Normalizer's language-model option",
 }
 
 
@@ -425,11 +433,17 @@ def describe_missing(missing: List[str]) -> str:
     model setting doesn't claim Write Tickets to MongoDB is unavailable.
     """
     by_name = {s.name: s for s in SETTINGS}
+
+    def effect(name: str) -> str:
+        group = by_name[name].group
+        return _MISSING_SETTING_EFFECTS.get(name) or _MISSING_EFFECTS.get(
+            group, f"features that use the {group} settings"
+        )
+
     lines = []
-    for group in dict.fromkeys(by_name[name].group for name in missing):
-        names = [name for name in missing if by_name[name].group == group]
-        effect = _MISSING_EFFECTS.get(group, f"features that use the {group} settings")
-        lines.append(f"Not set: {', '.join(names)}.\nUnavailable until set: {effect}.")
+    for disabled in dict.fromkeys(effect(name) for name in missing):
+        names = [name for name in missing if effect(name) == disabled]
+        lines.append(f"Not set: {', '.join(names)}.\nUnavailable until set: {disabled}.")
     return "\n\n".join(lines)
 
 

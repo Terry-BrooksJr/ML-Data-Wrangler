@@ -41,6 +41,39 @@ TRIGGER_PREFIXES = {
 # How many triggers each letter has in the prompt (L1-L9, ...).
 TRIGGER_COUNTS = {"L": 9, "O": 7, "R": 7, "S": 7}
 _TRIGGER_ID = re.compile(r"\s*([LORS])(\d+)\b")
+# A short name for each trigger in prompts.py, shown beside its ID.
+TRIGGER_NAMES = {
+    "L1": "Closing would bypass customer communication",
+    "L2": "Customer Success Manager needed",
+    "L3": "Ownership moves outside Support",
+    "L4": "Product concern for product or executive leadership",
+    "L5": "Platform-level risk",
+    "L6": "Genuine churn risk",
+    "L7": "Contractual obligation or exposure",
+    "L8": "Customer data risk",
+    "L9": "SLA breach",
+    "O1": "Customer question unanswered for 48 business hours",
+    "O2": "Linked Jira bug idle for 28 days",
+    "O3": "Blocked on an internal dependency",
+    "O4": "Re-engage attempts exhausted",
+    "O5": "Customer frustration or tone escalation",
+    "O6": "Account-level action needed",
+    "O7": "Closing needs owner confirmation",
+    "R1": "No reply to Support's request in 72 business hours",
+    "R2": "Customer reply missing what was asked",
+    "R3": "Internal party silent for 48 business hours",
+    "R4": "Linked Jira issue idle for 14 days",
+    "R5": "Promised follow-up date passed",
+    "R6": "No public comment for 72 business hours",
+    "R7": "Scheduled action has come due",
+    "S1": "Customer confirms no further help needed",
+    "S2": "Investigation results delivered",
+    "S3": "Linked feature released",
+    "S4": "Linked defect resolved or Behaves as Expected",
+    "S5": "Feature request marked Won't Do",
+    "S6": "Defined task completed",
+    "S7": "All requests and questions addressed",
+}
 
 _OPTIONAL_TEXT = (
     "internal_note",
@@ -164,6 +197,18 @@ def _instant(text) -> Optional[datetime]:
         return datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def describe_signal(signal: str) -> str:
+    """A signal with its trigger's name: "R1" -> "R1 — No reply to Support's
+    request in 72 business hours". Text the model added after the ID is kept;
+    a signal that isn't a known trigger ID is returned as is."""
+    m = _TRIGGER_ID.match(signal)
+    name = m and TRIGGER_NAMES.get(m.group(1) + str(int(m.group(2))))
+    if not name:
+        return signal
+    rest = signal[m.end() :].strip(" :-—")
+    return f"{m.group(1)}{int(m.group(2))} — {name}" + (f" ({rest})" if rest else "")
 
 
 def cited_triggers(signals: Iterable[str]) -> Set[str]:

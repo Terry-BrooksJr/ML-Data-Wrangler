@@ -635,6 +635,12 @@ def main(argv: List[str]) -> int:
     if args.backend == LLM:
         from tags import tag_llm
 
+        # Before the paid Voyage call, which is wasted if the model isn't set.
+        try:
+            tag_llm.model_name()
+        except tag_llm.TagModelError as error:
+            print(error, file=sys.stderr)
+            return 1
         candidates = []
         if not args.no_candidates:
             # Zendesk AI tags are never embedded or sent (tag_llm.split_ignored).

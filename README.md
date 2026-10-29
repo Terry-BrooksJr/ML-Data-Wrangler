@@ -391,9 +391,9 @@ The reply is checked before it's shown:
   `sentiment_positive`) to a name no other tag shares is undone.
 
 Requests use the Decision Engine's Cheaper Inference settings (key, https
-URL). The model is **Tag Normalizer model** (`TAG_NORMALIZER_MODEL`), or the
-primary model when that's blank. Only tag names and counts are sent. On the
-195-tag example export, one run takes one to two minutes and about 25k tokens. One
+URL). The model is **Tag Normalizer model** (`TAG_NORMALIZER_MODEL`), a
+required setting: there is no fallback to the primary model. Only tag names
+and counts are sent. On the 195-tag example export, one run takes one to two minutes and about 25k tokens. One
 request holds at most 1,000 tags; split longer lists, since splitting hides
 merges across the parts.
 

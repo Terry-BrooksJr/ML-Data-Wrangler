@@ -1616,3 +1616,40 @@ def test_interrupted_calls_are_retried_only_when_asked(
 def test_reviewing_needs_the_arbiter_model():
     assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" in triage_tab.REVIEW_ENV
     assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" not in triage_tab.OPTIONAL_MODEL_ENV
+    assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" not in triage_tab.AB_TEST_ENV
+
+
+@pytest.mark.parametrize("arbiter", [None, "   "])
+def test_review_all_refuses_without_the_arbiter(
+    qapp, configured, monkeypatch, dialogs, stored, arbiter
+):
+    if arbiter is None:
+        monkeypatch.delenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME")
+    else:
+        monkeypatch.setenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME", arbiter)
+    calls = []
+    tab = make_tab(stored, review_batch=lambda tickets, ids, **kw: calls.append(tickets))
+
+    tab.start_batch()
+    wait_until_idle(qapp, tab)
+
+    assert calls == []
+    assert dialogs[0][0] == "warning"
+    assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" in tab.status_label.text()
+
+
+def test_ab_test_does_not_need_the_arbiter(qapp, configured, monkeypatch, dialogs, ab_tickets):
+    monkeypatch.delenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME")
+    tab = make_tab(ab_tickets)
+    dialog = open_ab_test(qapp, tab, monkeypatch)
+    dialog.new_run()
+    wait_until_idle(qapp, tab)
+    assert not any(kind == "warning" for kind, _ in dialogs)
+    assert dialog.run_table.rowCount() == 1
+
+
+def test_review_text_names_each_trigger():
+    text = triage_tab.format_review(
+        {"zendesk_id": "1", "review": {"signals_matched": ["L6"]}}
+    )
+    assert "  - L6 — Genuine churn risk" in text

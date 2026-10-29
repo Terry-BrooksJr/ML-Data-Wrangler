@@ -585,3 +585,14 @@ def test_model_results_cant_be_saved_but_embedding_results_can(qapp, tmp_path):
     wait_until_idle(qapp, tab)
     assert tab.save_button.isEnabled()
     assert tab.save_button.toolTip() == tag_tab.SAVE_TOOLTIP
+
+
+def test_cli_checks_the_model_before_embedding(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TAG_NORMALIZER_MODEL")
+    monkeypatch.setattr(
+        tag_normalizer, "embedder", lambda backend: pytest.fail("embedded before the model check")
+    )
+    source = tmp_path / "tags.txt"
+    source.write_text(", ".join(EXAMPLE_INPUT))
+    assert tag_normalizer.main([str(source), "--backend", "llm"]) == 1
+    assert "Tag Normalizer model" in capsys.readouterr().err

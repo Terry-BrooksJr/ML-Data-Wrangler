@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ui import zendesk_links
 from decision_engine import ab_test, pricing
 from decision_engine.classify import EFFORT_LEVELS, EngineConfig, MAX_TOKENS_LIMIT
+from decision_engine.guards import describe_signal
 from decision_engine.identity import current_user
 from loguru import logger
 from pymongo.collection import Collection
@@ -110,7 +111,10 @@ def format_output(output: Optional[dict]) -> str:
     lines += [
         "",
         "Signals matched:",
-        *[f"  - {signal}" for signal in output.get("signals_matched") or ["(none)"]],
+        *[
+            f"  - {describe_signal(signal)}"
+            for signal in output.get("signals_matched") or ["(none)"]
+        ],
         "",
         "Reasoning:",
         output.get("reasoning") or "(none)",

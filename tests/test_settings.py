@@ -112,6 +112,20 @@ def test_missing_required(config, monkeypatch):
     for name in required:
         monkeypatch.setenv(name, "v")
     assert settings.missing_required() == []
+    monkeypatch.setenv("TAG_NORMALIZER_MODEL", "   ")
+    assert settings.missing_required() == ["TAG_NORMALIZER_MODEL"]
+
+
+def test_describe_missing_tag_model_names_only_the_tag_normalizer():
+    text = settings.describe_missing(["TAG_NORMALIZER_MODEL"])
+    assert "Tag Normalizer" in text
+    assert "classifying tickets" not in text
+    both = settings.describe_missing(
+        ["CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "TAG_NORMALIZER_MODEL"]
+    )
+    first, second = both.split("\n\n")
+    assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" in first and "classifying tickets" in first
+    assert "TAG_NORMALIZER_MODEL" in second and "Tag Normalizer" in second
 
 
 def test_saved_settings_override_shell(config, monkeypatch):
