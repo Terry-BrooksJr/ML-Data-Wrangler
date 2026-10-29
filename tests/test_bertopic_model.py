@@ -492,3 +492,57 @@ def test_interrupted_assignment_reports_progress_and_resumes(tmp_path, monkeypat
     assert {
         d["zendesk_id"]: d["embedding_topic"]["topic"] for d in tickets.find()
     } == dict(zip(ids, topics))
+
+
+def test_hdbscan_never_starts_worker_processes():
+    # In the packaged app each worker process can be another copy of Lasso.
+    model = bertopic_model.build_model(bertopic_model.Settings(), 100_000)
+    assert model.hdbscan_model.core_dist_n_jobs == 1
+
+
+def _all_outliers(monkeypatch):
+    from bertopic.dimensionality import BaseDimensionalityReduction
+
+    build = bertopic_model.build_model
+
+    def no_clusters(settings, n_docs):
+        model = build(settings, n_docs)
+        model.umap_model = BaseDimensionalityReduction()
+        model.hdbscan_model = _FixedClusters([bertopic_model.OUTLIER] * n_docs)
+        return model
+
+    monkeypatch.setattr(bertopic_model, "build_model", no_clusters)
+
+
+def test_train_explains_all_outliers_and_points_at_the_backfill(monkeypatch):
+    # As after the tickets were reloaded: few embedded yet, the rest waiting on the backfill.
+    _all_outliers(monkeypatch)
+    corpus, tokens = _corpus()
+    corpus.skipped = {"no_embedding": 594, "stale": 6}
+    with pytest.raises(ValueError) as error:
+        bertopic_model.train(corpus, tokens, bertopic_model.Settings())
+    message = str(error.value)
+    assert "No topics were found" in message
+    assert (
+        f"at least {bertopic_model.MIN_CLUSTER_SIZE_FLOOR} similar tickets" in message
+    )
+    assert f"among the {len(corpus.ids)} tickets" in message
+    assert "600 more tickets were left out" in message
+    assert "embed:backfill" in message
+
+
+def test_train_all_outliers_skips_the_backfill_hint_when_all_are_embedded(monkeypatch):
+    _all_outliers(monkeypatch)
+    corpus, tokens = _corpus()
+    corpus.skipped = {"no_text": 3}
+    with pytest.raises(ValueError, match="Lower the minimum topic size") as error:
+        bertopic_model.train(corpus, tokens, bertopic_model.Settings())
+    assert "backfill" not in str(error.value)
+
+
+def test_train_too_few_tickets_points_at_the_backfill():
+    corpus, tokens = _corpus()
+    corpus.ids, corpus.vectors = corpus.ids[:15], corpus.vectors[:15]
+    corpus.skipped = {"no_embedding": 40}
+    with pytest.raises(ValueError, match="(?s)too few.*40 more tickets.*backfill"):
+        bertopic_model.train(corpus, tokens[:15], bertopic_model.Settings())
