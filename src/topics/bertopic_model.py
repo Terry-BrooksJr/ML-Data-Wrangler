@@ -225,11 +225,31 @@ def build_model(settings: Settings, n_docs: int):
             metric="euclidean",
             cluster_selection_method="eom",
             prediction_data=True,
+            # One process: above ~16k tickets HDBSCAN would start a joblib
+            # process pool, and in the app each worker process can be another
+            # copy of Lasso. (UMAP is single-threaded already: it is seeded.)
+            core_dist_n_jobs=1,
         ),
         vectorizer_model=_vectorizer(),
         ctfidf_model=ClassTfidfTransformer(reduce_frequent_words=True),
         nr_topics=settings.nr_topics,
         top_n_words=TOP_WORDS,
+    )
+
+
+def _unembedded_hint(corpus: Corpus) -> str:
+    """Says how many tickets were left out for want of a current embedding, if any.
+
+    After the tickets are reloaded (or their text changes) most have none until
+    the backfill catches up, and a run on the few that do finds little.
+    """
+    missing = sum(corpus.skipped.get(k, 0) for k in ("no_embedding", "stale"))
+    if not missing:
+        return ""
+    return (
+        f"\n\n{missing} more tickets were left out because they have no embedding made "
+        "from their current text. Run the embedding backfill (task embed:backfill, or "
+        "cd src && python -m embedding.embeddings backfill), then train again."
     )
 
 
@@ -248,6 +268,7 @@ def train(
         raise ValueError(
             f"{n_docs} tickets with a current embedding is too few for topics of at least "
             f"{settings.cluster_size(n_docs)} tickets. Embed more tickets or lower the minimum topic size."
+            + _unembedded_hint(corpus)
         )
     documents = [" ".join(t) for t in tokens]
     model = build_model(settings, n_docs)
@@ -256,7 +277,10 @@ def train(
     outliers_before = topics.count(OUTLIER)
     if outliers_before == n_docs:
         raise ValueError(
-            "Every ticket was left as an outlier: no topics were found. Lower the minimum topic size."
+            f"No topics were found: no group of at least {settings.cluster_size(n_docs)} similar "
+            f"tickets stood out among the {n_docs} tickets with a current embedding, so every "
+            "ticket was left as an outlier. Lower the minimum topic size, or train on more tickets."
+            + _unembedded_hint(corpus)
         )
     if settings.reduce_outliers and outliers_before:
         topics = [
