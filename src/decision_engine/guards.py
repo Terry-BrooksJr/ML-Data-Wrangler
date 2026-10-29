@@ -69,7 +69,7 @@ TRIGGER_NAMES = {
     "S1": "Customer confirms no further help needed",
     "S2": "Investigation results delivered",
     "S3": "Linked feature released",
-    "S4": "Linked defect resolved or Behaves as Expected",
+    "S4": "Linked defect deployed, or Behaves as Expected and told to the customer",
     "S5": "Feature request marked Won't Do",
     "S6": "Defined task completed",
     "S7": "All requests and questions addressed",
@@ -199,16 +199,27 @@ def _instant(text) -> Optional[datetime]:
         return None
 
 
-def describe_signal(signal: str) -> str:
+def _trigger_key(m: re.Match) -> Optional[str]:
+    """The trigger ID a _TRIGGER_ID match names ("R01" -> "R1"), or None when
+    the prompt doesn't define it. Compares digits as text: int() refuses
+    numbers past Python's digit limit."""
+    key = m.group(1) + m.group(2).lstrip("0")
+    return key if key in TRIGGER_NAMES else None
+
+
+def describe_signal(signal) -> str:
     """A signal with its trigger's name: "R1" -> "R1 — No reply to Support's
     request in 72 business hours". Text the model added after the ID is kept;
-    a signal that isn't a known trigger ID is returned as is."""
+    a signal that isn't a known trigger ID is returned as is (as text, since a
+    stored record may hold something else)."""
+    if not isinstance(signal, str):
+        return str(signal)
     m = _TRIGGER_ID.match(signal)
-    name = m and TRIGGER_NAMES.get(m.group(1) + str(int(m.group(2))))
-    if not name:
+    key = m and _trigger_key(m)
+    if not key:
         return signal
     rest = signal[m.end() :].strip(" :-—")
-    return f"{m.group(1)}{int(m.group(2))} — {name}" + (f" ({rest})" if rest else "")
+    return f"{key} — {TRIGGER_NAMES[key]}" + (f" ({rest})" if rest else "")
 
 
 def cited_triggers(signals: Iterable[str]) -> Set[str]:
@@ -217,7 +228,7 @@ def cited_triggers(signals: Iterable[str]) -> Set[str]:
     return {
         m.group(1)
         for m in map(_TRIGGER_ID.match, signals)
-        if m and 1 <= int(m.group(2)) <= TRIGGER_COUNTS[m.group(1)]
+        if m and _trigger_key(m)
     }
 
 

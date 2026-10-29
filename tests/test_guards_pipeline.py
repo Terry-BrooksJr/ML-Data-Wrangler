@@ -540,3 +540,21 @@ def test_signals_show_their_trigger_name():
     )
     assert guards.describe_signal("S99") == "S99"
     assert guards.describe_signal("signal a") == "signal a"
+    assert guards.describe_signal("R01") == guards.describe_signal("R1")
+    assert guards.describe_signal("S" + "9" * 5000) == "S" + "9" * 5000
+    assert guards.cited_triggers(["S" + "9" * 5000, "L0"]) == set()
+    assert guards.describe_signal(None) == "None"
+    assert guards.describe_signal(7) == "7"
+
+
+def test_blank_model_settings_count_as_unset(monkeypatch):
+    for name in (
+        "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME",
+        "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME",
+        "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
+    ):
+        monkeypatch.setenv(name, "   ")
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", " gpt-x ")
+    config = classify.EngineConfig.from_env()
+    assert config.primary == "gpt-x"
+    assert (config.secondary, config.confirmation, config.arbiter) == (None, None, None)
