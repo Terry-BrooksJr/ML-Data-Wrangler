@@ -186,7 +186,7 @@ jsonpointer==3.2.1 ; python_full_version != '3.13.*'
     # via jsonpatch
 kiwisolver==1.5.1
     # via matplotlib
-langchain-core==1.6.12 ; python_full_version != '3.13.*'
+langchain-core==1.7.0 ; python_full_version != '3.13.*'
     # via langchain-text-splitters
 langchain-protocol==0.0.20 ; python_full_version != '3.13.*'
     # via langchain-core
