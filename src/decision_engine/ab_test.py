@@ -91,8 +91,8 @@ _KEPT_FIELDS = (
 # The ticket fields kept beside the payload, for the reviewer. The transcript
 # isn't copied: the reviewer reads it from the payload the models were sent.
 _SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status")
-# A claim (and an in-flight lock) older than claim_ttl() is treated as
-# abandoned: its worker stopped. It is renewed before each variant's calls,
+# A claim (and an in-flight lock) past its expires_at, set to claim_ttl()
+# after it was taken or renewed, is treated as abandoned: its worker stopped. It is renewed before each variant's calls,
 # so it must outlast one variant's worst case at the configured timeout
 # (classify.worst_case_seconds: primary, secondary, confirmation and the
 # arbiter's two calls, each with its retries), plus a margin.
@@ -102,6 +102,29 @@ CLAIM_MARGIN = timedelta(minutes=5)
 def claim_ttl() -> timedelta:
     """How long a result's claim lasts, read from the timeout setting when used."""
     return timedelta(seconds=worst_case_seconds()) + CLAIM_MARGIN
+
+
+def _expired(prefix: str, now: datetime) -> dict:
+    """A query matching a claim or lock that has expired. Each records its
+    own expires_at, set from the timeout in effect when it was taken, so
+    lowering the timeout can't cut short a call already running. One saved
+    before expires_at existed falls back to its age against claim_ttl()."""
+    return {
+        "$or": [
+            {f"{prefix}expires_at": {"$lt": now}},
+            {
+                f"{prefix}expires_at": {"$exists": False},
+                f"{prefix}at": {"$lt": now - claim_ttl()},
+            },
+        ]
+    }
+
+
+def _held(record: dict, now: datetime) -> bool:
+    """Whether a claim or lock is still held (the Python form of _expired)."""
+    if record.get("expires_at") is not None:
+        return _aware(record["expires_at"]) >= now
+    return record.get("at") is not None and _aware(record["at"]) >= now - claim_ttl()
 # MongoDB refuses documents over 16 MiB; a result whose ticket is this big
 # is left out of the run (and reported) rather than failing the whole run.
 MAX_RESULT_BYTES = 15 * 1024 * 1024
@@ -534,7 +557,7 @@ def interrupted(doc: dict) -> List[str]:
     so the call may have been billed. They wait for a deliberate retry."""
     started = doc.get("started") or {}
     claim = doc.get("claim") or {}
-    live = claim.get("at") is not None and _aware(claim["at"]) >= _now() - claim_ttl()
+    live = _held(claim, _now())
     return [
         v
         for v in VARIANTS
@@ -577,11 +600,15 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
             "_id": doc_id,
             "$or": [
                 {"claim": None},
-                {"claim.at": {"$lt": now - claim_ttl()}},
+                _expired("claim.", now),
                 {"claim.worker": worker},
             ],
         },
-        {"$set": {"claim": {"worker": worker, "at": now}}},
+        {
+            "$set": {
+                "claim": {"worker": worker, "at": now, "expires_at": now + claim_ttl()}
+            }
+        },
         return_document=ReturnDocument.AFTER,
     )
 
@@ -589,10 +616,11 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
 def _renew(results: Collection, doc_id, worker: str) -> bool:
     """Extends this worker's claim before a model call, so it outlasts the
     call (claim_ttl() bounds one variant's calls); False if it was lost."""
+    now = _now()
     return (
         results.update_one(
             {"_id": doc_id, "claim.worker": worker},
-            {"$set": {"claim.at": _now()}},
+            {"$set": {"claim.at": now, "claim.expires_at": now + claim_ttl()}},
         ).matched_count
         > 0
     )
@@ -610,18 +638,16 @@ def _lock_answer(results: Collection, doc: dict, key: str, worker: str) -> bool:
     lock_id = f"{doc['content_hash']}:{key}"
     locks = _locks(results)
     now = _now()
+    held = {"worker": worker, "at": now, "expires_at": now + claim_ttl()}
     try:
-        locks.insert_one({"_id": lock_id, "worker": worker, "at": now})
+        locks.insert_one({"_id": lock_id, **held})
         return True
     except DuplicateKeyError:
-        # Taken over only if its worker stopped (the lock outlived claim_ttl()).
+        # Taken over only if its worker stopped (the lock outlived its expiry).
         return (
             locks.update_one(
-                {
-                    "_id": lock_id,
-                    "$or": [{"worker": worker}, {"at": {"$lt": now - claim_ttl()}}],
-                },
-                {"$set": {"worker": worker, "at": now}},
+                {"_id": lock_id, "$or": [{"worker": worker}, _expired("", now)]},
+                {"$set": held},
             ).matched_count
             > 0
         )
