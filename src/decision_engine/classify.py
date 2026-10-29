@@ -37,6 +37,11 @@ DEFAULT_MODEL = "claude-opus-4.8"
 # tokens used are billed.
 MAX_TOKENS = 16000
 REQUEST_TIMEOUT_SECONDS = 120.0
+# The largest values the settings accept; anything bigger falls back to the
+# default. 128K is the most output any current model allows, and an hour per
+# call keeps claim lifetimes (worst_case_seconds) to about a day.
+MAX_TOKENS_LIMIT = 128_000
+REQUEST_TIMEOUT_LIMIT = 3600.0
 MAX_RETRIES = 3  # the SDK retries only 408/409/429/5xx and connection errors
 CONFIRMATION_CONFIDENCE_FLOOR = 75  # below this, re-check with the
 # confirmation model
@@ -78,8 +83,9 @@ def confirmation_model() -> Optional[str]:
     return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
 
 
-def _setting_number(name: str, default, kind=int, minimum=1):
-    """A numeric setting from the environment; default when unset or invalid."""
+def _setting_number(name: str, default, maximum, kind=int, minimum=1):
+    """A numeric setting from the environment; default when unset, invalid,
+    or outside minimum..maximum."""
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
@@ -87,16 +93,23 @@ def _setting_number(name: str, default, kind=int, minimum=1):
         value = kind(raw)
     except ValueError:
         value = None
-    # float() accepts "nan" and "inf", which would leave calls with no timeout.
-    if value is None or not math.isfinite(value) or value < minimum:
-        logger.warning(f"{name}={raw!r} isn't a number of at least {minimum}; using {default}.")
+    # float() accepts "nan" and "inf", which would leave calls with no
+    # timeout; the range check is done without converting a huge int to float.
+    if (
+        value is None
+        or (isinstance(value, float) and not math.isfinite(value))
+        or not minimum <= value <= maximum
+    ):
+        logger.warning(
+            f"{name}={raw!r} isn't a number from {minimum} to {maximum}; using {default}."
+        )
         return default
     return value
 
 
 def max_tokens_setting() -> int:
     """DECISION_ENGINE_MAX_TOKENS, or MAX_TOKENS."""
-    return _setting_number("DECISION_ENGINE_MAX_TOKENS", MAX_TOKENS)
+    return _setting_number("DECISION_ENGINE_MAX_TOKENS", MAX_TOKENS, MAX_TOKENS_LIMIT)
 
 
 def effort_setting() -> Optional[str]:
@@ -112,7 +125,10 @@ def effort_setting() -> Optional[str]:
 def request_timeout() -> float:
     """DECISION_ENGINE_TIMEOUT_SECONDS, or REQUEST_TIMEOUT_SECONDS."""
     return _setting_number(
-        "DECISION_ENGINE_TIMEOUT_SECONDS", REQUEST_TIMEOUT_SECONDS, kind=float
+        "DECISION_ENGINE_TIMEOUT_SECONDS",
+        REQUEST_TIMEOUT_SECONDS,
+        REQUEST_TIMEOUT_LIMIT,
+        kind=float,
     )
 
 

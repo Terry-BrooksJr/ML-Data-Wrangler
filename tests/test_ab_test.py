@@ -946,8 +946,11 @@ def test_every_attempt_is_kept_and_counted(collections, tmp_path):
     assert float(row["B_spent_usd"]) == pytest.approx((1000 + 15) / 1e6)
 
 
-def test_the_claim_outlasts_a_variant_and_is_renewed(collections):
+def test_the_claim_outlasts_a_variant_and_is_renewed(collections, monkeypatch):
     from decision_engine import classify
+
+    # The default timeout, whatever the shell exports.
+    monkeypatch.delenv("DECISION_ENGINE_TIMEOUT_SECONDS", raising=False)
 
     worst = 5 * classify.REQUEST_TIMEOUT_SECONDS * (classify.MAX_RETRIES + 1)
     assert ab_test.claim_ttl().total_seconds() > worst

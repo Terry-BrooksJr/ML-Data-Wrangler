@@ -444,3 +444,28 @@ def test_a_live_claim_lasts_the_configured_lifetime(monkeypatch):
     claim = claimed["review_claim"]
     held = claim["expires_at"] - claim["claimed_at"]
     assert held == persistence.claim_ttl()
+
+
+@pytest.mark.parametrize(
+    "name, value, read, default",
+    [
+        ("DECISION_ENGINE_MAX_TOKENS", "128001", "max_tokens_setting", 16000),
+        ("DECISION_ENGINE_MAX_TOKENS", "1" + "0" * 400, "max_tokens_setting", 16000),
+        ("DECISION_ENGINE_TIMEOUT_SECONDS", "3601", "request_timeout", 120.0),
+        ("DECISION_ENGINE_TIMEOUT_SECONDS", "1e300", "request_timeout", 120.0),
+    ],
+)
+def test_oversized_settings_fall_back_to_the_default(monkeypatch, name, value, read, default):
+    monkeypatch.setenv(name, value)
+    assert getattr(classify, read)() == default
+
+
+def test_settings_at_their_limits_are_kept_and_claims_still_work(monkeypatch):
+    from decision_engine import ab_test
+
+    monkeypatch.setenv("DECISION_ENGINE_MAX_TOKENS", "128000")
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "3600")
+    assert classify.max_tokens_setting() == 128000
+    assert classify.request_timeout() == 3600.0
+    assert persistence.claim_ttl() > ab_test.CLAIM_MARGIN
+    assert ab_test.claim_ttl().total_seconds() > 5 * 3600 * (classify.MAX_RETRIES + 1)
