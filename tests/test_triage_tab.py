@@ -1611,3 +1611,8 @@ def test_interrupted_calls_are_retried_only_when_asked(
     questions = [text for kind, text in dialogs if kind == "question"]
     assert "may already have been charged" in questions[-2]
     assert retried == [True]  # the stub answers Yes
+
+
+def test_reviewing_needs_the_arbiter_model():
+    assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" in triage_tab.REVIEW_ENV
+    assert "CHEAPER_INFERENCE_ARBITER_MODEL_NAME" not in triage_tab.OPTIONAL_MODEL_ENV

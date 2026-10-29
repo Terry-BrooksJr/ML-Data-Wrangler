@@ -185,10 +185,16 @@ def test_worked_example_round_trip(monkeypatch):
     assert result.flags == EXAMPLE_REPLY["flags"]
 
 
-def test_model_defaults_to_the_primary_model(monkeypatch):
-    monkeypatch.delenv("TAG_NORMALIZER_MODEL", raising=False)
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_model_is_required(monkeypatch, value):
+    # A required setting: no fallback to the primary model.
     monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "primary-y")
-    assert tag_llm.model_name() == "primary-y"
+    if value is None:
+        monkeypatch.delenv("TAG_NORMALIZER_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("TAG_NORMALIZER_MODEL", value)
+    with pytest.raises(tag_llm.TagModelError, match="Settings"):
+        tag_llm.model_name()
 
 
 # --- checking the reply -------------------------------------------------------------
@@ -365,6 +371,12 @@ def test_cli_no_candidates_skips_voyage(tmp_path, monkeypatch):
 # --- the tab ------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def tag_model(monkeypatch):
+    """The required Tag Normalizer model; tests that need it unset remove it."""
+    monkeypatch.setenv("TAG_NORMALIZER_MODEL", "tag-model-x")
+
+
 @pytest.fixture
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -429,6 +441,22 @@ def test_tab_shows_model_groups_and_flags(qapp, tmp_path, monkeypatch):
     # Back to embeddings: the threshold returns, and the model's notes go.
     tab.backend_combo.setCurrentIndex(tab.backend_combo.findData(tag_normalizer.SPACY))
     assert tab.threshold.isEnabled()
+
+
+def test_tab_asks_for_the_tag_model_before_running(qapp, monkeypatch):
+    from PyQt5.QtWidgets import QMessageBox
+
+    monkeypatch.delenv("TAG_NORMALIZER_MODEL")
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+    called = []
+    tab = TagTab(lambda b: fake_voyage, model_normalizer=lambda *a, **k: called.append(a))
+    tab.backend_combo.setCurrentIndex(tab.backend_combo.findData(LLM))
+    tab.input.setPlainText("a, b")
+
+    assert not tab.start_find()
+    assert warned and "Settings" in warned[0]
+    assert not called and not tab.is_busy()
 
 
 def test_tab_runs_without_voyage(qapp):
