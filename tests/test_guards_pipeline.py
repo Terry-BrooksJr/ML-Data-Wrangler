@@ -444,3 +444,82 @@ def test_a_live_claim_lasts_the_configured_lifetime(monkeypatch):
     claim = claimed["review_claim"]
     held = claim["expires_at"] - claim["claimed_at"]
     assert held == persistence.claim_ttl()
+
+
+@pytest.mark.parametrize(
+    "name, value, read, default",
+    [
+        ("DECISION_ENGINE_MAX_TOKENS", "128001", "max_tokens_setting", 16000),
+        ("DECISION_ENGINE_MAX_TOKENS", "1" + "0" * 400, "max_tokens_setting", 16000),
+        ("DECISION_ENGINE_TIMEOUT_SECONDS", "3601", "request_timeout", 120.0),
+        ("DECISION_ENGINE_TIMEOUT_SECONDS", "1e300", "request_timeout", 120.0),
+    ],
+)
+def test_oversized_settings_fall_back_to_the_default(monkeypatch, name, value, read, default):
+    monkeypatch.setenv(name, value)
+    assert getattr(classify, read)() == default
+
+
+def test_settings_at_their_limits_are_kept_and_claims_still_work(monkeypatch):
+    from decision_engine import ab_test
+
+    monkeypatch.setenv("DECISION_ENGINE_MAX_TOKENS", "128000")
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "3600")
+    assert classify.max_tokens_setting() == 128000
+    assert classify.request_timeout() == 3600.0
+    worst = 5 * 3600 * (classify.MAX_RETRIES + 1)
+    assert persistence.claim_ttl().total_seconds() > worst
+    assert ab_test.claim_ttl().total_seconds() > worst
+
+
+def test_a_lowered_timeout_does_not_cut_short_an_ab_claim(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from decision_engine import ab_test
+
+    results = mongomock.MongoClient().db.results
+    results.insert_one({"_id": 1, "claim": None})
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "3600")
+    assert ab_test._claim(results, 1, "slow")
+    taken = results.find_one({"_id": 1})["claim"]
+    assert ab_test._aware(taken["expires_at"]) - ab_test._aware(taken["at"]) == ab_test.claim_ttl()
+
+    # An hour later, another worker runs with a much shorter timeout.
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "10")
+    later = datetime.now(timezone.utc) + timedelta(hours=1)
+    monkeypatch.setattr(ab_test, "_now", lambda: later)
+    assert ab_test._claim(results, 1, "fast") is None
+    assert results.find_one({"_id": 1})["claim"]["worker"] == "slow"
+    assert ab_test.interrupted({"started": {"A": {"worker": "slow"}}, "claim": taken}) == []
+
+    # Past its own expiry, it can be taken over.
+    monkeypatch.setattr(ab_test, "_now", lambda: later + timedelta(days=1))
+    assert ab_test._claim(results, 1, "fast")
+
+
+def test_a_lowered_timeout_does_not_cut_short_an_answer_lock(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from decision_engine import ab_test
+
+    results = mongomock.MongoClient().db.results
+    doc = {"content_hash": "h"}
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "3600")
+    assert ab_test._lock_answer(results, doc, "k", "slow")
+
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "10")
+    later = datetime.now(timezone.utc) + timedelta(hours=1)
+    monkeypatch.setattr(ab_test, "_now", lambda: later)
+    assert not ab_test._lock_answer(results, doc, "k", "fast")
+
+
+def test_claims_saved_before_expiry_was_recorded_still_expire_by_age(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from decision_engine import ab_test
+
+    monkeypatch.delenv("DECISION_ENGINE_TIMEOUT_SECONDS", raising=False)
+    results = mongomock.MongoClient().db.results
+    old = datetime.now(timezone.utc) - ab_test.claim_ttl() - timedelta(minutes=1)
+    results.insert_one({"_id": 1, "claim": {"worker": "gone", "at": old}})
+    assert ab_test._claim(results, 1, "new")

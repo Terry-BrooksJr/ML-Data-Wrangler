@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ui import zendesk_links
 from decision_engine import ab_test, pricing
-from decision_engine.classify import EFFORT_LEVELS, EngineConfig
+from decision_engine.classify import EFFORT_LEVELS, EngineConfig, MAX_TOKENS_LIMIT
 from decision_engine.identity import current_user
 from loguru import logger
 from pymongo.collection import Collection
@@ -64,8 +64,6 @@ Runner = Callable[
 RUN_COLUMNS = ["Created (UTC)", "Name", "Tickets", "Status", "Reviewed"]
 DEFAULT_SAMPLE_SIZE = 30
 MAX_SAMPLE_SIZE = 1000
-# Room for thinking models; Claude's limit without streaming is far higher.
-MAX_TOKENS_LIMIT = 64000
 DEFAULT_EFFORT = "Model default"
 # Fields a reviewer reads for each ticket; the transcript can be long.
 BUSY_MESSAGE = "Another Decision Engine job is running. Try again when it finishes."

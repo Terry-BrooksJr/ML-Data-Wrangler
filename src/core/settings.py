@@ -111,8 +111,8 @@ SETTINGS: List[Setting] = [
         "Max tokens",
         "Decision Engine (Cheaper Inference)",
         default="16000",
-        help="The reply limit for every model call, thinking included. A reply cut off "
-        "here is an engine error. Only the tokens used are billed.",
+        help="The reply limit for every model call, thinking included, up to 128000. A "
+        "reply cut off here is an engine error. Only the tokens used are billed.",
     ),
     Setting(
         "DECISION_ENGINE_EFFORT",
@@ -126,7 +126,7 @@ SETTINGS: List[Setting] = [
         "Request timeout (seconds)",
         "Decision Engine (Cheaper Inference)",
         default="120",
-        help="How long one model call may take before it is retried.",
+        help="How long one model call may take before it is retried, up to 3600.",
     ),
     Setting(
         "TAG_NORMALIZER_MODEL",
