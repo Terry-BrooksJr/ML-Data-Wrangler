@@ -63,10 +63,15 @@ class EngineError(Exception):
         self.audit = audit or {}
 
 
+def _model_setting(name: str) -> Optional[str]:
+    """A model name from the environment; None when unset or only whitespace."""
+    return (os.environ.get(name) or "").strip() or None
+
+
 def primary_model() -> str:
     return (
-        os.environ.get("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME")
-        or os.environ.get("DECISION_ENGINE_MODEL")
+        _model_setting("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME")
+        or _model_setting("DECISION_ENGINE_MODEL")
         or DEFAULT_MODEL
     )
 
@@ -75,12 +80,12 @@ def primary_model() -> str:
 # skipped rather than re-running the ticket on a model that already saw it.
 def secondary_model() -> Optional[str]:
     """Used only when the primary call fails (API error or unusable reply)."""
-    return os.environ.get("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME") or None
+    return _model_setting("CHEAPER_INFERENCE_SECONDARY_MODEL_NAME")
 
 
 def confirmation_model() -> Optional[str]:
     """Re-classifies manual-triage and low-confidence results."""
-    return os.environ.get("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME") or None
+    return _model_setting("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME")
 
 
 def _setting_number(name: str, default, maximum, kind=int, minimum=1):
@@ -146,7 +151,7 @@ def worst_case_seconds(calls: int = MAX_CALLS_PER_TICKET) -> float:
 def arbiter_model() -> Optional[str]:
     """Rules when the confirmation model disagrees with the first answer
     (the "Supreme Court"); unset, a disagreement goes to manual triage."""
-    return os.environ.get("CHEAPER_INFERENCE_ARBITER_MODEL_NAME") or None
+    return _model_setting("CHEAPER_INFERENCE_ARBITER_MODEL_NAME")
 
 
 @dataclass(frozen=True)

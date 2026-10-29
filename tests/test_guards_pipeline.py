@@ -523,3 +523,38 @@ def test_claims_saved_before_expiry_was_recorded_still_expire_by_age(monkeypatch
     old = datetime.now(timezone.utc) - ab_test.claim_ttl() - timedelta(minutes=1)
     results.insert_one({"_id": 1, "claim": {"worker": "gone", "at": old}})
     assert ab_test._claim(results, 1, "new")
+
+
+def test_every_trigger_has_a_name():
+    expected = {
+        f"{letter}{n}" for letter, count in guards.TRIGGER_COUNTS.items()
+        for n in range(1, count + 1)
+    }
+    assert set(guards.TRIGGER_NAMES) == expected
+
+
+def test_signals_show_their_trigger_name():
+    assert guards.describe_signal("L6") == "L6 — Genuine churn risk"
+    assert guards.describe_signal("R1: no reply since May 2") == (
+        "R1 — No reply to Support's request in 72 business hours (no reply since May 2)"
+    )
+    assert guards.describe_signal("S99") == "S99"
+    assert guards.describe_signal("signal a") == "signal a"
+    assert guards.describe_signal("R01") == guards.describe_signal("R1")
+    assert guards.describe_signal("S" + "9" * 5000) == "S" + "9" * 5000
+    assert guards.cited_triggers(["S" + "9" * 5000, "L0"]) == set()
+    assert guards.describe_signal(None) == "None"
+    assert guards.describe_signal(7) == "7"
+
+
+def test_blank_model_settings_count_as_unset(monkeypatch):
+    for name in (
+        "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME",
+        "CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME",
+        "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
+    ):
+        monkeypatch.setenv(name, "   ")
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", " gpt-x ")
+    config = classify.EngineConfig.from_env()
+    assert config.primary == "gpt-x"
+    assert (config.secondary, config.confirmation, config.arbiter) == (None, None, None)

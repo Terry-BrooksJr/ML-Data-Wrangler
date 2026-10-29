@@ -19,7 +19,7 @@ from decision_engine.zendesk_status import (
     REVIEW_ADDED_KEY,
     review_added,
 )
-from decision_engine.guards import CLASSIFICATIONS
+from decision_engine.guards import CLASSIFICATIONS, describe_signal
 from ui.dialogs.ab_test_dialog import ab_collections, ABTestDialog
 from ui import theme, zendesk_links
 from ui.dialogs.lessons_dialog import WeeklyReviewDialog
@@ -51,12 +51,13 @@ from ui.widgets import Button, Card, fluent_icon, hint, LineEdit, ProgressBar, u
 # arbiter models. The secondary and confirmation models are optional: when
 # unset, the engine skips that step.
 READ_ENV = ("MONGO_URI",)
-REVIEW_ENV = READ_ENV + (
+# A/B runs don't use the arbiter: a disagreement there goes to manual triage.
+AB_TEST_ENV = READ_ENV + (
     "CHEAPER_INFERENCE_API_KEY",
     "CHEAPER_INFERENCE_API_URL",
     "CHEAPER_INFERENCE_PRIMARY_MODEL_NAME",
-    "CHEAPER_INFERENCE_ARBITER_MODEL_NAME",
 )
+REVIEW_ENV = AB_TEST_ENV + ("CHEAPER_INFERENCE_ARBITER_MODEL_NAME",)
 # Embedding tickets reads and writes Mongo and calls Voyage AI.
 EMBED_ENV = READ_ENV + ("EMBEDDING_API_KEY",)
 # Optional models, with what is lost when each is unset.
@@ -98,7 +99,7 @@ CONNECTION_HINT = (
 def missing_env(names=REVIEW_ENV) -> List[str]:
     """Returns the names of required environment variables that are not set.
 
-    A variable counts as missing if it is unset or set to an empty string.
+    A variable counts as missing if it is unset, empty or only whitespace.
 
     Args:
         names: Environment variable names to check. Defaults to REVIEW_ENV,
@@ -108,7 +109,7 @@ def missing_env(names=REVIEW_ENV) -> List[str]:
         The missing names, in the order given. An empty list means everything
         is configured.
     """
-    return [name for name in names if not os.getenv(name)]
+    return [name for name in names if not (os.getenv(name) or "").strip()]
 
 
 def optional_models_note() -> str:
@@ -120,7 +121,7 @@ def optional_models_note() -> str:
     return "\n".join(
         f"{name} is not set: {effect}."
         for name, effect in OPTIONAL_MODEL_ENV.items()
-        if not os.getenv(name)
+        if not (os.getenv(name) or "").strip()
     )
 
 
@@ -180,7 +181,10 @@ def format_review(row: dict) -> str:
         ),
         "",
         "Signals matched:",
-        *[f"  - {signal}" for signal in review.get("signals_matched") or ["(none)"]],
+        *[
+            f"  - {describe_signal(signal)}"
+            for signal in review.get("signals_matched") or ["(none)"]
+        ],
         "",
         "Reasoning:",
         review.get("reasoning") or "(none)",
@@ -639,7 +643,8 @@ class TriageTab(QWidget):
         """Checks that the variables one operation needs are set.
 
         Args:
-            names: The variables this operation needs (READ_ENV or REVIEW_ENV).
+            names: The variables this operation needs (READ_ENV, AB_TEST_ENV
+                or REVIEW_ENV).
             notify: True to also log and show a warning dialog; False only
                 updates the status label (used for background refreshes).
 
@@ -1543,6 +1548,6 @@ class TriageTab(QWidget):
             lambda: ab_collections(self.collection_factory()),
             lambda: self._closing,
             self,
-            ready=lambda: self._configured(REVIEW_ENV, notify=True),
+            ready=lambda: self._configured(AB_TEST_ENV, notify=True),
         )
         self.ab_test_dialog.show()
