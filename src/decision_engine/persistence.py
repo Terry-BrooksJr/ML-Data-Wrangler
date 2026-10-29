@@ -14,7 +14,13 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 
 from . import decisions, leadership
-from .classify import classify_ticket, EngineError, get_client, is_fatal
+from .classify import (
+    classify_ticket,
+    EngineError,
+    get_client,
+    is_fatal,
+    worst_case_seconds,
+)
 from .payload import build_ticket_payload, support_comment_times
 
 # An engine error (cut-off or invalid reply, API error) leaves the ticket in
@@ -36,8 +42,16 @@ class ReviewTooLarge(ValueError):
 # They stay stored, for topic modelling of outcomes.
 SKIPPED_STATUSES = ("solved", "closed")
 REVIEWABLE = {"status": {"$nin": list(SKIPPED_STATUSES)}}
-# A claim older than this is treated as abandoned (its worker crashed).
-CLAIM_TTL = timedelta(minutes=15)
+# A claim is treated as abandoned (its worker crashed) once it outlives every
+# model call a ticket can make at the configured timeout, plus a margin; never
+# sooner than MIN_CLAIM_TTL.
+MIN_CLAIM_TTL = timedelta(minutes=15)
+CLAIM_MARGIN = timedelta(minutes=5)
+
+
+def claim_ttl() -> timedelta:
+    """How long a review claim lasts, read from the timeout setting when used."""
+    return max(MIN_CLAIM_TTL, timedelta(seconds=worst_case_seconds()) + CLAIM_MARGIN)
 
 
 @lru_cache(maxsize=1)
@@ -98,7 +112,7 @@ def claim_ticket(tickets: Collection, zendesk_id: str, worker: str) -> Optional[
                 "review_claim": {
                     "worker": worker,
                     "claimed_at": now,
-                    "expires_at": now + CLAIM_TTL,
+                    "expires_at": now + claim_ttl(),
                 }
             }
         },

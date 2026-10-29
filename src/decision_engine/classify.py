@@ -7,6 +7,7 @@ tickets.agent_reviews. Never writes to Zendesk; write-back is Module 3.
 
 import ipaddress
 import json
+import math
 import os
 import time
 from dataclasses import asdict, dataclass
@@ -86,7 +87,8 @@ def _setting_number(name: str, default, kind=int, minimum=1):
         value = kind(raw)
     except ValueError:
         value = None
-    if value is None or value < minimum:
+    # float() accepts "nan" and "inf", which would leave calls with no timeout.
+    if value is None or not math.isfinite(value) or value < minimum:
         logger.warning(f"{name}={raw!r} isn't a number of at least {minimum}; using {default}.")
         return default
     return value
@@ -112,6 +114,17 @@ def request_timeout() -> float:
     return _setting_number(
         "DECISION_ENGINE_TIMEOUT_SECONDS", REQUEST_TIMEOUT_SECONDS, kind=float
     )
+
+
+# The most model calls one ticket can make: primary, secondary, confirmation,
+# and the arbiter's judgement and ruling.
+MAX_CALLS_PER_TICKET = 5
+
+
+def worst_case_seconds(calls: int = MAX_CALLS_PER_TICKET) -> float:
+    """How long `calls` model calls can take at the configured timeout, each
+    retried MAX_RETRIES times. Claims on a ticket must outlast this."""
+    return calls * request_timeout() * (MAX_RETRIES + 1)
 
 
 def arbiter_model() -> Optional[str]:

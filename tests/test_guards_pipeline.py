@@ -409,3 +409,38 @@ def test_engine_settings_are_in_the_settings_dialog():
         "DECISION_ENGINE_EFFORT",
         "DECISION_ENGINE_TIMEOUT_SECONDS",
     } <= names
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e999"])
+def test_non_finite_timeouts_fall_back_to_the_default(monkeypatch, value):
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", value)
+    assert classify.request_timeout() == classify.REQUEST_TIMEOUT_SECONDS
+
+
+def test_claims_outlast_every_call_at_the_configured_timeout(monkeypatch):
+    from decision_engine import ab_test
+
+    monkeypatch.delenv("DECISION_ENGINE_TIMEOUT_SECONDS", raising=False)
+    # 5 calls x 120 s x 4 tries, plus the 5-minute margin: 45 minutes.
+    assert persistence.claim_ttl().total_seconds() == 45 * 60
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "10")
+    assert persistence.claim_ttl() == persistence.MIN_CLAIM_TTL
+    monkeypatch.delenv("DECISION_ENGINE_TIMEOUT_SECONDS")
+    default_ab = ab_test.claim_ttl()
+
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "600")
+    worst = 5 * 600 * (classify.MAX_RETRIES + 1)
+    assert persistence.claim_ttl().total_seconds() > worst
+    assert ab_test.claim_ttl().total_seconds() > worst > default_ab.total_seconds()
+
+
+def test_a_live_claim_lasts_the_configured_lifetime(monkeypatch):
+    monkeypatch.setenv("DECISION_ENGINE_TIMEOUT_SECONDS", "600")
+    tickets = mongomock.MongoClient().support_db.tickets
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    tickets.insert_one(ticket)
+
+    claimed = persistence.claim_ticket(tickets, ticket["zendesk_id"], "w")
+    claim = claimed["review_claim"]
+    held = claim["expires_at"] - claim["claimed_at"]
+    assert held == persistence.claim_ttl()

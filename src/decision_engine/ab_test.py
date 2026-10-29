@@ -53,8 +53,7 @@ from .classify import (
     EFFORT_LEVELS,
     EngineConfig,
     is_fatal,
-    MAX_RETRIES,
-    REQUEST_TIMEOUT_SECONDS,
+    worst_case_seconds,
 )
 from .guards import CLASSIFICATIONS
 from .payload import build_ticket_payload, support_comment_times
@@ -92,14 +91,17 @@ _KEPT_FIELDS = (
 # The ticket fields kept beside the payload, for the reviewer. The transcript
 # isn't copied: the reviewer reads it from the payload the models were sent.
 _SNAPSHOT_FIELDS = ("zendesk_id", "subject", "status")
-# A claim (and an in-flight lock) older than this is treated as abandoned:
-# its worker stopped. It is renewed before each variant's calls, so it must
-# outlast one variant's worst case: primary, secondary and confirmation
-# calls and the arbiter's two, each with the client's timeout and retries,
-# plus a margin.
-CLAIM_TTL = timedelta(
-    seconds=5 * REQUEST_TIMEOUT_SECONDS * (MAX_RETRIES + 1)
-) + timedelta(minutes=5)
+# A claim (and an in-flight lock) older than claim_ttl() is treated as
+# abandoned: its worker stopped. It is renewed before each variant's calls,
+# so it must outlast one variant's worst case at the configured timeout
+# (classify.worst_case_seconds: primary, secondary, confirmation and the
+# arbiter's two calls, each with its retries), plus a margin.
+CLAIM_MARGIN = timedelta(minutes=5)
+
+
+def claim_ttl() -> timedelta:
+    """How long a result's claim lasts, read from the timeout setting when used."""
+    return timedelta(seconds=worst_case_seconds()) + CLAIM_MARGIN
 # MongoDB refuses documents over 16 MiB; a result whose ticket is this big
 # is left out of the run (and reported) rather than failing the whole run.
 MAX_RESULT_BYTES = 15 * 1024 * 1024
@@ -532,7 +534,7 @@ def interrupted(doc: dict) -> List[str]:
     so the call may have been billed. They wait for a deliberate retry."""
     started = doc.get("started") or {}
     claim = doc.get("claim") or {}
-    live = claim.get("at") is not None and _aware(claim["at"]) >= _now() - CLAIM_TTL
+    live = claim.get("at") is not None and _aware(claim["at"]) >= _now() - claim_ttl()
     return [
         v
         for v in VARIANTS
@@ -575,7 +577,7 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
             "_id": doc_id,
             "$or": [
                 {"claim": None},
-                {"claim.at": {"$lt": now - CLAIM_TTL}},
+                {"claim.at": {"$lt": now - claim_ttl()}},
                 {"claim.worker": worker},
             ],
         },
@@ -586,7 +588,7 @@ def _claim(results: Collection, doc_id, worker: str) -> Optional[dict]:
 
 def _renew(results: Collection, doc_id, worker: str) -> bool:
     """Extends this worker's claim before a model call, so it outlasts the
-    call (CLAIM_TTL bounds one variant's calls); False if it was lost."""
+    call (claim_ttl() bounds one variant's calls); False if it was lost."""
     return (
         results.update_one(
             {"_id": doc_id, "claim.worker": worker},
@@ -612,12 +614,12 @@ def _lock_answer(results: Collection, doc: dict, key: str, worker: str) -> bool:
         locks.insert_one({"_id": lock_id, "worker": worker, "at": now})
         return True
     except DuplicateKeyError:
-        # Taken over only if its worker stopped (the lock outlived CLAIM_TTL).
+        # Taken over only if its worker stopped (the lock outlived claim_ttl()).
         return (
             locks.update_one(
                 {
                     "_id": lock_id,
-                    "$or": [{"worker": worker}, {"at": {"$lt": now - CLAIM_TTL}}],
+                    "$or": [{"worker": worker}, {"at": {"$lt": now - claim_ttl()}}],
                 },
                 {"$set": {"worker": worker, "at": now}},
             ).matched_count

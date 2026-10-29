@@ -949,8 +949,8 @@ def test_every_attempt_is_kept_and_counted(collections, tmp_path):
 def test_the_claim_outlasts_a_variant_and_is_renewed(collections):
     from decision_engine import classify
 
-    worst = 3 * classify.REQUEST_TIMEOUT_SECONDS * (classify.MAX_RETRIES + 1)
-    assert ab_test.CLAIM_TTL.total_seconds() > worst
+    worst = 5 * classify.REQUEST_TIMEOUT_SECONDS * (classify.MAX_RETRIES + 1)
+    assert ab_test.claim_ttl().total_seconds() > worst
     _, runs, results = collections
     run_id = new_run(collections, size=1)
     doc = results.find_one({"run_id": run_id})
