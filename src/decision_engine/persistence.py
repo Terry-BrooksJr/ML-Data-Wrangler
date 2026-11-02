@@ -258,7 +258,8 @@ def process_one_ticket(
             "type": type(e).__name__,
             "message": str(e)[:1000],
             "model": getattr(e, "model", None),
-            "audit": getattr(e, "audit", None),
+            # Thinking stays out of the ticket, as on a review.
+            "audit": _without_thinking(getattr(e, "audit", None)),
         }
         if attempts < MAX_ENGINE_ATTEMPTS:
             logger.warning(
@@ -313,7 +314,8 @@ def _open_case(tickets: Collection, zendesk_id: str, entry: dict, result: dict) 
     """Opens the manual-triage case file for a saved review (triage.py).
 
     The review is already saved, so a failure here is logged, never raised:
-    the ticket is reviewed either way, only without its case file.
+    the ticket is reviewed either way, and the Triage tab opens the missing
+    case from the review when it next loads it (triage.recover_missing_cases).
     """
     if entry.get("classification") != "manual_triage":
         return
@@ -321,7 +323,11 @@ def _open_case(tickets: Collection, zendesk_id: str, entry: dict, result: dict) 
 
     try:
         triage.open_case(
-            triage.get_cases_collection(tickets.database), zendesk_id, entry, result
+            triage.get_cases_collection(tickets.database),
+            zendesk_id,
+            entry,
+            result,
+            tickets=tickets,
         )
     except Exception as e:
         logger.warning(f"{zendesk_id}: couldn't open its manual-triage case: {e}")

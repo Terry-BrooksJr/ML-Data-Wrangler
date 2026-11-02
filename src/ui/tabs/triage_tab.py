@@ -177,11 +177,13 @@ def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[d
 
 def attach_cases(tickets: Collection, rows: List[dict]) -> List[dict]:
     """Adds each row's manual-triage case (triage.py) as row["case"]: the
-    case its review opened, or the one it re-ran."""
-    found = triage.cases_for_reviews(
-        triage.get_cases_collection(tickets.database),
-        [row["review"].get("review_id") for row in rows],
-    )
+    case its review opened, or the one it re-ran. A manual-triage review
+    whose case wasn't opened when it was saved gets one now."""
+    cases = triage.get_cases_collection(tickets.database)
+    review_ids = [row["review"].get("review_id") for row in rows]
+    found = triage.cases_for_reviews(cases, review_ids)
+    if triage.recover_missing_cases(cases, rows, found):
+        found = triage.cases_for_reviews(cases, review_ids)
     for row in rows:
         row["case"] = found.get(row["review"].get("review_id"))
     return rows
@@ -514,6 +516,8 @@ class TriageTab(QWidget):
         )
 
         self.status_label = hint("")
+        # Messages can quote evidence (a Jira status, an Aha title).
+        self.status_label.setTextFormat(QtCore.Qt.PlainText)
         self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
         status_row = QHBoxLayout()

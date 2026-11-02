@@ -1752,7 +1752,15 @@ def test_evidence_and_a_rerun_from_the_tab(qapp, configured, monkeypatch, dialog
 
 
 def test_the_evidence_dialog_refuses_what_it_cant_parse(qapp, monkeypatch, dialogs):
+    from ui.dialogs import evidence_dialog
+
+    monkeypatch.setattr(
+        evidence_dialog,
+        "confirm_plain",
+        lambda parent, title, text: dialogs.append(("question", text)) or True,
+    )
     dialog = EvidenceDialog("90001")
+    assert dialog.error_label.textFormat() == QtCore.Qt.PlainText
     dialog.load_file("broken.xml", b"<rss><channel>")
     dialog.check_and_add()
     assert dialog.evidence is None

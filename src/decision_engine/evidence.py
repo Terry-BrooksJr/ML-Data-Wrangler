@@ -29,6 +29,13 @@ from defusedxml.common import DefusedXmlException
 JIRA, AHA = "jira", "aha"
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 MAX_JIRA_ISSUES = 50
+# A crafted file can stay under MAX_INPUT_BYTES and still expand hugely, so
+# parsing stops at these. An export of MAX_JIRA_ISSUES issues with long
+# histories stays well under them.
+MAX_XML_ELEMENTS = 200_000
+MAX_XML_DEPTH = 64
+MAX_PDF_PAGES = 40
+MAX_TEXT_CHARS = 2_000_000
 # Jira's RSS fields the engine can use; issue keys look like LRN-1234.
 _ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
 # Aha references: ideas (PROJ-I-543) and features (PROJ-123).
@@ -198,6 +205,36 @@ def _jira_issue(item, index: int) -> dict:
     }
 
 
+def _check_xml_shape(content: bytes) -> None:
+    """Streams through the XML before it is parsed into a tree, refusing
+    one too deep, with too many elements or too many issues. Each element is
+    cleared once read, so this pass holds little in memory.
+
+    Raises:
+        EvidenceError: over a limit.
+        DefusedXmlException, ElementTree.ParseError: as parsing would.
+    """
+    depth = elements = items = 0
+    for event, element in ElementTree.iterparse(BytesIO(content), events=("start", "end")):
+        if event == "start":
+            depth += 1
+            elements += 1
+            if depth > MAX_XML_DEPTH:
+                raise EvidenceError(f"The XML nests deeper than {MAX_XML_DEPTH} levels.")
+            if elements > MAX_XML_ELEMENTS:
+                raise EvidenceError(f"The XML has over {MAX_XML_ELEMENTS:,} elements.")
+            if depth == 3 and element.tag == "item":
+                items += 1
+                if items > MAX_JIRA_ISSUES:
+                    raise EvidenceError(
+                        f"The export holds over {MAX_JIRA_ISSUES} issues; add at most "
+                        f"{MAX_JIRA_ISSUES} at a time."
+                    )
+        else:
+            depth -= 1
+            element.clear()
+
+
 def parse_jira(content: Union[bytes, str]) -> dict:
     """The issues in a Jira XML (RSS) export: {"issues": [...]}.
 
@@ -205,7 +242,10 @@ def parse_jira(content: Union[bytes, str]) -> dict:
         EvidenceError: not well-formed or unsafe XML, not an rss > channel >
             item export, or an issue without a key, summary or status.
     """
+    if isinstance(content, str):
+        content = content.encode("utf-8")
     try:
+        _check_xml_shape(content)
         root = ElementTree.fromstring(content)
     except DefusedXmlException as e:
         raise EvidenceError(f"The XML uses a feature that isn't allowed ({type(e).__name__}).") from e
@@ -240,9 +280,24 @@ def read_pdf_text(content: bytes) -> str:
         reader = PdfReader(BytesIO(content))
         if reader.is_encrypted:
             raise EvidenceError("The PDF is password-protected.")
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise EvidenceError(
+                f"The PDF has {len(reader.pages)} pages; an Aha page prints to a few. "
+                f"The limit is {MAX_PDF_PAGES}."
+            )
+        # pypdf caps each stream's decompressed size itself; this caps the total.
+        parts, total = [], 0
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            total += len(text)
+            if total > MAX_TEXT_CHARS:
+                raise EvidenceError(f"The PDF holds over {MAX_TEXT_CHARS:,} characters of text.")
+            parts.append(text)
+        text = "\n".join(parts)
     except PdfReadError as e:
         raise EvidenceError(f"The PDF can't be read: {e}.") from e
+    except (MemoryError, RecursionError) as e:
+        raise EvidenceError("The PDF is too complex to read.") from e
     if not text.strip():
         raise EvidenceError("The PDF has no text to read (is it a scan?).")
     return text
@@ -277,6 +332,8 @@ def parse_aha(text: str) -> dict:
     Raises:
         EvidenceError: no Aha reference (e.g. PROJ-I-123) or no title.
     """
+    if len(text) > MAX_TEXT_CHARS:
+        raise EvidenceError(f"The text is over {MAX_TEXT_CHARS:,} characters; an Aha page is far shorter.")
     # Aha's icon font prints as private-use characters; they carry nothing.
     text = re.sub(r"[\ue000-\uf8ff]", "", text.replace("\r\n", "\n"))
     ref = _AHA_REF.search(text)
@@ -380,7 +437,10 @@ def extract(kind: str, content: Union[bytes, str], source: str = "pasted") -> Ev
 
 
 def describe(entry: dict) -> str:
-    """One line for a stored evidence entry, e.g. "Jira LRN-12 (Done, Fixed)"."""
+    """One line for a stored evidence entry, e.g. "Jira LRN-12 (Done, Fixed)".
+
+    It quotes the export, so show it as plain text, never rich text.
+    """
     data = entry.get("data") or {}
     if entry.get("kind") == JIRA:
         issues = [

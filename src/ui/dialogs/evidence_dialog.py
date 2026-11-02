@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 from decision_engine import evidence
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
@@ -33,6 +34,15 @@ KINDS = {
 }
 
 
+def confirm_plain(parent: QWidget, title: str, text: str) -> bool:
+    """A Yes/Cancel question shown as plain text: it quotes the export, which
+    could otherwise carry rich-text markup that restyles the question."""
+    box = QMessageBox(QMessageBox.Question, title, text, QMessageBox.Yes | QMessageBox.Cancel, parent)
+    box.setTextFormat(Qt.PlainText)
+    box.setDefaultButton(QMessageBox.Cancel)
+    return box.exec_() == QMessageBox.Yes
+
+
 class EvidenceDialog(QDialog):
     """Asks for one piece of evidence and parses it.
 
@@ -53,6 +63,7 @@ class EvidenceDialog(QDialog):
         self.choose_button = Button("Choose File…")
         self.choose_button.clicked.connect(self.choose_file)
         self.file_label = hint("No file chosen.")
+        self.file_label.setTextFormat(Qt.PlainText)
         kind_row = QHBoxLayout()
         kind_row.addWidget(QLabel("Evidence"))
         kind_row.addWidget(self.kind, stretch=1)
@@ -64,7 +75,9 @@ class EvidenceDialog(QDialog):
             "…or paste the Jira XML, or the text of the Aha page, here."
         )
         self.paste_box.textChanged.connect(self._pasted)
+        # Parse errors can quote the file (an XML tag name, say).
         self.error_label = hint("", role="warning")
+        self.error_label.setTextFormat(Qt.PlainText)
 
         self.add_button = Button("Add Evidence…", primary=True)
         self.add_button.clicked.connect(self.check_and_add)
@@ -141,15 +154,12 @@ class EvidenceDialog(QDialog):
         found = self.parse()
         if found is None:
             return
-        answer = QMessageBox.question(
+        if not confirm_plain(
             self,
             "Add Evidence",
             f"Found: {evidence.describe({'kind': found.kind, 'data': found.data})}\n\n"
             "Add it to the case? It can't be removed later.",
-            QMessageBox.Yes | QMessageBox.Cancel,
-            QMessageBox.Cancel,
-        )
-        if answer != QMessageBox.Yes:
+        ):
             return
         self.evidence = found
         self.accept()
