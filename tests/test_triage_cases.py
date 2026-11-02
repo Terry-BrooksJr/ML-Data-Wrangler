@@ -247,7 +247,18 @@ def test_a_disagreement_keeps_both_answers_and_the_judges_reasoning(monkeypatch,
 
     case = cases.find_one({"zendesk_id": ticket["zendesk_id"]})
     assert case["route"] == triage.DISAGREEMENT
-    assert [a["role"] for a in case["answers"]] == ["first", "confirmation"]
+    first, confirmation = case["answers"]
+    assert (first["role"], first["classification"]) == ("first", "escalation_internal")
+    # The confirmation's own answer, not the synthetic manual triage.
+    assert confirmation == {
+        "role": "confirmation",
+        "model": "confirmation",
+        "classification": "on_track",
+        "confidence": 70,
+        "signals_matched": [],
+        "reasoning": "test reasoning",
+        "open_questions": [],
+    }
     assert case["arbitration"]["preferred_reasoning"] == "A cites S3 properly"
 
 

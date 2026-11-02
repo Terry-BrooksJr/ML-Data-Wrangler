@@ -113,7 +113,14 @@ def answers_of(result: dict) -> List[dict]:
     answers = []
     if first:
         answers.append(_answer("first", first))
-        answers.append(_answer("confirmation", result))
+        # After a disagreement (classify._disagreement) the result is a
+        # synthetic manual triage; the confirmation's own answer is kept
+        # under arbitration.confirmation. Its other fields are unchanged.
+        confirmation = {
+            **result,
+            **((result.get("arbitration") or {}).get("confirmation") or {}),
+        }
+        answers.append(_answer("confirmation", confirmation))
     else:
         answers.append(_answer("first", result))
     return answers
