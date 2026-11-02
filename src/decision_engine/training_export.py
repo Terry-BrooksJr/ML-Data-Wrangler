@@ -5,6 +5,9 @@ Two kinds of judgement mark an engine answer as right:
   "good"), unless it was also logged as misclassified, and
 - an A/B verdict: the preferred side's answer ("A" or "B"), or side A's on a
   tie.
+A manual-triage ticket re-run with reviewer evidence (triage.py) adds a
+review of its own; marked correct, it is exported like any other, its input
+holding the triage case and the evidence.
 Each becomes an example: the ticket as the engine saw it, and that answer as
 the target. A review marked misclassified only says which category was
 right, not what a full answer would have been, so it becomes a correction,
@@ -71,6 +74,7 @@ ANSWER_FIELDS = (
     "signals_matched",
     "reengage_attempts",
     "reasoning",
+    "open_questions",
     "tag",
     "internal_note",
     "draft_message",
@@ -127,6 +131,7 @@ def answer_of(source: dict, ticket_id: str) -> dict:
     answer = {field: source.get(field) for field in ANSWER_FIELDS}
     # Answers saved before the field existed export it as the list it is now.
     answer["reengage_attempts"] = answer["reengage_attempts"] or []
+    answer["open_questions"] = answer["open_questions"] or []
     answer["ticket_id"] = ticket_id
     answer["tag"] = (
         source.get("tag") or source.get("tag_applied") or answer["classification"]
@@ -243,15 +248,25 @@ def review_candidates(
                 counts["reviews"] += 1
                 continue
             payload, kind = saved.get("payload"), EXACT
+            if not payload and review.get("rerun_of") is not None:
+                # Rebuilt from the ticket, it would lack the evidence the
+                # answer rests on.
+                counts["reviews"] += 1
+                continue
             if not payload:
                 if history_unknown(ticket):
                     counts["uncertain_history"] += 1
                     continue
                 payload = build_ticket_payload(ticket_as_of(ticket, as_of), as_of)
                 kind = REBUILT
+            rerun = review.get("rerun_of") is not None
             yield {
                 "source": "review",
-                "label": "marked correct",
+                # A re-run's input holds the triage case and reviewer evidence.
+                "label": "re-run with reviewer evidence, marked correct"
+                if rerun
+                else "marked correct",
+                "rerun_of": str(review["rerun_of"]) if rerun else None,
                 "ticket_id": str(ticket["zendesk_id"]),
                 "as_of": as_of,
                 "input": kind,

@@ -270,11 +270,14 @@ def lessons_for_week(lessons: Collection, week: datetime) -> List[dict]:
     return list(lessons.find({"week_of": week_of(week)}).sort("generated_at", -1))
 
 
-def suggest_lessons_summary(entries: Iterable[dict]) -> str:
+def suggest_lessons_summary(entries: Iterable[dict], cases: Iterable[dict] = ()) -> str:
     """A starting summary for the week's reviewed entries, for the reviewer to edit.
 
     Groups the mistakes by what the agent said and what was right, with the
     signals it misread. Unreviewed entries are left out, as in draft_lessons_learned.
+    Manual-triage cases a re-run resolved with reviewer evidence
+    (triage.resolved_cases_for_week) follow, grouped by the answer they got,
+    with the evidence that settled them and the questions it answered.
     """
     groups: Dict[tuple, List[str]] = defaultdict(list)
     for entry in entries:
@@ -282,8 +285,6 @@ def suggest_lessons_summary(entries: Iterable[dict]) -> str:
             groups[
                 (entry.get("agent_classification"), entry.get("correct_classification"))
             ].append((entry.get("misread_signal") or "").strip())
-    if not groups:
-        return ""
     lines = []
     for (said, correct), signals in sorted(
         groups.items(), key=lambda g: (-len(g[1]), str(g[0]))
@@ -295,16 +296,47 @@ def suggest_lessons_summary(entries: Iterable[dict]) -> str:
         if misread:
             line += " Misread: " + "; ".join(misread) + "."
         lines.append(line)
-    return "\n".join(lines)
+    return "\n".join(lines + _resolved_case_lines(cases))
+
+
+# How many of a group's open questions a suggested summary quotes.
+QUESTIONS_QUOTED = 3
+
+
+def _resolved_case_lines(cases: Iterable[dict]) -> List[str]:
+    groups: Dict[str, List[dict]] = defaultdict(list)
+    for case in cases:
+        reruns = case.get("reruns") or []
+        if reruns:
+            groups[reruns[-1].get("classification")].append(case)
+    lines = []
+    for answer, group in sorted(groups.items(), key=lambda g: (-len(g[1]), str(g[0]))):
+        kinds = sorted({e.get("kind") for c in group for e in c.get("evidence") or []})
+        line = (
+            f"- {len(group)} manual-triage ticket(s) resolved as {answer} on re-run "
+            f"with {' and '.join(k.capitalize() for k in kinds) or 'reviewer'} evidence."
+        )
+        questions = list(
+            dict.fromkeys(q for c in group for q in c.get("open_questions") or [])
+        )
+        if questions:
+            line += " It answered: " + "; ".join(questions[:QUESTIONS_QUOTED]) + "."
+        lines.append(line)
+    return lines
 
 
 def draft_lessons_learned(
-    log: Collection, lessons: Collection, week: datetime, summary_text: str
+    log: Collection,
+    lessons: Collection,
+    week: datetime,
+    summary_text: str,
+    case_ids: Iterable = (),
 ) -> ObjectId:
-    """Stores an unapproved lessons_learned entry built on that week's reviewed log entries.
+    """Stores an unapproved lessons_learned entry built on that week's reviewed
+    log entries and the manual-triage cases resolved that week (case_ids).
 
     Raises:
-        ValueError: if the week has no reviewed entries.
+        ValueError: if the week has neither reviewed entries nor resolved cases.
     """
     week = week_of(week)
     if not summary_text.strip():
@@ -313,9 +345,10 @@ def draft_lessons_learned(
         entry["_id"]
         for entry in log.find({"week_of": week, "reviewed": True}, {"_id": 1})
     ]
-    if not log_ids:
+    case_ids = list(case_ids)
+    if not log_ids and not case_ids:
         raise ValueError(
-            f"No reviewed misclassifications for the week of {week:%Y-%m-%d}"
+            f"No reviewed misclassifications or resolved triage cases for the week of {week:%Y-%m-%d}"
         )
     return lessons.insert_one(
         {
@@ -323,6 +356,7 @@ def draft_lessons_learned(
             "summary_text": summary_text.strip(),
             "generated_at": datetime.now(timezone.utc),
             "based_on_log_ids": log_ids,
+            "based_on_case_ids": case_ids,
             "approved": False,
             "approved_by": None,
             "approved_at": None,

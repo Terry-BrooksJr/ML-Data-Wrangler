@@ -160,12 +160,13 @@ def _review_entry(
         # The attempts the model counted in the current stall, by timestamp.
         "reengage_attempts": result.get("reengage_attempts", []),
         "reasoning": result.get("reasoning", ""),
+        "open_questions": result.get("open_questions") or [],
         "tag_applied": result.get("tag"),
         "internal_note": result.get("internal_note", ""),
         "draft_message": result.get("draft_message"),
         "leadership_recipient": result.get("leadership_recipient"),
         # Set when the confirmation model replaced the first answer.
-        "confirmation_of": result.get("confirmation_of"),
+        "confirmation_of": _without_thinking(result.get("confirmation_of")),
         # Set when the models disagreed (classify.arbitrate).
         "arbitration": result.get("arbitration"),
         # Set when a code check overrode the model (guards.apply_guards).
@@ -173,9 +174,23 @@ def _review_entry(
         # Set when the engine gave up after repeated failures; distinguishes
         # this from a deliberate manual_triage abstention.
         "engine_error": engine_error,
-        "audit": result.get("audit"),
+        "audit": _without_thinking(result.get("audit")),
         "input": _review_input(payload, as_of),
     }
+
+
+def _without_thinking(record: Optional[dict]) -> Optional[dict]:
+    """A copy of an audit (or an answer holding one) without the model's
+    thinking: it can run to many KB, and only a manual-triage case file
+    keeps it (triage.open_case)."""
+    if not record:
+        return record
+    record = dict(record)
+    if "thinking" in record:
+        record.pop("thinking")
+    elif isinstance(record.get("audit"), dict) and "thinking" in record["audit"]:
+        record["audit"] = {k: v for k, v in record["audit"].items() if k != "thinking"}
+    return record
 
 
 def _manual_triage_fallback(ticket_doc: dict, error: Exception, attempts: int) -> dict:
@@ -265,27 +280,51 @@ def process_one_ticket(
             f"{zendesk_id}: engine failed {attempts} times; routing to manual triage."
         )
         result = _manual_triage_fallback(ticket_doc, e, attempts)
-        _save_review(
+        result["engine_error"] = str(e)
+        entry = _review_entry(result, engine_error=str(e)[:1000], as_of=as_of)
+        saved = _save_review(
             tickets,
             zendesk_id,
             worker,
-            _review_entry(result, engine_error=str(e)[:1000], as_of=as_of),
+            entry,
             {"review_attempts": attempts, "last_engine_error": error_record},
         )
-        result["engine_error"] = str(e)
+        if saved == SAVED:
+            _open_case(tickets, zendesk_id, entry, result)
         return result
 
     result["ticket_id"] = ticket_doc["zendesk_id"]  # don't trust the model's echo
+    entry = _review_entry(result, payload=payload, as_of=as_of)
     saved = _save_review(
         tickets,
         zendesk_id,
         worker,
-        _review_entry(result, payload=payload, as_of=as_of),
+        entry,
         assignee=ticket_doc.get("assignee"),
     )
     if saved == REASSIGNED:
         return None
+    if saved == SAVED:
+        _open_case(tickets, zendesk_id, entry, result)
     return result
+
+
+def _open_case(tickets: Collection, zendesk_id: str, entry: dict, result: dict) -> None:
+    """Opens the manual-triage case file for a saved review (triage.py).
+
+    The review is already saved, so a failure here is logged, never raised:
+    the ticket is reviewed either way, only without its case file.
+    """
+    if entry.get("classification") != "manual_triage":
+        return
+    from . import triage  # triage imports this module
+
+    try:
+        triage.open_case(
+            triage.get_cases_collection(tickets.database), zendesk_id, entry, result
+        )
+    except Exception as e:
+        logger.warning(f"{zendesk_id}: couldn't open its manual-triage case: {e}")
 
 
 SAVED, CLAIM_LOST, REASSIGNED = "saved", "claim_lost", "reassigned"

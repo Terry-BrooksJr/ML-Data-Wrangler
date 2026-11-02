@@ -2715,6 +2715,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "bertopic" },
     { name = "boto3" },
+    { name = "defusedxml" },
     { name = "en-core-web-lg" },
     { name = "gensim" },
     { name = "hdbscan" },
@@ -2729,6 +2730,7 @@ dependencies = [
     { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and python_full_version < '3.14'" },
     { name = "pyldavis" },
     { name = "pymongo" },
+    { name = "pypdf" },
     { name = "pyqt-siliconui" },
     { name = "pyqt5" },
     { name = "python-dotenv" },
@@ -2762,6 +2764,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1.11.0,<2" },
     { name = "bertopic", specifier = ">=0.17.4,<0.18" },
     { name = "boto3", specifier = ">=1.35" },
+    { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "en-core-web-lg", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" },
     { name = "gensim", specifier = ">=4.3.2" },
     { name = "hdbscan", specifier = ">=0.8.44" },
@@ -2772,6 +2775,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyldavis", specifier = ">=3.4.1,<4" },
     { name = "pymongo", specifier = ">=4.18.0,<5" },
+    { name = "pypdf", specifier = ">=5" },
     { name = "pyqt-siliconui", git = "https://github.com/ChinaIceF/PyQt-SiliconUI?rev=7005080698e3e813dd923898317788edc8f6b8da" },
     { name = "pyqt5" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
@@ -4680,6 +4684,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.21.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1e/e1/ec8f4d155c997c45917153a5521e60d6ee6389d68abdcbc8e44e564caffc/pypdf-6.21.4.tar.gz", hash = "sha256:c8817e3f888d47a087872ded69812c1ef30cacb871d6e053e0c00bbaf0bc2163", size = 7109255, upload-time = "2026-10-28T17:00:54.81Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/4b/77e8ad4ac42c9d93600f40541a50e9feb3a61d2bbee2d76f659346072051/pypdf-6.21.4-py3-none-any.whl", hash = "sha256:33e4fb41ca352810eb4e9838aa0d82d6888a5f8bf682f43e99cce5faa666255c", size = 410430, upload-time = "2026-10-28T17:00:53.146Z" },
 ]
 
 [[package]]

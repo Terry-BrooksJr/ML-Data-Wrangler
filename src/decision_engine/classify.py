@@ -515,12 +515,18 @@ def arbitrate(
     """
     arbiter = config.arbiter
     answers = (first, confirmed)
-    record = {"model": arbiter, "preferred": None, "ruling": None, "error": None}
+    record = {
+        "model": arbiter,
+        "preferred": None,
+        "preferred_reasoning": None,
+        "ruling": None,
+        "error": None,
+    }
     if arbiter in (None, *(a.get("model_version") for a in answers)):
         record["error"] = "no distinct arbiter model"
         return _disagreement(confirmed, record)
     try:
-        preferred = judge_answers(arbiter, first, confirmed, config, calls)
+        preferred = judge_answers(arbiter, first, confirmed, config, calls, record)
         record["preferred"] = answers[preferred]["classification"]
         ruling = classify_with(arbiter)
         record["ruling"] = ruling["classification"]
@@ -587,10 +593,16 @@ Respond with a single JSON object: {"preferred": "A" | "B", "reasoning": string}
 
 
 def judge_answers(
-    model: str, first: dict, second: dict, config: EngineConfig, calls: list
+    model: str,
+    first: dict,
+    second: dict,
+    config: EngineConfig,
+    calls: list,
+    record: Optional[dict] = None,
 ) -> int:
     """The arbiter's first ruling: 0 if the first answer applies the
-    taxonomy better, 1 for the second. The ticket isn't sent.
+    taxonomy better, 1 for the second. The ticket isn't sent. The judge's
+    reasoning goes to record["preferred_reasoning"], when a record is given.
 
     Raises:
         anthropic.APIError, or EngineError for an unusable reply.
@@ -629,9 +641,12 @@ def judge_answers(
             ),
         }
         try:
-            preferred = extract_json(raw_text).get("preferred")
+            judgement = extract_json(raw_text)
+            preferred = judgement.get("preferred")
         except (ValueError, AttributeError) as e:
             raise EngineError(f"Unusable arbiter reply: {e}", model, audit) from e
+        if record is not None and isinstance(judgement.get("reasoning"), str):
+            record["preferred_reasoning"] = judgement["reasoning"]
         if preferred not in ("A", "B"):
             raise EngineError("Arbiter reply names neither A nor B", model, audit)
     except (anthropic.APIError, EngineError) as e:
@@ -711,6 +726,13 @@ def _classify_with(
     # thinking block on models that think by default.
     raw_text = next((b.text for b in response.content if b.type == "text"), "")
     stop_reason = getattr(response, "stop_reason", None)
+    # Kept for a manual-triage case file (triage.py), never for the review:
+    # it can be long, and persistence._review_entry drops it.
+    thinking = [
+        b.thinking
+        for b in response.content
+        if b.type == "thinking" and getattr(b, "thinking", None)
+    ]
     audit = {
         "usage": _usage(response),
         "latency_ms": int((time.monotonic() - started) * 1000),
@@ -723,6 +745,8 @@ def _classify_with(
             "billed_cost_usd"
         ),
     }
+    if thinking:
+        audit["thinking"] = thinking
 
     if stop_reason == "max_tokens":
         logger.error(f"{model}: reply cut off at max_tokens ({max_tokens}).")

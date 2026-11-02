@@ -12,7 +12,15 @@ import time
 from typing import Any, Callable, List, Optional
 
 from embedding import embeddings
-from decision_engine import ab_test, feedback, persistence, search, training_export
+from decision_engine import (
+    ab_test,
+    evidence,
+    feedback,
+    persistence,
+    search,
+    training_export,
+    triage,
+)
 from decision_engine.zendesk_status import (
     ADDED_REVIEWS_KEY,
     mark_review_added,
@@ -22,6 +30,7 @@ from decision_engine.zendesk_status import (
 from decision_engine.guards import CLASSIFICATIONS, describe_signal
 from ui.dialogs.ab_test_dialog import ab_collections, ABTestDialog
 from ui import theme, zendesk_links
+from ui.dialogs.evidence_dialog import EvidenceDialog
 from ui.dialogs.lessons_dialog import WeeklyReviewDialog
 from loguru import logger
 from pymongo.collection import Collection
@@ -166,6 +175,59 @@ def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[d
     return list(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
+def attach_cases(tickets: Collection, rows: List[dict]) -> List[dict]:
+    """Adds each row's manual-triage case (triage.py) as row["case"]: the
+    case its review opened, or the one it re-ran."""
+    found = triage.cases_for_reviews(
+        triage.get_cases_collection(tickets.database),
+        [row["review"].get("review_id") for row in rows],
+    )
+    for row in rows:
+        row["case"] = found.get(row["review"].get("review_id"))
+    return rows
+
+
+def format_case(case: dict) -> List[str]:
+    """The detail pane's lines for a manual-triage case."""
+    lines = [
+        "",
+        f"Manual-triage case ({case.get('status')}): "
+        f"{triage.ROUTE_LABELS.get(case.get('route'), case.get('route'))}",
+    ]
+    arbitration = case.get("arbitration") or {}
+    if arbitration.get("preferred_reasoning"):
+        lines += [
+            f"Arbiter's reasoning for preferring {arbitration.get('preferred')}:",
+            arbitration["preferred_reasoning"],
+        ]
+    lines += [
+        "Open questions:",
+        *[f"  - {q}" for q in case.get("open_questions") or ["(none recorded)"]],
+    ]
+    trail = case.get("trail") or {}
+    if trail.get("stored") == "s3":
+        lines.append(f"Reasoning trail: s3://{trail.get('bucket')}/{trail.get('key')}")
+    elif trail.get("stored") == "inline":
+        lines.append("Reasoning trail: kept on the case in MongoDB")
+    lines.append("Evidence:")
+    for entry in case.get("evidence") or []:
+        added_at = entry.get("added_at")
+        lines.append(
+            f"  - {evidence.describe(entry)}, added by {entry.get('added_by')}"
+            + (f" on {added_at:%Y-%m-%d %H:%M} UTC" if added_at else "")
+            + f" ({entry.get('source')})"
+        )
+    if not case.get("evidence"):
+        lines.append("  (none yet: use Add Evidence…)")
+    for n, rerun in enumerate(case.get("reruns") or [], 1):
+        at = rerun.get("at")
+        lines.append(
+            f"Re-run {n}: {rerun.get('classification')} (confidence {rerun.get('confidence')}) "
+            f"on {rerun.get('model')}" + (f", {at:%Y-%m-%d %H:%M} UTC" if at else "")
+        )
+    return lines
+
+
 def format_review(row: dict) -> str:
     """Plain-text detail for one review. Plain text, not HTML, because the
     reasoning and draft message can quote customer-written content."""
@@ -223,6 +285,14 @@ def format_review(row: dict) -> str:
             "",
             f"Engine error (routed to manual triage after repeated failures): {review['engine_error']}",
         ]
+    if review.get("rerun_of") is not None:
+        lines += [
+            "",
+            f"Re-run of a manual-triage review with {len(review.get('evidence_ids') or [])} "
+            f"piece(s) of reviewer evidence, requested by {review.get('requested_by') or '-'}.",
+        ]
+    if row.get("case"):
+        lines += format_case(row["case"])
     lines += ["", f"Review added to Zendesk: {'Yes' if row_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
@@ -537,6 +607,13 @@ class TriageTab(QWidget):
             "Mark the ticket once you have copied its review into Zendesk by hand."
         )
         self.review_added_button.clicked.connect(self.mark_selected_review_added)
+        self.add_evidence_button = Button("Add Evidence…")
+        self.add_evidence_button.setToolTip(
+            "Add a Jira XML export or an Aha page to this manual-triage case."
+        )
+        self.add_evidence_button.clicked.connect(self.add_evidence_to_selected)
+        self.rerun_button = Button("Re-run with Evidence…")
+        self.rerun_button.clicked.connect(self.rerun_selected)
         self.copy_button = Button()
         self.copy_button.setSvgIcon(fluent_icon(COPY_ICON))
         self.copy_button.setToolTip("Copy the whole review to the clipboard.")
@@ -572,6 +649,8 @@ class TriageTab(QWidget):
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addWidget(self.review_added_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.add_evidence_button)
+        feedback_row.addWidget(self.rerun_button)
         detail_pane = QWidget()
         detail_layout = QVBoxLayout(detail_pane)
         detail_layout.setContentsMargins(0, 0, 0, 0)
@@ -760,6 +839,7 @@ class TriageTab(QWidget):
         self.zendesk_button.setEnabled(has_selection)
         self.copy_button.setEnabled(has_selection)
         self._enable_review_added(busy)
+        self._enable_case_buttons(busy)
         self._enable_navigation()
         self.ticket_id_input.setEnabled(not busy)
         self.busy_bar.setVisible(busy)
@@ -877,7 +957,7 @@ class TriageTab(QWidget):
 
         def load():
             tickets = self.collection_factory()
-            return count_awaiting(tickets), recent_reviews(tickets)
+            return count_awaiting(tickets), attach_cases(tickets, recent_reviews(tickets))
 
         self._run(load, "Loading reviews from MongoDB", self._show_loaded)
 
@@ -1309,6 +1389,7 @@ class TriageTab(QWidget):
         self.zendesk_button.setEnabled(row is not None)
         self.copy_button.setEnabled(row is not None)
         self._enable_review_added(self._job_running())
+        self._enable_case_buttons(self._job_running())
         self._enable_navigation()
         if row is None:
             self.detail.clear()
@@ -1337,6 +1418,88 @@ class TriageTab(QWidget):
         row = self._selected_row()
         self.review_added_button.setEnabled(
             not busy and row is not None and not row_added(row)
+        )
+
+    def _enable_case_buttons(self, busy: bool) -> None:
+        """Add Evidence and Re-run, for a review with a manual-triage case."""
+        row = self._selected_row()
+        case = row.get("case") if row is not None else None
+        self.add_evidence_button.setEnabled(not busy and case is not None)
+        problem = triage.rerun_problem(case) if case is not None else None
+        self.rerun_button.setEnabled(not busy and case is not None and problem is None)
+        self.rerun_button.setToolTip(
+            problem
+            or "Classify the ticket again on the arbiter model, with the case and its "
+            "evidence. A paid model call."
+        )
+
+    def add_evidence_to_selected(self) -> None:
+        """Asks for a Jira export or Aha page and adds what it holds to the case."""
+        row = self._selected_row()
+        if row is None or not row.get("case") or not self._configured(READ_ENV, notify=True):
+            return
+        zendesk_id, case_id = row["zendesk_id"], row["case"]["_id"]
+        dialog = EvidenceDialog(zendesk_id, self)
+        if dialog.exec_() != EvidenceDialog.Accepted or dialog.evidence is None:
+            return
+        found = dialog.evidence
+        self._run(
+            lambda: triage.add_evidence(
+                triage.get_cases_collection(self.collection_factory().database),
+                case_id,
+                found.kind,
+                found.data,
+                found.source,
+                found.sha256,
+            ),
+            f"Adding evidence to ticket {zendesk_id}",
+            lambda entry: self._feedback_done(
+                f"Ticket {zendesk_id}: added {evidence.describe(entry)}."
+            ),
+        )
+
+    def rerun_selected(self) -> None:
+        """Confirms, then re-classifies the case's ticket on the arbiter with its evidence."""
+        row = self._selected_row()
+        case = row.get("case") if row is not None else None
+        if case is None or not self._configured(REVIEW_ENV, notify=True):
+            return
+        problem = triage.rerun_problem(case)
+        if problem:
+            QMessageBox.information(self, "Re-run with Evidence", problem)
+            return
+        zendesk_id = row["zendesk_id"]
+        answer = QMessageBox.question(
+            self,
+            "Re-run with Evidence",
+            f"Classify ticket {zendesk_id} again on the arbiter "
+            f"({os.environ.get('CHEAPER_INFERENCE_ARBITER_MODEL_NAME')}), with the case "
+            f"and {len(case.get('evidence') or [])} piece(s) of evidence? "
+            "This is a paid model call.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        def rerun():
+            tickets = self.collection_factory()
+            return triage.rerun_case(
+                tickets, triage.get_cases_collection(tickets.database), case["_id"]
+            )
+
+        self._run(
+            rerun,
+            f"Re-running ticket {zendesk_id} with evidence",
+            lambda result: self._feedback_done(
+                f"Ticket {zendesk_id}: re-run gave {result['classification']} "
+                f"(confidence {result['confidence']})."
+                + (
+                    " The case stays open for more evidence."
+                    if result["classification"] == "manual_triage"
+                    else " Case resolved."
+                )
+            ),
         )
 
     def mark_selected_review_added(self) -> None:
@@ -1493,6 +1656,7 @@ class TriageTab(QWidget):
                 self.collection_factory().database
             ),
             self,
+            cases=lambda: triage.get_cases_collection(self.collection_factory().database),
         )
         self.weekly_review_dialog.show()
 

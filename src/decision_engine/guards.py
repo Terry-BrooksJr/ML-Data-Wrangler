@@ -149,6 +149,11 @@ def validate_reply(reply) -> dict:
     if not isinstance(attempts, list) or not all(isinstance(a, str) for a in attempts):
         problems.append("reengage_attempts must be a list of strings")
 
+    # Optional: older prompts and decision models don't ask for it.
+    questions = reply.get("open_questions") or []
+    if not isinstance(questions, list) or not all(isinstance(q, str) for q in questions):
+        problems.append("open_questions must be a list of strings")
+
     for key in _OPTIONAL_TEXT:
         if reply.get(key) is not None and not isinstance(reply[key], str):
             problems.append(f"{key} must be a string or null")
@@ -160,6 +165,7 @@ def validate_reply(reply) -> dict:
     result["confidence"] = int(round(confidence))
     result["signals_matched"] = signals
     result["reengage_attempts"] = attempts
+    result["open_questions"] = [q.strip() for q in questions if q.strip()]
     for key in _OPTIONAL_TEXT:
         result.setdefault(key, None)
     return result
