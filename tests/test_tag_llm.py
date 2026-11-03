@@ -588,7 +588,11 @@ def test_model_results_cant_be_saved_but_embedding_results_can(qapp, tmp_path):
 
 
 def test_cli_checks_the_model_before_embedding(tmp_path, monkeypatch, capsys):
+    from core import settings
+
     monkeypatch.delenv("TAG_NORMALIZER_MODEL")
+    # main() loads settings; a local .env that sets the model would undo delenv.
+    monkeypatch.setattr(settings, "load", lambda *a, **kw: None)
     monkeypatch.setattr(
         tag_normalizer, "embedder", lambda backend: pytest.fail("embedded before the model check")
     )
