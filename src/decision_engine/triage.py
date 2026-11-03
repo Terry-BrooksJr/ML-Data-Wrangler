@@ -86,6 +86,8 @@ def ensure_indexes(cases: Collection) -> None:
     cases.create_index("review_id", unique=True)
     cases.create_index("reruns.review_id")  # cases_for_reviews
     cases.create_index([("zendesk_id", 1), ("created_at", -1)])
+    cases.create_index([("status", 1), ("week_of", 1)])  # resolved_cases_for_week
+    cases.create_index("cleanup_done", sparse=True)  # recover_missing_cases
 
 
 # --- opening a case ---------------------------------------------------------------
@@ -98,11 +100,7 @@ def route_of(result: dict) -> str:
     if arbitration and result.get("classification") == "manual_triage":
         return DISAGREEMENT
     # A check may have downgraded the first answer before a confirmation.
-    overrides = [
-        *(result.get("guard_overrides") or []),
-        *((result.get("confirmation_of") or {}).get("guard_overrides") or []),
-    ]
-    if any(o.startswith("Downgraded from") for o in overrides):
+    if any(o.startswith("Downgraded from") for o in all_guard_overrides(result)):
         return GUARD_OVERRIDE
     return ABSTAINED
 
@@ -116,7 +114,18 @@ def _answer(role: str, answer: dict) -> dict:
         "signals_matched": list(answer.get("signals_matched") or []),
         "reasoning": answer.get("reasoning") or "",
         "open_questions": list(answer.get("open_questions") or []),
+        "guard_overrides": list(answer.get("guard_overrides") or []),
     }
+
+
+def all_guard_overrides(result: dict) -> List[str]:
+    """The code checks that overrode any answer behind the result, the
+    first answer's (before a confirmation) first."""
+    overrides = [
+        *((result.get("confirmation_of") or {}).get("guard_overrides") or []),
+        *(result.get("guard_overrides") or []),
+    ]
+    return list(dict.fromkeys(overrides))
 
 
 def answers_of(result: dict) -> List[dict]:
@@ -131,6 +140,10 @@ def answers_of(result: dict) -> List[dict]:
         confirmation = {
             **result,
             **((result.get("arbitration") or {}).get("confirmation") or {}),
+            # Not the disagreement's own note, which is the case's.
+            "guard_overrides": [
+                o for o in result.get("guard_overrides") or [] if not o.startswith("Sent to manual triage:")
+            ],
         }
         answers.append(_answer("confirmation", confirmation))
     else:
@@ -146,12 +159,15 @@ def _trail_sources(result: dict) -> List[tuple]:
     arbiter = (result.get("arbitration") or {}).get("model")
     for call, audit in (result.get("arbiter_audits") or {}).items():
         found.append((f"arbiter_{call}", arbiter, audit or {}))
+    for call, audit in (result.get("failed_audits") or {}).items():
+        found.append((call, None, audit or {}))
     return found
 
 
 def _trail(result: dict) -> dict:
     """The thinking and raw reply behind each call, keyed by role: first,
-    confirmation, and arbiter_judge / arbiter_ruling after a disagreement."""
+    confirmation, arbiter_judge / arbiter_ruling after a disagreement, and
+    previous_attempt after repeated engine errors."""
     trail = {}
     for role, model, audit in _trail_sources(result):
         if audit.get("thinking") or audit.get("raw_response"):
@@ -311,8 +327,9 @@ def open_case(
         review: The agent_reviews entry as saved (its review_id).
         result: The engine's result, with its audits' thinking still in it
             (or the review itself, when recovering a missing case).
-        tickets: When given, the raw replies the case trail now holds are
-            removed from the ticket's review (drop_kept_replies).
+        tickets: When given, the case is tidied off the ticket's review
+            once stored (finish_cleanup): the raw replies its trail holds,
+            and any pending marker (mark_case_pending).
 
     Returns:
         The case's _id, or None if the review isn't manual triage.
@@ -342,23 +359,57 @@ def open_case(
         "input_sha256": (review.get("input") or {}).get("payload_sha256"),
         "answers": answers_of(result),
         "arbitration": arbitration,
-        "guard_overrides": list(result.get("guard_overrides") or []),
+        "guard_overrides": all_guard_overrides(result),
         "engine_error": review.get("engine_error"),
         "open_questions": open_questions,
-        "trail": store_trail(str(case_id), _trail(result)),
+        # A trail saved when opening the case first failed has the thinking
+        # and arbiter replies the review itself doesn't keep.
+        "trail": review.get("pending_trail") or store_trail(str(case_id), _trail(result)),
         "evidence": [],
         "evidence_bytes": 0,
         "reruns": [],
+        # False until finish_cleanup has tidied the ticket's review.
+        "cleanup_done": False,
     }
     try:
         cases.insert_one(doc)
     except DuplicateKeyError:
-        existing = cases.find_one({"review_id": review["review_id"]}, {"_id": 1})
-        return existing["_id"] if existing else None
+        # With its trail: cleanup reads which replies it holds.
+        existing = cases.find_one({"review_id": review["review_id"]})
+        if existing is None:
+            return None
+        if tickets is not None and existing.get("cleanup_done") is False:
+            finish_cleanup(tickets, cases, existing, review)
+        return existing["_id"]
     logger.info(f"{zendesk_id}: manual-triage case {case_id} opened ({doc['route']}).")
     if tickets is not None:
-        drop_kept_replies(tickets, zendesk_id, review, doc["trail"])
+        finish_cleanup(tickets, cases, doc, review)
     return case_id
+
+
+def finish_cleanup(tickets: Collection, cases: Collection, case: dict, review: dict) -> None:
+    """Removes from the ticket's review what its case now holds (the raw
+    replies its trail keeps, any pending marker and trail), then marks the
+    case cleaned up. A failure leaves cleanup_done False, and
+    recover_missing_cases tries again."""
+    drop_kept_replies(tickets, case["zendesk_id"], review, case.get("trail") or {})
+    if review.get("case_pending") or review.get("pending_trail"):
+        tickets.update_one(
+            {"zendesk_id": case["zendesk_id"], "agent_reviews.review_id": review["review_id"]},
+            {"$unset": {"agent_reviews.$.case_pending": "", "agent_reviews.$.pending_trail": ""}},
+        )
+    cases.update_one({"_id": case["_id"]}, {"$set": {"cleanup_done": True}})
+
+
+def mark_case_pending(tickets: Collection, zendesk_id: str, review: dict, result: dict) -> None:
+    """Flags a review whose case couldn't be opened, saving its trail with
+    it (to S3 when set up, else on the review), so the case can be opened
+    later with everything the result held (recover_missing_cases)."""
+    pending = store_trail(f"review-{review['review_id']}", _trail(result), inline_room=256 * 1024)
+    tickets.update_one(
+        {"zendesk_id": zendesk_id, "agent_reviews.review_id": review["review_id"]},
+        {"$set": {"agent_reviews.$.case_pending": True, "agent_reviews.$.pending_trail": pending}},
+    )
 
 
 def needs_case(review: dict) -> bool:
@@ -366,27 +417,60 @@ def needs_case(review: dict) -> bool:
     return review.get("classification") == "manual_triage" and review.get("rerun_of") is None
 
 
-def recover_missing_cases(cases: Collection, rows: Iterable[dict], found: dict) -> int:
+def recover_missing_cases(
+    tickets: Collection, cases: Collection, rows: Iterable[dict] = (), found: Optional[dict] = None
+) -> int:
     """Opens the cases that saving a review should have opened but didn't
-    (persistence._open_case logs and carries on), from the reviews
-    themselves. Their trail holds what the review kept: no thinking.
+    (persistence._open_case logs and carries on), and finishes cleanups
+    that didn't complete (finish_cleanup).
+
+    A review flagged by mark_case_pending is found at any age, and its case
+    gets the trail saved with it. A review among `rows` with no case and no
+    flag (the flag couldn't be saved either) gets one from the review
+    itself: what the review kept, without thinking or arbiter replies.
 
     Args:
         rows: {"zendesk_id", "review"} rows, as the Triage tab loads them.
-        found: {review_id: case} already found (cases_for_reviews).
+        found: {review_id: case} already found among them (cases_for_reviews).
 
     Returns:
-        How many were opened.
+        How many cases were opened.
     """
-    opened = 0
+    found = found or {}
+    tickets.create_index("agent_reviews.case_pending", sparse=True)
+    candidates = {}
+    for ticket in tickets.find(
+        {"agent_reviews.case_pending": True}, {"zendesk_id": 1, "agent_reviews": 1}
+    ):
+        for review in ticket.get("agent_reviews") or []:
+            if review.get("case_pending"):
+                candidates[review["review_id"]] = (ticket["zendesk_id"], review)
     for row in rows:
         review = row["review"]
         if needs_case(review) and review.get("review_id") not in found:
-            try:
-                if open_case(cases, row["zendesk_id"], review, review):
-                    opened += 1
-            except Exception as e:
-                logger.warning(f"{row['zendesk_id']}: still couldn't open its manual-triage case: {e}")
+            candidates.setdefault(review["review_id"], (row["zendesk_id"], review))
+    opened = 0
+    for zendesk_id, review in candidates.values():
+        try:
+            if review["review_id"] in found or cases.find_one({"review_id": review["review_id"]}, {"_id": 1}):
+                existing = cases.find_one({"review_id": review["review_id"]})
+                if existing and existing.get("cleanup_done") is False:
+                    finish_cleanup(tickets, cases, existing, review)
+                continue
+            if open_case(cases, zendesk_id, review, review, tickets=tickets):
+                opened += 1
+        except Exception as e:
+            logger.warning(f"{zendesk_id}: still couldn't open its manual-triage case: {e}")
+    for case in cases.find({"cleanup_done": False}):
+        ticket = tickets.find_one(
+            {"zendesk_id": case["zendesk_id"]}, {"agent_reviews": {"$elemMatch": {"review_id": case["review_id"]}}}
+        )
+        review = ((ticket or {}).get("agent_reviews") or [None])[0]
+        try:
+            if review is not None:
+                finish_cleanup(tickets, cases, case, review)
+        except Exception as e:
+            logger.warning(f"{case['zendesk_id']}: still couldn't tidy its review: {e}")
     if opened:
         logger.info(f"Opened {opened} manual-triage case(s) that were missing.")
     return opened
@@ -524,6 +608,8 @@ def rerun_fields(case: dict, trail: Optional[dict] = None) -> dict:
         # Model-written: a reply can put any text in its trigger list.
         shown["signals_matched"] = [wrap_untrusted(s) for s in answer.get("signals_matched") or []]
         shown["reasoning"] = wrap_untrusted(answer.get("reasoning"))
+        if answer.get("guard_overrides"):
+            shown["overridden_by_checks"] = [wrap_untrusted(o) for o in answer["guard_overrides"]]
         thinking = "\n\n".join((trail.get(answer["role"]) or {}).get("thinking") or [])
         if thinking:
             shown["working_notes"] = wrap_untrusted(thinking[:THINKING_SHOWN_CHARS])
@@ -578,12 +664,36 @@ def _claim(cases: Collection, case_id, worker: str) -> Optional[dict]:
     )
 
 
-def rerun_problem(case: dict, arbiter: Optional[str] = None) -> Optional[str]:
+def _aware(moment: Optional[datetime]) -> Optional[datetime]:
+    """MongoDB returns naive UTC datetimes; compare them as UTC."""
+    if moment is not None and moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def claimed_by_another(case: dict, worker: Optional[str] = None) -> bool:
+    """Whether a live re-run claim on the case belongs to someone else."""
+    claim = case.get("rerun_claim") or {}
+    expires = _aware(claim.get("expires_at"))
+    return bool(
+        claim
+        and claim.get("worker") != worker
+        and expires is not None
+        and expires > datetime.now(timezone.utc)
+    )
+
+
+def rerun_problem(
+    case: dict, arbiter: Optional[str] = None, worker: Optional[str] = None
+) -> Optional[str]:
     """Why the case can't be re-run now, or None.
 
     Args:
         arbiter: The arbiter model to use; defaults to the one in Settings.
+        worker: The re-run asking, whose own claim isn't a problem.
     """
+    if claimed_by_another(case, worker):
+        return "A re-run of this case is in progress."
     if not (arbiter or classify.arbiter_model()):
         return "No arbiter model is set: add one in Settings to re-run with evidence."
     if not case.get("evidence"):
@@ -608,9 +718,8 @@ def _rerun_update(rerun: dict) -> dict:
             "week_of": week_of(rerun["at"]),
         }
     else:
-        update["$set"] = {"status": OPEN}
-        if rerun.get("open_questions"):
-            update["$set"]["open_questions"] = rerun["open_questions"]
+        # The latest answer's questions are the current ones, even none.
+        update["$set"] = {"status": OPEN, "open_questions": list(rerun.get("open_questions") or [])}
         update["$unset"].update({"resolved_at": "", "resolved_by_review": "", "week_of": ""})
     return update
 
@@ -644,9 +753,28 @@ def _adopt_interrupted(tickets: Collection, cases: Collection, case: dict, worke
         update = _rerun_update(rerun)
         update["$set"]["rerun_claim"] = case["rerun_claim"]  # keep holding it
         del update["$unset"]["rerun_claim"]
-        cases.update_one({"_id": case["_id"], "rerun_claim.worker": worker}, update)
+        if not cases.update_one({"_id": case["_id"], "rerun_claim.worker": worker}, update).modified_count:
+            raise RerunUnavailable("Another re-run took this case over.")
         logger.warning(f"{case['zendesk_id']}: recorded interrupted re-run {review['review_id']}.")
-    return cases.find_one({"_id": case["_id"]})
+    case = cases.find_one({"_id": case["_id"], "rerun_claim.worker": worker})
+    if case is None:
+        raise RerunUnavailable("Another re-run took this case over.")
+    return case
+
+
+def _hold_claim(cases: Collection, case_id, worker: str) -> bool:
+    """Renews a claim still held, so it can't expire while the re-run is
+    written. False when it was already lost."""
+    from .persistence import claim_ttl
+
+    now = datetime.now(timezone.utc)
+    return (
+        cases.find_one_and_update(
+            {"_id": case_id, "rerun_claim.worker": worker, "rerun_claim.expires_at": {"$gt": now}},
+            {"$set": {"rerun_claim.expires_at": now + claim_ttl()}},
+        )
+        is not None
+    )
 
 
 def rerun_case(
@@ -664,10 +792,12 @@ def rerun_case(
     manual_triage leaves it (or puts it back) open for more evidence. A paid
     model call.
 
-    The review is saved first, then the case, which only the claim's holder
-    can update. A re-run that lost its claim takes its review back off the
-    ticket; one that stopped in between is finished by the next attempt
-    (_adopt_interrupted) without another call.
+    After the model answers, the claim is renewed (_hold_claim) before
+    anything is written: a re-run whose claim expired and was taken over
+    discards its answer without saving it. The review is then saved, then
+    the case. A review is never removed once saved: a re-run that stops in
+    between is finished by the next attempt (_adopt_interrupted) without
+    another call.
 
     Raises:
         RerunUnavailable: no arbiter, no new evidence, a re-run is already
@@ -698,7 +828,7 @@ def rerun_case(
     try:
         case = _adopt_interrupted(tickets, cases, case, worker)
         # Another re-run may have used the evidence since the first check.
-        problem = rerun_problem(case, arbiter)
+        problem = rerun_problem(case, arbiter, worker)
         if problem:
             raise RerunUnavailable(problem)
         ticket = tickets.find_one({"zendesk_id": case["zendesk_id"]})
@@ -750,23 +880,20 @@ def rerun_case(
             "trail": trail,
         }
         _fit_review(tickets, ticket["zendesk_id"], entry, None)
+        if not _hold_claim(cases, case["_id"], worker):
+            raise RerunUnavailable(
+                "Another re-run took this case over while the model answered; this answer was discarded."
+            )
         tickets.update_one(
             {"zendesk_id": ticket["zendesk_id"]}, {"$push": {"agent_reviews": entry}}
         )
         saved = cases.update_one(
             {"_id": case["_id"], "rerun_claim.worker": worker}, _rerun_update(rerun)
         )
-        if not saved.modified_count and not cases.find_one(
-            {"_id": case["_id"], "reruns.review_id": entry["review_id"]}, {"_id": 1}
-        ):
-            # Our claim expired and another re-run took the case over.
-            tickets.update_one(
-                {"zendesk_id": ticket["zendesk_id"]},
-                {"$pull": {"agent_reviews": {"review_id": entry["review_id"]}}},
-            )
-            raise RerunUnavailable(
-                "Another re-run took this case over while the model answered; this answer was discarded."
-            )
+        if not saved.modified_count:
+            # Not expected with the claim just renewed. The review stays;
+            # the next re-run records it (_adopt_interrupted).
+            logger.warning(f"{case['zendesk_id']}: re-run {entry['review_id']} saved, its case not updated.")
     except BaseException:
         cases.update_one({"_id": case["_id"], "rerun_claim.worker": worker}, release)
         raise

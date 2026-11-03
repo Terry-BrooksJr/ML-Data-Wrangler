@@ -149,9 +149,12 @@ def validate_reply(reply) -> dict:
     if not isinstance(attempts, list) or not all(isinstance(a, str) for a in attempts):
         problems.append("reengage_attempts must be a list of strings")
 
-    # Optional: older prompts and decision models don't ask for it.
-    questions = reply.get("open_questions") or []
-    if not isinstance(questions, list) or not all(isinstance(q, str) for q in questions):
+    # Optional: older prompts and decision models don't ask for it. Only a
+    # missing (or null) value defaults; any other non-list is malformed.
+    questions = reply.get("open_questions")
+    if questions is None:
+        questions = []
+    elif not isinstance(questions, list) or not all(isinstance(q, str) for q in questions):
         problems.append("open_questions must be a list of strings")
 
     for key in _OPTIONAL_TEXT:

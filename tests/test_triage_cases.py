@@ -13,6 +13,7 @@ from moto import mock_aws
 
 from decision_engine import classify, evidence, feedback, persistence, training_export, triage
 from decision_engine.guards import InvalidReply, validate_reply
+from decision_engine.payload import build_ticket_payload
 from decision_engine.prompts import PROMPT_VERSION
 from fixtures import CATEGORY_FIXTURES
 from test_decision_engine import FakeClient, model_reply, RoutingClient, fake_response
@@ -199,20 +200,55 @@ def test_opening_a_case_twice_keeps_one(monkeypatch, tickets, cases):
     assert cases.count_documents({}) == 1
 
 
-def test_a_case_failure_never_loses_the_review_and_is_recovered(monkeypatch, tickets, cases):
+def test_a_case_failure_flags_the_review_and_is_recovered_at_any_age(monkeypatch, tickets, cases):
     real_open = triage.open_case
     monkeypatch.setattr(triage, "open_case", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     zendesk_id = review_manual_ticket(monkeypatch, tickets)
-    reviews = tickets.find_one({"zendesk_id": zendesk_id})["agent_reviews"]
-    assert len(reviews) == 1 and cases.count_documents({}) == 0
+    review = tickets.find_one({"zendesk_id": zendesk_id})["agent_reviews"][0]
+    assert cases.count_documents({}) == 0
+    assert review["case_pending"] is True
+    assert review["pending_trail"]["trail"]["first"]["thinking"] == ["I weighed S3 against R1."]
 
     monkeypatch.setattr(triage, "open_case", real_open)
-    rows = [{"zendesk_id": zendesk_id, "review": reviews[0]}]
-    assert triage.recover_missing_cases(cases, rows, {}) == 1
+    # No rows: the flag finds it, however old the review.
+    assert triage.recover_missing_cases(tickets, cases) == 1
     case = cases.find_one({})
-    assert case["review_id"] == reviews[0]["review_id"]
+    assert case["review_id"] == review["review_id"]
     assert case["open_questions"] == ["Has LRN-1234 been released?"]
-    assert triage.recover_missing_cases(cases, rows, triage.cases_for_reviews(cases, [case["review_id"]])) == 0
+    assert case["trail"]["trail"]["first"]["thinking"] == ["I weighed S3 against R1."]
+    assert case["cleanup_done"] is True
+    review = tickets.find_one({})["agent_reviews"][0]
+    assert not {"case_pending", "pending_trail"} & set(review)
+    assert "raw_response" not in review["audit"]
+    assert triage.recover_missing_cases(tickets, cases) == 0
+
+
+def test_an_unflagged_review_in_view_still_gets_its_case(monkeypatch, tickets, cases):
+    real_open = triage.open_case
+    monkeypatch.setattr(triage, "open_case", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(triage, "mark_case_pending", lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
+    zendesk_id = review_manual_ticket(monkeypatch, tickets)
+    monkeypatch.setattr(triage, "open_case", real_open)
+    review = tickets.find_one({})["agent_reviews"][0]
+    assert "case_pending" not in review
+
+    rows = [{"zendesk_id": zendesk_id, "review": review}]
+    assert triage.recover_missing_cases(tickets, cases, rows, {}) == 1
+    found = triage.cases_for_reviews(cases, [review["review_id"]])
+    assert triage.recover_missing_cases(tickets, cases, rows, found) == 0
+
+
+def test_cleanup_that_failed_is_retried(monkeypatch, tickets, cases):
+    real_drop = triage.drop_kept_replies
+    monkeypatch.setattr(triage, "drop_kept_replies", lambda *a: (_ for _ in ()).throw(RuntimeError("blip")))
+    review_manual_ticket(monkeypatch, tickets)
+    assert cases.find_one({})["cleanup_done"] is False
+    assert "raw_response" in tickets.find_one({})["agent_reviews"][0]["audit"]
+
+    monkeypatch.setattr(triage, "drop_kept_replies", real_drop)
+    assert triage.recover_missing_cases(tickets, cases) == 0
+    assert cases.find_one({})["cleanup_done"] is True
+    assert "raw_response" not in tickets.find_one({})["agent_reviews"][0]["audit"]
 
 
 def test_routes():
@@ -266,6 +302,7 @@ def test_a_disagreement_keeps_both_answers_and_the_judges_reasoning(monkeypatch,
         "signals_matched": [],
         "reasoning": "test reasoning",
         "open_questions": [],
+        "guard_overrides": [],
     }
     assert case["arbitration"]["preferred_reasoning"] == "A cites S3 properly"
 
@@ -471,9 +508,20 @@ def test_a_rerun_needs_an_arbiter_and_new_evidence(monkeypatch, tickets, cases):
         triage.rerun_case(tickets, cases, case["_id"])
 
 
+QUEUE_FIELDS = ("awaiting_review", "review_claim", "review_attempts", "last_engine_error", "status")
+
+
+def queue_state(tickets):
+    ticket = tickets.find_one({})
+    return {field: ticket.get(field, "<missing>") for field in QUEUE_FIELDS}
+
+
 def test_a_rerun_sends_the_case_and_evidence_and_saves_a_new_review(monkeypatch, tickets, cases):
     monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "first-model-x7")
     case = open_case(monkeypatch, tickets, cases)
+    # Put it back in the queue, so a re-run that touched it would show.
+    tickets.update_one({}, {"$set": {"awaiting_review": True, "review_attempts": 1}})
+    before = queue_state(tickets)
     assert case["answers"][0]["model"] == "first-model-x7"
     add_jira(cases, case)
     monkeypatch.setenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "arbiter")
@@ -500,7 +548,7 @@ def test_a_rerun_sends_the_case_and_evidence_and_saves_a_new_review(monkeypatch,
     assert rerun["rerun_of"] == original["review_id"]
     assert rerun["case_id"] == case["_id"]
     assert rerun["input"]["payload"] == payload
-    assert ticket["awaiting_review"] is False
+    assert queue_state(tickets) == before
     stored = cases.find_one({})
     assert stored["status"] == triage.RESOLVED
     assert stored["resolved_by_review"] == rerun["review_id"]
@@ -542,7 +590,7 @@ def test_a_running_rerun_blocks_another(monkeypatch, tickets, cases):
     add_jira(cases, case)
     monkeypatch.setenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "arbiter")
     assert triage._claim(cases, case["_id"], "other") is not None
-    with pytest.raises(triage.RerunUnavailable, match="already being re-run"):
+    with pytest.raises(triage.RerunUnavailable, match="in progress"):
         triage.rerun_case(tickets, cases, case["_id"])
 
 
@@ -849,3 +897,157 @@ def test_a_pdf_with_too_many_pages_is_refused():
     writer.write(out)
     with pytest.raises(evidence.EvidenceError, match="41 pages"):
         evidence.extract(evidence.AHA, out.getvalue())
+
+
+# --- second review: commits, traces, recovery ------------------------------------
+
+
+def test_a_claim_lost_during_adoption_stops_before_the_model_call(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    # A review left by an interrupted re-run, for adoption to record.
+    tickets.update_one({}, {"$push": {"agent_reviews": {
+        "review_id": ObjectId(), "case_id": case["_id"], "classification": "manual_triage",
+        "confidence": 30, "evidence_ids": [], "reviewed_at": datetime.now(timezone.utc),
+    }}})
+    client = arbiter_reply(monkeypatch, SOLVE)
+    real_claim = triage._claim
+
+    def then_taken_over(cases_, case_id, worker):
+        claimed = real_claim(cases_, case_id, worker)
+        cases_.update_one({}, {"$set": {"rerun_claim.worker": "other"}})
+        return claimed
+
+    monkeypatch.setattr(triage, "_claim", then_taken_over)
+    with pytest.raises(triage.RerunUnavailable, match="took this case over"):
+        triage.rerun_case(tickets, cases, case["_id"])
+    assert client.calls == []
+    assert cases.find_one({})["reruns"] == []
+
+
+def test_a_rerun_never_removes_a_saved_review(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    arbiter_reply(monkeypatch, SOLVE)
+    pulls = []
+    real_update = tickets.update_one
+    monkeypatch.setattr(
+        tickets, "update_one",
+        lambda f, u, *a, **k: pulls.append(u) if "$pull" in u else real_update(f, u, *a, **k),
+    )
+    triage.rerun_case(tickets, cases, case["_id"])
+    assert pulls == []
+
+
+def test_another_workers_claim_disables_a_rerun(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    monkeypatch.setenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "arbiter")
+    assert triage._claim(cases, case["_id"], "other") is not None
+    claimed = cases.find_one({})
+    assert triage.rerun_problem(claimed) == "A re-run of this case is in progress."
+    assert triage.rerun_problem(claimed, worker="other") is None
+    cases.update_one({}, {"$set": {"rerun_claim.expires_at": datetime(2020, 1, 1)}})
+    assert triage.rerun_problem(cases.find_one({})) is None  # expired
+
+
+def test_a_manual_rerun_with_no_questions_clears_them(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    arbiter_reply(monkeypatch, manual_reply(open_questions=[]))
+    triage.rerun_case(tickets, cases, case["_id"])
+    assert cases.find_one({})["open_questions"] == []
+
+
+def test_the_first_answers_guard_overrides_are_kept(monkeypatch, tickets, cases):
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "primary")
+    monkeypatch.setenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "confirmation")
+    client = RoutingClient({
+        # Below the solve floor: a check downgrades it before the confirmation.
+        "primary": model_reply("flag_solve", 70, signals_matched=["S3"]),
+        "confirmation": manual_reply(),
+    })
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["flag_solve"])
+    tickets.insert_one(ticket)
+    persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+
+    case = cases.find_one({})
+    assert case["route"] == triage.GUARD_OVERRIDE
+    assert any(o.startswith("Downgraded from flag_solve") for o in case["guard_overrides"])
+    assert case["answers"][0]["guard_overrides"] == case["guard_overrides"]
+    shown = triage.rerun_fields(case)["triage_case"]["answers"][0]
+    assert shown["overridden_by_checks"][0].startswith("<customer_text>Downgraded from flag_solve")
+
+
+def arbiter_case(monkeypatch, ruling_reply):
+    monkeypatch.setenv("CHEAPER_INFERENCE_PRIMARY_MODEL_NAME", "primary")
+    monkeypatch.setenv("CHEAPER_INFERENCE_CONFIRMATION_MODEL_NAME", "confirmation")
+    monkeypatch.setenv("CHEAPER_INFERENCE_ARBITER_MODEL_NAME", "arbiter")
+
+    class Arbiter(RoutingClient):
+        def _create(self, **kwargs):
+            if kwargs["model"] == "arbiter" and len(kwargs["system"]) == 2:
+                return fake_response(json.dumps({"preferred": "B", "reasoning": "B fits"}))
+            return super()._create(**kwargs)
+
+    client = Arbiter({
+        "primary": model_reply("escalation_internal", 72, signals_matched=["O1"]),
+        "confirmation": model_reply("on_track", 70, signals_matched=[]),
+        "arbiter": ruling_reply,
+    })
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    return classify.classify_ticket(build_ticket_payload(CATEGORY_FIXTURES["flag_solve"]))
+
+
+def test_an_agreeing_arbiter_keeps_its_trace(monkeypatch):
+    result = arbiter_case(monkeypatch, model_reply("on_track", 80, signals_matched=[]))
+    assert result["classification"] == "on_track"
+    assert set(result["arbiter_audits"]) == {"judge", "ruling"}
+
+
+def test_a_failed_ruling_keeps_its_reply(monkeypatch):
+    result = arbiter_case(monkeypatch, "not json")
+    assert result["classification"] == "manual_triage"
+    assert result["arbiter_audits"]["ruling"]["raw_response"] == "not json"
+    assert '"preferred": "B"' in result["arbiter_audits"]["judge"]["raw_response"]
+
+
+def test_repeated_engine_errors_keep_the_failed_replies(monkeypatch, tickets, cases):
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["manual_triage"])
+    tickets.insert_one(ticket)
+    monkeypatch.setattr(classify, "get_client", lambda: ThinkingClient("not json", "half a thought"))
+    for _ in range(persistence.MAX_ENGINE_ATTEMPTS - 1):
+        with pytest.raises(classify.EngineError):
+            persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+    persistence.process_one_ticket(ticket["zendesk_id"], tickets)
+
+    case = cases.find_one({})
+    assert case["route"] == triage.ENGINE_ERROR
+    trail = case["trail"]["trail"]
+    assert trail["first"]["thinking"] == ["half a thought"]
+    assert trail["first"]["raw_response"] == "not json"
+    assert trail["previous_attempt"]["raw_response"] == "not json"
+    assert "thinking" not in str(tickets.find_one({}).get("agent_reviews"))
+
+
+@pytest.mark.parametrize("value", [False, 0, "", {}])
+def test_a_falsey_non_list_of_questions_is_invalid(value):
+    reply = json.loads(model_reply("on_track"))
+    with pytest.raises(InvalidReply, match="open_questions"):
+        validate_reply({**reply, "open_questions": value})
+
+
+def test_the_aha_link_must_name_the_item_exactly():
+    text = AHA_TEXT.replace(
+        "Does Learnosity have any plans",
+        "See https://example.aha.io/ideas/ideas/LAPIPLAT-I-5430 too. Does Learnosity have any plans",
+    )
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["url"].startswith("https://example.aha.io/ideas/ideas/LAPIPLAT-I-543?")
+
+
+def test_weekly_lookups_are_indexed(monkeypatch, tickets, cases):
+    open_case(monkeypatch, tickets, cases)
+    keys = [list(index["key"]) for index in cases.index_information().values()]
+    assert [("status", 1), ("week_of", 1)] in keys

@@ -381,8 +381,10 @@ def parse_aha(text: str) -> dict:
         r"Created by (?P<by>.+?) in (?P<where>.+?) on (?P<on>[A-Z][a-z]{2} \d{1,2}, \d{4})", text
     )
     status = re.findall(r"^Status\s+(\S.*?)\s*$", text, re.MULTILINE)
-    # The item's own link: a comment may link other Aha items.
-    url = next((u.group(0) for u in _AHA_URL.finditer(text) if reference in u.group(0)), None)
+    # The item's own link, its reference a whole path component: a comment
+    # may link other Aha items, including PROJ-I-5430 beside PROJ-I-543.
+    own = re.compile(rf"/{re.escape(reference)}(?:[/?#]|$)")
+    url = next((u.group(0) for u in _AHA_URL.finditer(text) if own.search(u.group(0))), None)
     votes = re.search(r"\bVotes\s*(\d+)", text)
     score = re.search(r"\bScore\s*(\d+)", text)
 

@@ -1772,3 +1772,17 @@ def test_the_evidence_dialog_refuses_what_it_cant_parse(qapp, monkeypatch, dialo
     assert dialog.evidence.data["issues"][0]["key"] == "LRN-1234"
     assert dialog.evidence.source == "pasted"
     assert "Found: Jira LRN-1234" in dialogs[-1][1]
+
+
+def test_rerun_is_disabled_while_another_rerun_holds_the_case(qapp, configured, stored, with_case):
+    found = evidence.extract(evidence.JIRA, JIRA_XML, "export.xml")
+    case = with_case.find_one({})
+    triage.add_evidence(with_case, case["_id"], found.kind, found.data, found.source, found.sha256, "r")
+    triage._claim(with_case, case["_id"], "another-worker")
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    select_classification(tab, "manual_triage")
+    assert not tab.rerun_button.isEnabled()
+    assert tab.rerun_button.toolTip() == "A re-run of this case is in progress."

@@ -543,7 +543,12 @@ def arbitrate(
             raise
         logger.warning(f"Arbiter {arbiter} failed ({e}); sending to manual triage.")
         record["error"] = type(e).__name__
-        audits.setdefault("judge", record.pop("judge_audit", None))
+        failed = getattr(e, "audit", None)
+        if "judge" in audits:
+            # The judge answered; the ruling is what failed.
+            audits["ruling"] = failed
+        else:
+            audits["judge"] = record.pop("judge_audit", None) or failed
         result = _disagreement(confirmed, record)
         result["arbiter_audits"] = {k: v for k, v in audits.items() if v}
         return result
@@ -553,6 +558,8 @@ def arbitrate(
         return result
     ruling["confirmation_of"] = confirmed["confirmation_of"]
     ruling["arbitration"] = {**record, "confirmation": _summary(confirmed)}
+    # Kept even when the arbiter agreed: its ruling may be manual_triage.
+    ruling["arbiter_audits"] = {k: v for k, v in audits.items() if v}
     return ruling
 
 

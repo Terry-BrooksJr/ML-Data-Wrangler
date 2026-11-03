@@ -182,7 +182,7 @@ def attach_cases(tickets: Collection, rows: List[dict]) -> List[dict]:
     cases = triage.get_cases_collection(tickets.database)
     review_ids = [row["review"].get("review_id") for row in rows]
     found = triage.cases_for_reviews(cases, review_ids)
-    if triage.recover_missing_cases(cases, rows, found):
+    if triage.recover_missing_cases(tickets, cases, rows, found):
         found = triage.cases_for_reviews(cases, review_ids)
     for row in rows:
         row["case"] = found.get(row["review"].get("review_id"))

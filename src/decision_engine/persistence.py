@@ -282,6 +282,11 @@ def process_one_ticket(
         )
         result = _manual_triage_fallback(ticket_doc, e, attempts)
         result["engine_error"] = str(e)
+        # The attempt before this one, for the case trail only (its thinking
+        # was never kept): this one's audit is the result's own.
+        previous = (ticket_doc.get("last_engine_error") or {}).get("audit")
+        if previous:
+            result["failed_audits"] = {"previous_attempt": previous}
         entry = _review_entry(result, engine_error=str(e)[:1000], as_of=as_of)
         saved = _save_review(
             tickets,
@@ -314,8 +319,9 @@ def _open_case(tickets: Collection, zendesk_id: str, entry: dict, result: dict) 
     """Opens the manual-triage case file for a saved review (triage.py).
 
     The review is already saved, so a failure here is logged, never raised:
-    the ticket is reviewed either way, and the Triage tab opens the missing
-    case from the review when it next loads it (triage.recover_missing_cases).
+    the ticket is reviewed either way. The review is flagged, with its trail
+    (triage.mark_case_pending), and the Triage tab opens the missing case
+    when it next loads (triage.recover_missing_cases).
     """
     if entry.get("classification") != "manual_triage":
         return
@@ -331,6 +337,10 @@ def _open_case(tickets: Collection, zendesk_id: str, entry: dict, result: dict) 
         )
     except Exception as e:
         logger.warning(f"{zendesk_id}: couldn't open its manual-triage case: {e}")
+        try:
+            triage.mark_case_pending(tickets, zendesk_id, entry, result)
+        except Exception as marking:
+            logger.warning(f"{zendesk_id}: couldn't flag its review for a case either: {marking}")
 
 
 SAVED, CLAIM_LOST, REASSIGNED = "saved", "claim_lost", "reassigned"
