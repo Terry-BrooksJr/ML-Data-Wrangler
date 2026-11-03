@@ -104,6 +104,7 @@ https://example.aha.io/ideas/ideas/LAPIPLAT-I-543?active_tab=history 1/1
 def no_storage(monkeypatch):
     for name in ("MODEL_BUCKET", "TRIAGE_CASES_COLLECTION", "CHEAPER_INFERENCE_ARBITER_MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(triage, "_last_sweep", None)  # each test may sweep once
 
 
 @pytest.fixture
@@ -707,22 +708,31 @@ def test_a_manual_triage_rerun_reopens_a_resolved_case(monkeypatch, tickets, cas
     assert triage.resolved_cases_for_week(cases, datetime.now(timezone.utc)) == []
 
 
-def test_an_interrupted_rerun_is_finished_without_another_call(monkeypatch, tickets, cases):
+def stop_after_the_case(monkeypatch):
+    """Makes the next re-run stop once its case is written, before the
+    ticket gets the review."""
+    real_finish = triage.finish_pending
+
+    def stopped(tickets_, cases_, case):
+        if case.get("pending_review"):
+            raise RuntimeError("process stopped")
+        return real_finish(tickets_, cases_, case)
+
+    monkeypatch.setattr(triage, "finish_pending", stopped)
+    return real_finish
+
+
+def test_an_interrupted_rerun_is_finished_by_the_next_without_another_call(monkeypatch, tickets, cases):
     case = open_case(monkeypatch, tickets, cases)
     add_jira(cases, case)
     arbiter_reply(monkeypatch, SOLVE)
-    real_update = cases.update_one
-
-    def stop_at_case_update(filter, update, *a, **k):
-        if "$push" in update and "reruns" in update["$push"]:
-            raise RuntimeError("process stopped")
-        return real_update(filter, update, *a, **k)
-
-    monkeypatch.setattr(cases, "update_one", stop_at_case_update)
+    real_finish = stop_after_the_case(monkeypatch)
     with pytest.raises(RuntimeError):
         triage.rerun_case(tickets, cases, case["_id"])
-    monkeypatch.setattr(cases, "update_one", real_update)
-    assert len(tickets.find_one({})["agent_reviews"]) == 2
+    monkeypatch.setattr(triage, "finish_pending", real_finish)
+    stored = cases.find_one({})
+    assert len(stored["reruns"]) == 1 and stored["pending_review"]
+    assert len(tickets.find_one({})["agent_reviews"]) == 1
 
     client = arbiter_reply(monkeypatch, SOLVE)
     with pytest.raises(triage.RerunUnavailable, match="since the last re-run"):
@@ -730,12 +740,30 @@ def test_an_interrupted_rerun_is_finished_without_another_call(monkeypatch, tick
 
     assert client.calls == []
     stored = cases.find_one({})
-    assert stored["status"] == triage.RESOLVED and len(stored["reruns"]) == 1
-    assert stored["reruns"][0]["review_id"] == tickets.find_one({})["agent_reviews"][1]["review_id"]
-    assert "rerun_claim" not in stored
+    reviews = tickets.find_one({})["agent_reviews"]
+    assert len(reviews) == 2 and reviews[1]["review_id"] == stored["reruns"][0]["review_id"]
+    assert "pending_review" not in stored and "rerun_claim" not in stored
 
 
-def test_a_rerun_that_lost_its_claim_takes_its_review_back(monkeypatch, tickets, cases):
+def test_an_interrupted_rerun_is_finished_when_the_tab_loads(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    arbiter_reply(monkeypatch, SOLVE)
+    real_finish = stop_after_the_case(monkeypatch)
+    with pytest.raises(RuntimeError):
+        triage.rerun_case(tickets, cases, case["_id"])
+    monkeypatch.setattr(triage, "finish_pending", real_finish)
+
+    triage.recover_missing_cases(tickets, cases)
+    triage.recover_missing_cases(tickets, cases)  # again: nothing added twice
+
+    reviews = tickets.find_one({})["agent_reviews"]
+    assert len(reviews) == 2 and reviews[1]["case_id"] == case["_id"]
+    assert "pending_review" not in cases.find_one({})
+    assert triage.cases_for_reviews(cases, [reviews[1]["review_id"]])[reviews[1]["review_id"]]["_id"] == case["_id"]
+
+
+def test_a_rerun_that_lost_its_claim_saves_nothing(monkeypatch, tickets, cases):
     case = open_case(monkeypatch, tickets, cases)
     add_jira(cases, case)
     client = arbiter_reply(monkeypatch, SOLVE)
@@ -747,12 +775,50 @@ def test_a_rerun_that_lost_its_claim_takes_its_review_back(monkeypatch, tickets,
         return real_create(**kwargs)
 
     client.messages.create = slow_answer
-    with pytest.raises(triage.RerunUnavailable, match="took this case over"):
+    with pytest.raises(triage.RerunUnavailable, match="this answer was discarded"):
         triage.rerun_case(tickets, cases, case["_id"])
 
     assert len(tickets.find_one({})["agent_reviews"]) == 1
     stored = cases.find_one({})
     assert stored["reruns"] == [] and stored["rerun_claim"]["worker"] == "other"
+    assert "pending_review" not in stored
+
+
+def test_a_rerun_whose_claim_expired_saves_nothing_even_if_no_one_took_it(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    client = arbiter_reply(monkeypatch, SOLVE)
+    real_create = client.messages.create
+
+    def very_slow_answer(**kwargs):
+        cases.update_one({}, {"$set": {"rerun_claim.expires_at": datetime(2020, 1, 1)}})
+        return real_create(**kwargs)
+
+    client.messages.create = very_slow_answer
+    with pytest.raises(triage.RerunUnavailable, match="this answer was discarded"):
+        triage.rerun_case(tickets, cases, case["_id"])
+    assert len(tickets.find_one({})["agent_reviews"]) == 1
+    assert cases.find_one({})["reruns"] == []
+
+
+def test_a_rerun_whose_ticket_vanished_is_taken_back(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    client = arbiter_reply(monkeypatch, SOLVE)
+    real_create = client.messages.create
+
+    def ticket_deleted_meanwhile(**kwargs):
+        tickets.delete_many({})
+        return real_create(**kwargs)
+
+    client.messages.create = ticket_deleted_meanwhile
+    with pytest.raises(LookupError, match="removed while it was re-run"):
+        triage.rerun_case(tickets, cases, case["_id"])
+
+    stored = cases.find_one({})
+    assert stored["reruns"] == [] and stored["status"] == triage.OPEN
+    assert stored["open_questions"] == ["Has LRN-1234 been released?"]
+    assert not {"pending_review", "resolved_at", "week_of", "rerun_claim"} & set(stored)
 
 
 def test_evidence_used_while_waiting_for_the_claim_isnt_used_again(monkeypatch, tickets, cases):
@@ -902,14 +968,9 @@ def test_a_pdf_with_too_many_pages_is_refused():
 # --- second review: commits, traces, recovery ------------------------------------
 
 
-def test_a_claim_lost_during_adoption_stops_before_the_model_call(monkeypatch, tickets, cases):
+def test_a_claim_lost_before_the_call_stops_it(monkeypatch, tickets, cases):
     case = open_case(monkeypatch, tickets, cases)
     add_jira(cases, case)
-    # A review left by an interrupted re-run, for adoption to record.
-    tickets.update_one({}, {"$push": {"agent_reviews": {
-        "review_id": ObjectId(), "case_id": case["_id"], "classification": "manual_triage",
-        "confidence": 30, "evidence_ids": [], "reviewed_at": datetime.now(timezone.utc),
-    }}})
     client = arbiter_reply(monkeypatch, SOLVE)
     real_claim = triage._claim
 
@@ -1051,3 +1112,106 @@ def test_weekly_lookups_are_indexed(monkeypatch, tickets, cases):
     open_case(monkeypatch, tickets, cases)
     keys = [list(index["key"]) for index in cases.index_information().values()]
     assert [("status", 1), ("week_of", 1)] in keys
+
+
+# --- third review: budgets, PDFs, sweep, names ------------------------------------
+
+
+def test_evidence_is_measured_as_the_arbiter_sees_it(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    data = {"issues": [{"key": "LRN-1", "summary": "<" * 1000}]}
+    # Escaping turns each "<" into "&lt;", and every string gains its tags.
+    assert triage.evidence_size(data) > 4000
+    monkeypatch.setattr(triage, "MAX_EVIDENCE_BYTES", 3000)
+    with pytest.raises(triage.EvidenceRejected, match="limit is 2 KB"):
+        triage.add_evidence(cases, case["_id"], "jira", data, "x.xml", "sha")
+
+
+def test_a_rerun_over_the_input_budget_sends_nothing(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    client = arbiter_reply(monkeypatch, SOLVE)
+    monkeypatch.setattr(triage, "MAX_RERUN_INPUT_TOKENS", 100)
+    with pytest.raises(triage.RerunUnavailable, match="Nothing was sent"):
+        triage.rerun_case(tickets, cases, case["_id"])
+    assert client.calls == []
+    assert "rerun_claim" not in cases.find_one({})
+
+
+def test_token_estimates_err_high():
+    assert triage.estimated_tokens("word " * 400) >= 400  # ~1 token per English word
+    assert triage.estimated_tokens("漢" * 300) >= 300  # ~1 token per CJK character
+
+
+def test_an_unflagged_review_outside_the_view_is_swept_up(monkeypatch, tickets, cases):
+    monkeypatch.setattr(triage, "open_case", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(triage, "mark_case_pending", lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
+    review_manual_ticket(monkeypatch, tickets)
+    monkeypatch.undo()
+    monkeypatch.setattr(triage, "_last_sweep", None)
+    monkeypatch.delenv("MODEL_BUCKET", raising=False)
+
+    assert triage.recover_missing_cases(tickets, cases) == 1  # no rows given
+    assert cases.count_documents({}) == 1
+    cases.delete_many({})
+    assert triage.recover_missing_cases(tickets, cases) == 0  # swept recently
+
+
+def test_the_cases_collection_cant_share_a_name(monkeypatch, tickets):
+    monkeypatch.setenv("TRIAGE_CASES_COLLECTION", "tickets")
+    with pytest.raises(ValueError, match="same as MONGO_COLLECTION"):
+        triage.get_cases_collection(tickets.database)
+    assert triage.cases_collection_problem("lessons_learned", {"LESSONS_COLLECTION": "lessons_learned"})
+    assert triage.cases_collection_problem("triage_cases", triage.OTHER_COLLECTIONS) is None
+
+
+def pdf_with_content(size: int) -> bytes:
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=100, height=100)
+    stream = DecodedStreamObject()
+    stream.set_data(b"BT ET\n" * (size // 6))
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    out = BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def test_pdf_content_is_bounded_before_text_is_extracted(monkeypatch):
+    from pypdf import PageObject
+
+    extracted = []
+    monkeypatch.setattr(PageObject, "extract_text", lambda self, *a, **k: extracted.append(1) or "")
+    monkeypatch.setattr(evidence, "MAX_PDF_CONTENT_BYTES", 1000)
+    with pytest.raises(evidence.EvidenceError, match="of content"):
+        evidence.extract(evidence.AHA, pdf_with_content(6000))
+    assert extracted == []
+
+
+def test_pypdfs_limits_are_lowered_for_the_read_only(monkeypatch):
+    from pypdf import get_configuration
+
+    before = get_configuration()
+    seen = []
+    real = evidence._read_pdf_text
+    monkeypatch.setattr(evidence, "_read_pdf_text", lambda c: seen.append(get_configuration()) or real(c))
+    with pytest.raises(evidence.EvidenceError):
+        evidence.extract(evidence.AHA, pdf_with_content(60))  # no text
+    assert seen[0].zlib_maximum_output_length == evidence.MAX_PDF_STREAM_BYTES
+    assert seen[0].xform_maximum_invocations_per_extraction == 500
+    assert get_configuration() == before
+
+
+def test_any_pypdf_failure_is_a_rejection(monkeypatch):
+    import pypdf
+
+    def broken(*a, **k):
+        raise KeyError("/Root")
+
+    monkeypatch.setattr(pypdf, "PdfReader", broken)
+    with pytest.raises(evidence.EvidenceError, match="can't be read \\(KeyError"):
+        evidence.extract(evidence.AHA, b"%PDF-1.7 whatever")

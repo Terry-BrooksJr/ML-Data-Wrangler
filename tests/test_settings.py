@@ -289,6 +289,10 @@ def qapp():
         ({"AB_TEST_COLLECTION": "tickets"}, False),
         ({"MONGO_COLLECTION": "runs", "AB_TEST_COLLECTION": "runs"}, False),
         ({"AB_TEST_COLLECTION": "ab", "AB_RESULT_COLLECTION": "ab"}, False),
+        ({"TRIAGE_CASES_COLLECTION": "tickets"}, False),
+        ({"MONGO_COLLECTION": "cases", "TRIAGE_CASES_COLLECTION": "cases"}, False),
+        ({"TRIAGE_CASES_COLLECTION": "lessons_learned"}, False),
+        ({"TRIAGE_CASES_COLLECTION": "my_cases"}, True),
     ],
 )
 def test_settings_refuse_ab_collection_names_that_clash(
@@ -303,7 +307,13 @@ def test_settings_refuse_ab_collection_names_that_clash(
         QMessageBox, "critical", lambda *args, **kwargs: shown.append(args[2])
     )
     dialog = settings_dialog.SettingsDialog()
-    for name in ("MONGO_COLLECTION", "AB_TEST_COLLECTION", "AB_RESULT_COLLECTION"):
+    for name in (
+        "MONGO_COLLECTION",
+        "AB_TEST_COLLECTION",
+        "AB_RESULT_COLLECTION",
+        "TRIAGE_CASES_COLLECTION",
+        "LESSONS_COLLECTION",
+    ):
         dialog.fields[name].setText(entered.get(name, ""))
     assert dialog._collection_names_ok() is saves
     assert bool(shown) is not saves

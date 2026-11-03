@@ -5,6 +5,7 @@ from typing import Dict
 from urllib.parse import urlsplit
 
 from core import settings
+from decision_engine import triage
 from decision_engine.ab_test import collection_name_problem
 from decision_engine.classify import api_url_problem, is_loopback_url
 from embedding.embeddings import ALLOWED_DIMENSIONS, parse_dimensions
@@ -135,7 +136,8 @@ class SettingsDialog(QDialog):
         return True
 
     def _collection_names_ok(self) -> bool:
-        """Refuses A/B collection names that collide with the tickets or each other."""
+        """Refuses A/B and triage-case collection names that collide with the
+        tickets or each other."""
         names = {
             setting.name: self.fields[setting.name].text().strip() or setting.default
             for setting in settings.SETTINGS
@@ -147,6 +149,16 @@ class SettingsDialog(QDialog):
             names["AB_TEST_COLLECTION"],
             names["AB_RESULT_COLLECTION"],
         )
+        if not problem:
+            entered = {
+                setting.name: self.fields[setting.name].text().strip() or setting.default
+                for setting in settings.SETTINGS
+                if setting.name in (*triage.OTHER_COLLECTIONS, "TRIAGE_CASES_COLLECTION")
+            }
+            problem = triage.cases_collection_problem(
+                entered["TRIAGE_CASES_COLLECTION"] or "triage_cases",
+                {k: entered.get(k) or default for k, default in triage.OTHER_COLLECTIONS.items()},
+            )
         if problem:
             QMessageBox.critical(self, "Collection Names Clash", problem)
             return False

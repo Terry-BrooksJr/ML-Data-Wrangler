@@ -37,6 +37,30 @@ MAX_XML_ELEMENTS = 200_000
 MAX_XML_DEPTH = 64
 MAX_PDF_PAGES = 40
 MAX_TEXT_CHARS = 2_000_000
+# Decompressed size, per stream (pypdf's own default is 75 MB) and for all
+# the pages' content together, checked before any text is extracted: text
+# comes out of that content, so this bounds what extraction can produce.
+MAX_PDF_STREAM_BYTES = 8 * 1024 * 1024
+MAX_PDF_CONTENT_BYTES = 16 * 1024 * 1024
+# pypdf's limits while one of our PDFs is read (its defaults are 75 MB a
+# stream, 300 MB of decoding in all, 5,000 form reuses per extraction).
+PYPDF_LIMITS = {
+    **dict.fromkeys(
+        (
+            "maximum_declared_stream_length",
+            "array_based_stream_maximum_output_length",
+            "jbig2_maximum_output_length",
+            "lzw_maximum_output_length",
+            "run_length_maximum_output_length",
+            "zlib_maximum_output_length",
+            "brotli_maximum_output_length",
+            "image_maximum_buffer_size",
+        ),
+        MAX_PDF_STREAM_BYTES,
+    ),
+    "stream_decoding_work_maximum_length": 4 * MAX_PDF_CONTENT_BYTES,
+    "xform_maximum_invocations_per_extraction": 500,
+}
 # Jira's RSS fields the engine can use; issue keys look like LRN-1234.
 _ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
 # Aha references: ideas (PROJ-I-543) and features (PROJ-123). A Jira key
@@ -277,13 +301,22 @@ def parse_jira(content: Union[bytes, str]) -> dict:
 
 
 def read_pdf_text(content: bytes) -> str:
-    """The text of a PDF, page by page.
+    """The text of a PDF, page by page, within the MAX_PDF_* limits.
 
     Raises:
-        EvidenceError: not a readable PDF, encrypted, or without text (a scan).
+        EvidenceError: not a readable PDF, encrypted, over a limit, or
+            without text (a scan). Any failure inside pypdf is reported this
+            way, so a crafted file is refused rather than breaking the app.
     """
+    from pypdf import apply_configuration
+
+    # Scoped to this read (a context variable), so nothing else is affected.
+    with apply_configuration(**PYPDF_LIMITS):
+        return _read_pdf_text(content)
+
+
+def _read_pdf_text(content: bytes) -> str:
     from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
 
     try:
         reader = PdfReader(BytesIO(content))
@@ -294,7 +327,16 @@ def read_pdf_text(content: bytes) -> str:
                 f"The PDF has {len(reader.pages)} pages; an Aha page prints to a few. "
                 f"The limit is {MAX_PDF_PAGES}."
             )
-        # pypdf caps each stream's decompressed size itself; this caps the total.
+        # The pages' content, decompressed (and cached for extraction) before
+        # any text is drawn from it.
+        content_bytes = 0
+        for page in reader.pages:
+            contents = page.get_contents()
+            content_bytes += len(contents.get_data()) if contents is not None else 0
+            if content_bytes > MAX_PDF_CONTENT_BYTES:
+                raise EvidenceError(
+                    f"The PDF's pages hold over {MAX_PDF_CONTENT_BYTES // (1024 * 1024)} MB of content."
+                )
         parts, total = [], 0
         for page in reader.pages:
             text = page.extract_text() or ""
@@ -303,10 +345,12 @@ def read_pdf_text(content: bytes) -> str:
                 raise EvidenceError(f"The PDF holds over {MAX_TEXT_CHARS:,} characters of text.")
             parts.append(text)
         text = "\n".join(parts)
-    except PdfReadError as e:
-        raise EvidenceError(f"The PDF can't be read: {e}.") from e
+    except EvidenceError:
+        raise
     except (MemoryError, RecursionError) as e:
         raise EvidenceError("The PDF is too complex to read.") from e
+    except Exception as e:  # pypdf raises many kinds for a broken or crafted file
+        raise EvidenceError(f"The PDF can't be read ({type(e).__name__}: {e}).") from e
     if not text.strip():
         raise EvidenceError("The PDF has no text to read (is it a scan?).")
     return text

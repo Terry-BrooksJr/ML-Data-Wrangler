@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 from decision_engine import evidence
+from loguru import logger
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QComboBox,
@@ -148,6 +149,10 @@ class EvidenceDialog(QDialog):
             return evidence.extract(kind, content, source)
         except evidence.EvidenceError as e:
             self.error_label.setText(f"Can't add this: {e}")
+            return None
+        except Exception as e:  # a parser bug must not take the dialog down
+            logger.exception(f"Couldn't parse {source} as {kind} evidence")
+            self.error_label.setText(f"Can't add this: it couldn't be read ({type(e).__name__}).")
             return None
 
     def check_and_add(self) -> None:

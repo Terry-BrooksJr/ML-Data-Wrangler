@@ -25,7 +25,7 @@ triage_cases), one per manual-triage review.
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional
 
 import bson
@@ -56,11 +56,16 @@ EVIDENCE_KINDS = ("jira", "aha")
 TRAIL_PREFIX = "triage-cases/"
 # Above this, the trail goes to S3; without S3 its thinking is cut to fit.
 MAX_INLINE_TRAIL_BYTES = 512 * 1024
-# Extracted evidence, per entry and per case. All of a case's evidence goes
-# to the arbiter on every re-run, so the case total keeps that request well
-# inside a model's input limit (roughly 100K tokens of evidence).
-MAX_EVIDENCE_BYTES = 256 * 1024
-MAX_CASE_EVIDENCE_BYTES = 384 * 1024
+# Extracted evidence, per entry and per case, measured as the arbiter will
+# see it: wrapped as untrusted text and serialised (evidence_size). All of
+# a case's evidence goes to the arbiter on every re-run, so the case total
+# keeps it to roughly 100K tokens even for text that tokenizes densely.
+MAX_EVIDENCE_BYTES = 200 * 1024
+MAX_CASE_EVIDENCE_BYTES = 300 * 1024
+# A re-run's whole request (ticket, case, evidence), estimated before it is
+# sent; with the instructions and the reply it stays inside a 200K-token
+# context. estimated_tokens errs high.
+MAX_RERUN_INPUT_TOKENS = 150_000
 MAX_EVIDENCE_ITEMS = 25
 # MongoDB refuses a document over 16 MiB; past this, a re-run's trail is
 # left out of the case rather than kept inline.
@@ -77,9 +82,45 @@ class EvidenceRejected(ValueError):
     """The evidence can't be added: a duplicate, too large, or the case is full."""
 
 
+# The settings that name the app's other collections, with their defaults.
+OTHER_COLLECTIONS = {
+    "MONGO_COLLECTION": "tickets",
+    "AB_TEST_COLLECTION": "ab_tests",
+    "AB_RESULT_COLLECTION": "ab_results",
+    "MISCLASSIFICATION_COLLECTION": "misclassification_log",
+    "LESSONS_COLLECTION": "lessons_learned",
+}
+
+
+def cases_collection_problem(cases_name: str, others: dict) -> Optional[str]:
+    """Why the cases collection can't have this name, or None.
+
+    Args:
+        others: {setting name: collection name} for OTHER_COLLECTIONS.
+    """
+    for setting, name in others.items():
+        if name == cases_name:
+            return (
+                f"The triage cases collection is named {cases_name!r}, the same as {setting}; "
+                "give it a different name."
+            )
+    return None
+
+
 def get_cases_collection(database) -> Collection:
-    """The triage_cases collection; the name is read here so a saved setting applies at once."""
-    return database[os.environ.get("TRIAGE_CASES_COLLECTION", "triage_cases")]
+    """The triage_cases collection; the name is read here so a saved setting applies at once.
+
+    Raises:
+        ValueError: the name is another collection's (cases_collection_problem):
+            its indexes and documents would corrupt that collection.
+    """
+    name = os.environ.get("TRIAGE_CASES_COLLECTION") or "triage_cases"
+    problem = cases_collection_problem(
+        name, {k: os.environ.get(k) or default for k, default in OTHER_COLLECTIONS.items()}
+    )
+    if problem:
+        raise ValueError(problem)
+    return database[name]
 
 
 def ensure_indexes(cases: Collection) -> None:
@@ -366,7 +407,7 @@ def open_case(
         # and arbiter replies the review itself doesn't keep.
         "trail": review.get("pending_trail") or store_trail(str(case_id), _trail(result)),
         "evidence": [],
-        "evidence_bytes": 0,
+        "evidence_bytes": 0,  # evidence_size of all of it
         "reruns": [],
         # False until finish_cleanup has tidied the ticket's review.
         "cleanup_done": False,
@@ -425,9 +466,11 @@ def recover_missing_cases(
     that didn't complete (finish_cleanup).
 
     A review flagged by mark_case_pending is found at any age, and its case
-    gets the trail saved with it. A review among `rows` with no case and no
-    flag (the flag couldn't be saved either) gets one from the review
-    itself: what the review kept, without thinking or arbiter replies.
+    gets the trail saved with it. A review with no case and no flag (the
+    flag couldn't be saved either) gets one from the review itself, without
+    thinking or arbiter replies: at once when it is among `rows`, else on
+    the periodic sweep (_sweep_unflagged). A re-run stopped between its case
+    and its ticket review is finished (finish_pending).
 
     Args:
         rows: {"zendesk_id", "review"} rows, as the Triage tab loads them.
@@ -471,8 +514,71 @@ def recover_missing_cases(
                 finish_cleanup(tickets, cases, case, review)
         except Exception as e:
             logger.warning(f"{case['zendesk_id']}: still couldn't tidy its review: {e}")
+    # Re-runs that recorded their case but stopped before saving the review.
+    cases.create_index("pending_review.entry.review_id", sparse=True)
+    for case in cases.find({"pending_review": {"$exists": True}}, {"trail.trail": 0}):
+        try:
+            if not claimed_by_another(case):
+                finish_pending(tickets, cases, case)
+        except Exception as e:
+            logger.warning(f"{case['zendesk_id']}: still couldn't save its re-run's review: {e}")
+    opened += _sweep_unflagged(tickets, cases)
     if opened:
         logger.info(f"Opened {opened} manual-triage case(s) that were missing.")
+    return opened
+
+
+# How often the full sweep for unflagged missing cases runs, per process.
+SWEEP_INTERVAL = timedelta(hours=6)
+_last_sweep: Optional[datetime] = None
+
+
+def _sweep_unflagged(tickets: Collection, cases: Collection) -> int:
+    """Opens cases for manual-triage reviews of any age that have neither a
+    case nor a pending flag (opening the case and flagging it both failed).
+    Reads only review IDs across the tickets, and runs at most once per
+    SWEEP_INTERVAL.
+    """
+    global _last_sweep
+    now = datetime.now(timezone.utc)
+    if _last_sweep is not None and now - _last_sweep < SWEEP_INTERVAL:
+        return 0
+    _last_sweep = now
+    reviews = list(
+        tickets.aggregate(
+            [
+                {"$match": {"agent_reviews.classification": "manual_triage"}},
+                {"$unwind": "$agent_reviews"},
+                {
+                    "$match": {
+                        "agent_reviews.classification": "manual_triage",
+                        "agent_reviews.rerun_of": None,
+                        "agent_reviews.case_pending": {"$ne": True},
+                    }
+                },
+                {"$project": {"_id": 0, "zendesk_id": 1, "review_id": "$agent_reviews.review_id"}},
+            ],
+            allowDiskUse=True,
+        )
+    )
+    opened = 0
+    for start in range(0, len(reviews), 1000):
+        batch = reviews[start : start + 1000]
+        have = {
+            c["review_id"]
+            for c in cases.find({"review_id": {"$in": [r["review_id"] for r in batch]}}, {"review_id": 1})
+        }
+        for missing in (r for r in batch if r["review_id"] not in have):
+            ticket = tickets.find_one(
+                {"zendesk_id": missing["zendesk_id"]},
+                {"agent_reviews": {"$elemMatch": {"review_id": missing["review_id"]}}},
+            )
+            review = ((ticket or {}).get("agent_reviews") or [None])[0]
+            try:
+                if review is not None and open_case(cases, missing["zendesk_id"], review, review, tickets=tickets):
+                    opened += 1
+            except Exception as e:
+                logger.warning(f"{missing['zendesk_id']}: still couldn't open its manual-triage case: {e}")
     return opened
 
 
@@ -524,7 +630,7 @@ def add_evidence(
     """
     if kind not in EVIDENCE_KINDS:
         raise ValueError(f"kind must be one of {EVIDENCE_KINDS}")
-    size = len(bson.encode({"data": data}))
+    size = evidence_size(data)
     if size > MAX_EVIDENCE_BYTES:
         raise EvidenceRejected(
             f"The extracted {kind} data is {size // 1024} KB; the limit is "
@@ -568,6 +674,19 @@ def add_evidence(
         f"the limit is {MAX_CASE_EVIDENCE_BYTES // 1024} KB, so a re-run fits the model's input. "
         "Add a shorter export."
     )
+
+
+def estimated_tokens(text: str) -> int:
+    """A deliberately high token estimate: a third of the UTF-8 size. English
+    runs about four bytes a token; dense scripts (CJK, three bytes a
+    character) about one character a token, which this still covers."""
+    return -(-len(text.encode("utf-8")) // 3)
+
+
+def evidence_size(data: dict) -> int:
+    """The bytes an evidence entry adds to a re-run: wrapped and serialised
+    as rerun_fields sends it, so escaping and wrapper tags count."""
+    return len(json.dumps(_wrap_strings(data), ensure_ascii=False, default=str).encode("utf-8"))
 
 
 def unused_evidence(case: dict) -> List[dict]:
@@ -724,57 +843,46 @@ def _rerun_update(rerun: dict) -> dict:
     return update
 
 
-def _adopt_interrupted(tickets: Collection, cases: Collection, case: dict, worker: str) -> dict:
-    """Records re-run reviews already on the ticket that the case doesn't
-    list: a re-run stopped between saving its review and updating the case.
-    Run while holding the claim, so a retry finishes that re-run instead of
-    paying for it again.
+# What a re-run's case update changes, restored if its ticket has gone.
+_RESTORABLE = ("status", "open_questions", "resolved_at", "resolved_by_review", "week_of")
+
+
+def finish_pending(tickets: Collection, cases: Collection, case: dict) -> bool:
+    """Saves a re-run's review to the ticket, once the case has recorded it
+    (rerun_case writes the case first, with the review as pending_review).
+    Safe to repeat: a review already on the ticket isn't added again.
+
+    If the ticket has gone, the re-run is taken back off the case, which
+    returns to how it was before.
 
     Returns:
-        The case as it now stands.
+        True when the review is on the ticket (or nothing was pending),
+        False when its ticket has gone and the re-run was taken back.
     """
-    listed = {r["review_id"] for r in case.get("reruns") or []}
-    ticket = tickets.find_one({"zendesk_id": case["zendesk_id"]}, {"agent_reviews": 1}) or {}
-    for review in ticket.get("agent_reviews") or []:
-        if review.get("case_id") != case["_id"] or review["review_id"] in listed:
-            continue
-        rerun = {
-            "review_id": review["review_id"],
-            "at": review.get("reviewed_at"),
-            "by": review.get("requested_by"),
-            "model": review.get("model_version"),
-            "classification": review.get("classification"),
-            "confidence": review.get("confidence"),
-            "signals_matched": review.get("signals_matched") or [],
-            "open_questions": review.get("open_questions") or [],
-            "evidence_ids": review.get("evidence_ids") or [],
-            "trail": {"stored": None, "note": "recorded after an interrupted re-run"},
-        }
-        update = _rerun_update(rerun)
-        update["$set"]["rerun_claim"] = case["rerun_claim"]  # keep holding it
-        del update["$unset"]["rerun_claim"]
-        if not cases.update_one({"_id": case["_id"], "rerun_claim.worker": worker}, update).modified_count:
-            raise RerunUnavailable("Another re-run took this case over.")
-        logger.warning(f"{case['zendesk_id']}: recorded interrupted re-run {review['review_id']}.")
-    case = cases.find_one({"_id": case["_id"], "rerun_claim.worker": worker})
-    if case is None:
-        raise RerunUnavailable("Another re-run took this case over.")
-    return case
-
-
-def _hold_claim(cases: Collection, case_id, worker: str) -> bool:
-    """Renews a claim still held, so it can't expire while the re-run is
-    written. False when it was already lost."""
-    from .persistence import claim_ttl
-
-    now = datetime.now(timezone.utc)
-    return (
-        cases.find_one_and_update(
-            {"_id": case_id, "rerun_claim.worker": worker, "rerun_claim.expires_at": {"$gt": now}},
-            {"$set": {"rerun_claim.expires_at": now + claim_ttl()}},
-        )
-        is not None
+    pending = case.get("pending_review")
+    if not pending:
+        return True
+    entry = pending["entry"]
+    zendesk_id = case["zendesk_id"]
+    pushed = tickets.update_one(
+        {"zendesk_id": zendesk_id, "agent_reviews.review_id": {"$ne": entry["review_id"]}},
+        {"$push": {"agent_reviews": entry}},
     )
+    if pushed.matched_count or tickets.find_one(
+        {"zendesk_id": zendesk_id, "agent_reviews.review_id": entry["review_id"]}, {"_id": 1}
+    ):
+        cases.update_one({"_id": case["_id"]}, {"$unset": {"pending_review": ""}})
+        return True
+    before = pending.get("before") or {}
+    restore = {
+        "$pull": {"reruns": {"review_id": entry["review_id"]}},
+        "$unset": {"pending_review": "", **{k: "" for k in _RESTORABLE if k not in before}},
+    }
+    if before:
+        restore["$set"] = before
+    cases.update_one({"_id": case["_id"]}, restore)
+    logger.warning(f"{zendesk_id}: the ticket is gone; re-run {entry['review_id']} taken back off its case.")
+    return False
 
 
 def rerun_case(
@@ -792,16 +900,18 @@ def rerun_case(
     manual_triage leaves it (or puts it back) open for more evidence. A paid
     model call.
 
-    After the model answers, the claim is renewed (_hold_claim) before
-    anything is written: a re-run whose claim expired and was taken over
-    discards its answer without saving it. The review is then saved, then
-    the case. A review is never removed once saved: a re-run that stops in
-    between is finished by the next attempt (_adopt_interrupted) without
-    another call.
+    The case is written first, in one update that also checks the claim is
+    still held and unexpired: a re-run that lost its claim saves nothing.
+    That update records the re-run and keeps its review as pending_review;
+    finish_pending then saves the review to the ticket. A re-run stopped in
+    between is finished by the next re-run or by recover_missing_cases, so
+    the case and the ticket never disagree for long and nothing is paid
+    for twice.
 
     Raises:
         RerunUnavailable: no arbiter, no new evidence, a re-run is already
-            running, or this one lost its claim.
+            running, this one lost its claim, or the request would exceed
+            the model's input budget (MAX_RERUN_INPUT_TOKENS).
         LookupError: the case or its ticket is gone.
         anthropic.APIError or classify.EngineError: the call failed.
         decisions.DecisionModelNotAllowed: the arbiter is a decision model.
@@ -818,15 +928,25 @@ def rerun_case(
     case = cases.find_one({"_id": ObjectId(case_id)})
     if case is None:
         raise LookupError(f"No triage case {case_id}")
+    if case.get("pending_review") and not claimed_by_another(case):
+        # A re-run stopped after writing the case: finish it before deciding
+        # anything (it used the evidence). Safe to repeat, so needs no claim.
+        finish_pending(tickets, cases, case)
+        case = cases.find_one({"_id": case["_id"]})
     problem = rerun_problem(case, arbiter)
     if problem:
         raise RerunUnavailable(problem)
     case = _claim(cases, case_id, worker)
     if case is None:
         raise RerunUnavailable("This case is already being re-run.")
+    held = case["_id"]
     release = {"$unset": {"rerun_claim": ""}}
     try:
-        case = _adopt_interrupted(tickets, cases, case, worker)
+        # A re-run stopped after writing the case: finish it, unpaid.
+        finish_pending(tickets, cases, case)
+        case = cases.find_one({"_id": case["_id"], "rerun_claim.worker": worker})
+        if case is None:
+            raise RerunUnavailable("Another re-run took this case over.")
         # Another re-run may have used the evidence since the first check.
         problem = rerun_problem(case, arbiter, worker)
         if problem:
@@ -841,6 +961,12 @@ def rerun_case(
         as_of = datetime.now(timezone.utc)
         evidence_ids = [e["evidence_id"] for e in case.get("evidence") or []]
         payload = build_ticket_payload(ticket, as_of, rerun_fields(case, load_trail(case)))
+        tokens = estimated_tokens(payload)
+        if tokens > MAX_RERUN_INPUT_TOKENS:
+            raise RerunUnavailable(
+                f"The ticket, case and evidence come to about {tokens:,} tokens; a re-run "
+                f"allows {MAX_RERUN_INPUT_TOKENS:,}, to fit the model's input. Nothing was sent."
+            )
         result = classify._classify_with(
             arbiter,
             payload,
@@ -863,7 +989,7 @@ def rerun_case(
         trail = store_trail(
             f"{case['_id']}-rerun-{entry['review_id']}",
             _trail(result),
-            inline_room=MAX_CASE_BYTES - len(bson.encode(case)),
+            inline_room=MAX_CASE_BYTES - len(bson.encode(case)) - len(bson.encode({"e": entry})),
         )
         if "first" in _replies_kept(trail) and entry.get("audit"):
             entry["audit"].pop("raw_response", None)  # kept once, in the trail
@@ -880,23 +1006,28 @@ def rerun_case(
             "trail": trail,
         }
         _fit_review(tickets, ticket["zendesk_id"], entry, None)
-        if not _hold_claim(cases, case["_id"], worker):
+        update = _rerun_update(rerun)
+        update["$set"]["pending_review"] = {
+            "entry": entry,
+            "before": {k: case[k] for k in _RESTORABLE if k in case},
+        }
+        recorded = cases.update_one(
+            {
+                "_id": case["_id"],
+                "rerun_claim.worker": worker,
+                "rerun_claim.expires_at": {"$gt": datetime.now(timezone.utc)},
+            },
+            update,
+        )
+        if not recorded.modified_count:
             raise RerunUnavailable(
                 "Another re-run took this case over while the model answered; this answer was discarded."
             )
-        tickets.update_one(
-            {"zendesk_id": ticket["zendesk_id"]}, {"$push": {"agent_reviews": entry}}
-        )
-        saved = cases.update_one(
-            {"_id": case["_id"], "rerun_claim.worker": worker}, _rerun_update(rerun)
-        )
-        if not saved.modified_count:
-            # Not expected with the claim just renewed. The review stays;
-            # the next re-run records it (_adopt_interrupted).
-            logger.warning(f"{case['zendesk_id']}: re-run {entry['review_id']} saved, its case not updated.")
     except BaseException:
-        cases.update_one({"_id": case["_id"], "rerun_claim.worker": worker}, release)
+        cases.update_one({"_id": held, "rerun_claim.worker": worker}, release)
         raise
+    if not finish_pending(tickets, cases, cases.find_one({"_id": held})):
+        raise LookupError(f"Ticket {case['zendesk_id']} was removed while it was re-run; nothing was saved.")
     logger.info(
         f"{case['zendesk_id']}: re-run with evidence on {arbiter}: "
         f"{result['classification']} ({result['confidence']})"
