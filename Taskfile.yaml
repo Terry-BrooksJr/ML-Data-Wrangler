@@ -183,6 +183,7 @@ tasks:
     desc: Build the standalone app with PyInstaller (skipped when nothing changed; --force rebuilds)
     summary: |
       Runs packaging/build.sh: dist/Lasso.app on macOS, dist/Lasso/ on Linux.
+      On macOS, packaging/build_pkg.sh then wraps the app in dist/Lasso-<version>.pkg.
       PyInstaller doesn't cross-compile, and the script is bash, so it runs
       on macOS and Linux only. Rebuilds only when the sources below changed
       or dist/ is missing.
@@ -203,6 +204,7 @@ tasks:
     cmds: 
       - cmd: packaging/build.sh
       - cmd: packaging/build_pkg.sh
+        platforms: [darwin]  # wraps dist/Lasso.app, which only macOS builds
       - cmd: echo "Built $(ls -1 dist | wc -l) files in dist/"
 
 
