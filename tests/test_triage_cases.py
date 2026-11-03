@@ -316,21 +316,27 @@ def test_a_long_trail_without_storage_is_cut_to_fit(monkeypatch):
     assert stored["trail"]["first"]["thinking"][0].endswith("[cut to fit]")
 
 
-@mock_aws
-def test_trails_go_to_s3_when_storage_is_set_up(monkeypatch, tickets, cases):
+def use_storage(monkeypatch):
     monkeypatch.setenv("MODEL_BUCKET", "models")
     monkeypatch.setenv("B2_KEY_ID", "key")
     monkeypatch.setenv("B2_APPLICATION_KEY", "secret")
     monkeypatch.setenv("MODEL_SIGNING_KEY", "k" * 40)
     monkeypatch.setenv("MODEL_STORAGE_REGION", "us-east-1")
+    monkeypatch.delenv("MODEL_PREFIX", raising=False)
     monkeypatch.delenv("B2_ENDPOINT_URL", raising=False)
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="models")
+
+
+@mock_aws
+def test_trails_go_to_s3_when_storage_is_set_up(monkeypatch, tickets, cases):
+    use_storage(monkeypatch)
 
     review_manual_ticket(monkeypatch, tickets)
 
     case = cases.find_one({})
     assert case["trail"]["stored"] == "s3"
-    assert case["trail"]["key"] == f"triage-cases/{case['_id']}.json"
+    # Under the storage prefix, which a prefix-limited storage key can write.
+    assert case["trail"]["key"] == f"topic-models/_triage-cases/{case['_id']}.json"
     assert triage.load_trail(case)["first"]["thinking"] == ["I weighed S3 against R1."]
 
 
@@ -1280,3 +1286,73 @@ def test_a_sweep_that_failed_runs_again_next_refresh(monkeypatch, tickets, cases
     assert triage.recover_missing_cases(tickets, cases) == 1
     assert triage._last_sweep is not None
     assert "agent_reviews.classification_1" in tickets.index_information()
+
+
+def refuse_uploads(monkeypatch):
+    """Makes every trail upload fail, as B2 does for a key limited to another prefix."""
+    from core import model_storage
+
+    real_client = model_storage.make_client
+
+    def client(cfg):
+        made = real_client(cfg)
+        made.put_object = lambda **_: (_ for _ in ()).throw(ConnectionError("connection closed"))
+        return made
+
+    monkeypatch.setattr(model_storage, "make_client", client)
+    return real_client
+
+
+@mock_aws
+def test_a_failed_upload_is_kept_in_mongodb_and_moved_later(monkeypatch, tickets, cases):
+    use_storage(monkeypatch)
+    real_client = refuse_uploads(monkeypatch)
+    review_manual_ticket(monkeypatch, tickets)
+    case = cases.find_one({})
+    assert case["trail"]["stored"] == "inline"
+    assert "B2_KEY_ID" in case["trail"]["upload_error"]
+    assert triage.kept_trail_count(cases) == 1
+    with pytest.raises(triage.TrailUploadFailed, match="connection closed"):
+        triage.upload_kept_trails(cases)
+    assert cases.find_one({})["trail"]["stored"] == "inline"
+
+    from core import model_storage
+
+    monkeypatch.setattr(model_storage, "make_client", real_client)
+    assert triage.upload_kept_trails(cases) == 1
+
+    moved = cases.find_one({})
+    assert moved["trail"]["stored"] == "s3" and "trail" not in moved["trail"]
+    assert triage.load_trail(moved)["first"]["thinking"] == ["I weighed S3 against R1."]
+    assert triage.kept_trail_count(cases) == 0
+    assert triage.upload_kept_trails(cases) == 0
+
+
+@mock_aws
+def test_a_reruns_kept_trail_is_moved_too(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)  # storage off: kept inline
+    add_jira(cases, case)
+    arbiter_reply(monkeypatch, SOLVE)
+    triage.rerun_case(tickets, cases, case["_id"])
+    assert triage.kept_trail_count(cases) == 1
+    use_storage(monkeypatch)
+
+    assert triage.upload_kept_trails(cases) == 2
+
+    stored = cases.find_one({})
+    rerun = stored["reruns"][0]
+    assert rerun["trail"]["key"] == f"topic-models/_triage-cases/{case['_id']}-rerun-{rerun['review_id']}.json"
+    assert stored["trail"]["stored"] == "s3"
+
+
+def test_retrying_without_storage_says_so(monkeypatch, cases):
+    monkeypatch.delenv("MODEL_BUCKET", raising=False)
+    with pytest.raises(triage.TrailUploadFailed, match="isn't set up"):
+        triage.upload_kept_trails(cases)
+
+
+def test_the_trail_folder_can_never_be_a_model_run():
+    from core import model_storage
+
+    with pytest.raises(ValueError):
+        model_storage.check_run_id(triage.TRAIL_FOLDER.rstrip("/"))

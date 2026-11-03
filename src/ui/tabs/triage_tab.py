@@ -247,7 +247,10 @@ def format_case(case: dict) -> List[str]:
     if trail.get("stored") == "s3":
         lines.append(f"Reasoning trail: s3://{trail.get('bucket')}/{trail.get('key')}")
     elif trail.get("stored") == "inline":
-        lines.append("Reasoning trail: kept on the case in MongoDB")
+        lines.append(
+            "Reasoning trail: kept on the case in MongoDB"
+            + (" (its S3 upload failed: use Retry Trail Uploads)" if trail.get("upload_error") else "")
+        )
     lines.append("Evidence:")
     for entry in case.get("evidence") or []:
         added_at = entry.get("added_at")
@@ -475,6 +478,7 @@ class TriageTab(QWidget):
     Signals:
         idle: Emitted when a job ends after request_shutdown, meaning the tab
             can now be destroyed safely.
+        open_logs: Emitted by the Open Logs button.
 
     Args:
         collection_factory: Returns the tickets collection. Defaults to the
@@ -487,6 +491,8 @@ class TriageTab(QWidget):
     """
 
     idle = pyqtSignal()
+    # Emitted by the Open Logs button; the main window owns the log window.
+    open_logs = pyqtSignal()
 
     def __init__(
         self,
@@ -557,8 +563,12 @@ class TriageTab(QWidget):
         self.status_label.setTextFormat(QtCore.Qt.PlainText)
         self.refresh_button = Button("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
+        self.open_logs_button = Button("Open Logs")
+        self.open_logs_button.setToolTip("Show the app's log in its own window.")
+        self.open_logs_button.clicked.connect(self.open_logs.emit)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status_label, stretch=1)
+        status_row.addWidget(self.open_logs_button)
         status_row.addWidget(self.refresh_button)
 
         self.batch_button = Button("Run Batch…", primary=True)
@@ -678,7 +688,14 @@ class TriageTab(QWidget):
             "compare the answers blind. Nothing is saved to the tickets."
         )
         self.ab_test_button.clicked.connect(self.open_ab_test)
-        # The detail pane sits beside the list, so its buttons wrap onto rows.
+        self.retry_uploads_button = Button("Retry Trail Uploads")
+        self.retry_uploads_button.setToolTip(
+            "Move manual-triage reasoning trails kept in MongoDB, because S3 was off "
+            "or the upload failed, to S3."
+        )
+        self.retry_uploads_button.clicked.connect(self.retry_trail_uploads)
+        # The detail pane sits below the list: navigation above the text,
+        # feedback below it.
         nav_row = QHBoxLayout()
         nav_row.addWidget(self.previous_button)
         nav_row.addWidget(self.next_button)
@@ -699,17 +716,22 @@ class TriageTab(QWidget):
         detail_layout.addWidget(self.detail)
         detail_layout.addLayout(feedback_row)
 
-        splitter = QSplitter(QtCore.Qt.Horizontal)
+        # Stacked so both get the full width; drag the handle to resize.
+        splitter = QSplitter(QtCore.Qt.Vertical)
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(self.table)
         splitter.addWidget(detail_pane)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        # Start at 3:2; the sizes are ratios until the splitter is laid out.
-        splitter.setSizes([3000, 2000])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        # Start at 2:3, list above detail; the sizes are ratios until the
+        # splitter is laid out.
+        splitter.setSizes([2000, 3000])
+        self.table.setMinimumHeight(140)
+        self.detail.setMinimumHeight(160)
 
         tools_row = QHBoxLayout()
         tools_row.addStretch()
+        tools_row.addWidget(self.retry_uploads_button)
         tools_row.addWidget(self.ab_test_button)
         tools_row.addWidget(self.weekly_review_button)
         tools_row.addWidget(self.training_button)
@@ -870,6 +892,7 @@ class TriageTab(QWidget):
             self.weekly_review_button,
             self.ab_test_button,
             self.training_button,
+            self.retry_uploads_button,
         ):
             button.setEnabled(not busy)
         self.embed_button.setEnabled(not busy and not self.is_embedding())
@@ -1546,6 +1569,36 @@ class TriageTab(QWidget):
                 )
             ),
         )
+
+    def retry_trail_uploads(self) -> None:
+        """Moves the trails kept in MongoDB to S3 (triage.upload_kept_trails)."""
+        if not self._configured(READ_ENV, notify=True):
+            return
+
+        def upload():
+            cases = triage.get_cases_collection(self.collection_factory().database)
+            try:
+                return triage.upload_kept_trails(cases), None, triage.kept_trail_count(cases)
+            except triage.TrailUploadFailed as e:
+                return None, str(e), triage.kept_trail_count(cases)
+
+        def done(result):
+            moved, error, left = result
+            if error:
+                QMessageBox.warning(
+                    self,
+                    "Retry Trail Uploads",
+                    f"{error}\n\n{left} case(s) still have a trail kept in MongoDB.",
+                )
+                self.refresh()
+            else:
+                self._feedback_done(
+                    f"Moved {moved} reasoning trail(s) to S3."
+                    if moved
+                    else "No reasoning trails were waiting to be uploaded."
+                )
+
+        self._run(upload, "Uploading reasoning trails to S3", done)
 
     def mark_selected_review_added(self) -> None:
         """Asks for confirmation, then marks the selected ticket's review as

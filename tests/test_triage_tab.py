@@ -1786,3 +1786,28 @@ def test_rerun_is_disabled_while_another_rerun_holds_the_case(qapp, configured, 
     select_classification(tab, "manual_triage")
     assert not tab.rerun_button.isEnabled()
     assert tab.rerun_button.toolTip() == "A re-run of this case is in progress."
+
+
+def test_retry_trail_uploads_reports_a_failure_and_a_success(qapp, configured, monkeypatch, dialogs, stored, with_case):
+    with_case.update_one({}, {"$set": {"trail.upload_error": "Couldn't upload"}})
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    select_classification(tab, "manual_triage")
+    assert "its S3 upload failed: use Retry Trail Uploads" in tab.detail.toPlainText()
+
+    def refuse(cases):
+        raise triage.TrailUploadFailed("Couldn't upload s3://models/x.json (closed).")
+
+    monkeypatch.setattr(triage, "upload_kept_trails", refuse)
+    tab.retry_trail_uploads()
+    wait_until_idle(qapp, tab)
+    assert dialogs[-1][0] == "warning"
+    assert "1 case(s) still have a trail kept in MongoDB" in dialogs[-1][1]
+
+    monkeypatch.setattr(triage, "upload_kept_trails", lambda cases: 1)
+    done = []
+    monkeypatch.setattr(tab, "_feedback_done", done.append)
+    tab.retry_trail_uploads()
+    wait_until_idle(qapp, tab)
+    assert done == ["Moved 1 reasoning trail(s) to S3."]

@@ -196,8 +196,15 @@ tasks:
       - packaging/**/*
       - uv.lock
       - exclude: "{{.SRC}}/**/__pycache__/**"
-    generates: [dist/**/*]
-    cmd: packaging/build.sh
+    generates: 
+      - dist/Lasso.app
+      - dist/Lasso
+      - dist/Lasso-*.pkg
+    cmds: 
+      - cmd: packaging/build.sh
+      - cmd: packaging/build_pkg.sh
+      - cmd: echo "Built $(ls -1 dist | wc -l) files in dist/"
+
 
   clean:
     desc: Remove build output and caches (not data, models or .env)
