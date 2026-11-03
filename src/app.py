@@ -1,3 +1,12 @@
+import multiprocessing
+
+# First, before anything else runs: in the packaged build sys.executable is
+# Lasso itself, so a helper process multiprocessing starts (the resource
+# tracker that BERTopic's progress bars start, or a worker) launches Lasso.
+# freeze_support() (PyInstaller's version) turns that launch back into the
+# helper; without it, each one opens another copy of the app.
+multiprocessing.freeze_support()
+
 import json
 import os
 import pathlib
@@ -1496,17 +1505,23 @@ ICON_PATH = (
     else pathlib.Path(__file__).resolve().parents[1] / "packaging"
 ) / "icon.png"
 
-# Before the QApplication: the macOS menu bar reads the name when it starts.
-macos.set_app_name("Lasso")
-app = QApplication(sys.argv)
-app.setApplicationName("Lasso")
-app.setWindowIcon(QIcon(str(ICON_PATH)))
-theme.apply(app)
-window = MainWindow("Lasso — Support Ticket Triage")
-app.aboutToQuit.connect(window.join_threads_on_quit)
-app.aboutToQuit.connect(chart_viewer.shutdown)
 
-if __name__ == "__main__":
+def main() -> int:
+    # Before the QApplication: the macOS menu bar reads the name when it starts.
+    macos.set_app_name("Lasso")
+    app = QApplication(sys.argv)
+    app.setApplicationName("Lasso")
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
+    theme.apply(app)
+    window = MainWindow("Lasso — Support Ticket Triage")
+    app.aboutToQuit.connect(window.join_threads_on_quit)
+    app.aboutToQuit.connect(chart_viewer.shutdown)
     window.show()
     QTimer.singleShot(0, window.prompt_for_missing_settings)
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+# Only when run as the app: a "spawn" worker process re-imports this module
+# (as __mp_main__) and must not open a window.
+if __name__ == "__main__":
+    sys.exit(main())
