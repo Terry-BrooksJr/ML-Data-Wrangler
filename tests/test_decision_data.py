@@ -138,6 +138,15 @@ def test_store_links_updates_stored_tickets_only(tickets):
     assert tickets.find_one({"zendesk_id": "9"}) is None
 
 
+def test_import_links_stores_and_summarises(tickets):
+    tickets.insert_one({"zendesk_id": "2"})
+    summary = jira_links.import_links(
+        tickets, [link("2", "20", "LRN-1"), link("2", "21"), link("9", "90")]
+    )
+    assert summary == "Read 3 Jira links for 2 tickets; updated 1 stored tickets."
+    assert len(tickets.find_one({"zendesk_id": "2"})["jira_links"]) == 2
+
+
 def test_payload_shows_links_without_status():
     ticket = dict(CATEGORY_FIXTURES["flag_solve"])
     ticket["jira_links"] = [

@@ -12,6 +12,9 @@ differed from created_at in the export), so the payload passes them as
 `linked_at` only. Many links have no issue_key; the issue_id is kept for those.
 
     python -m decision_engine.jira_links import PAGE.json [PAGE.json ...]
+
+The app's Write Tickets to MongoDB also imports one export file, when one is
+chosen, after writing the tickets.
 """
 
 import json
@@ -70,6 +73,16 @@ def store_links(tickets: Collection, by_ticket: Dict[str, List[dict]]) -> int:
     )
 
 
+def import_links(tickets: Collection, links: List[dict]) -> str:
+    """Stores the links on the tickets that are stored; returns a summary."""
+    by_ticket = links_by_ticket(links)
+    updated = store_links(tickets, by_ticket)
+    return (
+        f"Read {len(links)} Jira links for {len(by_ticket)} tickets; "
+        f"updated {updated} stored tickets."
+    )
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3 or sys.argv[1] != "import":
         sys.exit("usage: python -m decision_engine.jira_links import PAGE.json [...]")
@@ -79,9 +92,4 @@ if __name__ == "__main__":
 
     settings.load()
     links = [link for path in sys.argv[2:] for link in read_export(path)]
-    by_ticket = links_by_ticket(links)
-    updated = store_links(get_tickets_collection(), by_ticket)
-    print(
-        f"Read {len(links)} links for {len(by_ticket)} tickets; "
-        f"updated {updated} stored tickets."
-    )
+    print(import_links(get_tickets_collection(), links))
