@@ -17,6 +17,9 @@ ICON = str(ROOT / "packaging" / ("icon.icns" if sys.platform == "darwin" else "i
 
 # app.py sets icon.png as the window icon (taskbar on Windows/Linux).
 datas, binaries, hiddenimports = [(str(ROOT / "packaging" / "icon.png"), "assets")], [], []
+# The launch splash's artwork, if there is any (ui/splash.py draws one without it).
+if (ROOT / "packaging" / "splash.png").exists():
+    datas.append((str(ROOT / "packaging" / "splash.png"), "assets"))
 # The Tag Normalizer copies these scripts out for a person to run against Zendesk.
 datas.append((str(ROOT / "src" / "tags" / "zendesk_retag"), "zendesk_retag"))
 # tag_llm sends these to the model as its instructions.

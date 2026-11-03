@@ -51,6 +51,7 @@ def test_no_window_is_made_on_import():
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
     }
-    assert not calls & {"QApplication", "MainWindow", "main"}
-    guard = [node for node in module.body if isinstance(node, ast.If)]
-    assert [ast.unparse(node.test) for node in guard] == ["__name__ == '__main__'"]
+    assert not calls & {"QApplication", "MainWindow", "main", "splash.show"}
+    # Two guards: one puts up the splash before the slow imports, the last runs main().
+    guards = [node for node in module.body if isinstance(node, ast.If)]
+    assert {ast.unparse(node.test) for node in guards} == {"__name__ == '__main__'"}

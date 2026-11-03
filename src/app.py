@@ -47,6 +47,26 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ui import macos
+from ui import splash
+
+# The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
+ICON_PATH = (
+    pathlib.Path(sys._MEIPASS) / "assets"
+    if settings.is_frozen()
+    else pathlib.Path(__file__).resolve().parents[1] / "packaging"
+) / "icon.png"
+
+# The imports below (spaCy, BERTopic, the language model) take a while, so put
+# the splash up first. Only when run as the app: a "spawn" worker process
+# re-imports this module (as __mp_main__) and must not open a window.
+if __name__ == "__main__":
+    # Before the QApplication: the macOS menu bar reads the name when it starts.
+    macos.set_app_name("Lasso")
+    # Kept in a variable: an unreferenced QApplication is deleted at once.
+    _app = QApplication(sys.argv)
+    splash.show(_app, str(ICON_PATH))
+
 # Before the local imports, so everything sees the saved settings from the
 # start. See settings.load() for which source wins.
 settings.load()
@@ -56,7 +76,6 @@ from topics import bertopic_model
 from topics import bertopic_runs
 from ui import chart_viewer
 import en_core_web_lg
-from ui import macos
 from core import model_storage
 from tags import tag_normalizer
 from ui import theme
@@ -78,6 +97,7 @@ from ui.utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thr
 from ui.widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 from core.wrangler import DataWrangler, process_progress
 
+splash.message("Loading the language model…")
 nlp = en_core_web_lg.load()
 stop_words: List[str] = stopwords.words("english")
 
@@ -104,7 +124,7 @@ class MainWindow(QMainWindow, QDialog):
         allocator (LatentDirichletAllocator): An instance of the LatentDirichletAllocator for topic modeling.
         main_layout (QVBoxLayout): The main layout of the application.
         instruction_layout (QVBoxLayout): Layout for displaying instructions and warnings.
-        data_entry_layout (QVBoxLayout): The Topic Modeling tab's cards.
+        data_entry_layout (QHBoxLayout): The Topic Modeling tab's two columns of cards.
         ticket_file_button (Button): Button for selecting the ticket file.
         comments_dir_button (Button): Button for selecting the comments directory.
         process_button (Button): Button for processing the data.
@@ -156,7 +176,7 @@ class MainWindow(QMainWindow, QDialog):
         # Main layout
         self.main_layout = QVBoxLayout()
         self.instruction_layout = QVBoxLayout()
-        self.data_entry_layout = QVBoxLayout()
+        self.data_entry_layout = QHBoxLayout()
 
         # GUI Elements
         self.init_ui_components()
@@ -186,11 +206,8 @@ class MainWindow(QMainWindow, QDialog):
         # Instructions and warnings
         instruction_label = hint(
             "Choose the ticket file from the Zendesk Tickets API and the directory of "
-            "JSON comments for each ticket, then Process Data. Write Tickets to MongoDB "
-            "loads them into the decision engine's tickets collection (needs Mongo URI "
-            "in Settings; Preferences on macOS). Optionally choose the Zendesk Jira links "
-            "export too (one or more pages): its links are added to the tickets after "
-            "they're written."
+            "JSON comments for each ticket. Optionally choose the Zendesk Jira links "
+            "export too (one or more pages)."
         )
         warning_label = hint(
             "Ticket and comment files must be in JSON format.", role="warning"
@@ -200,17 +217,17 @@ class MainWindow(QMainWindow, QDialog):
         self.instruction_layout.addWidget(warning_label)
 
         # Buttons
-        self.ticket_file_button = Button("Select Path to Ticket File")
+        self.ticket_file_button = Button("Choose…")
         self.ticket_file = LineEdit("Ticket file")
         self.ticket_file.setPlaceholderText("Not chosen yet")
 
-        self.comments_dir_button = Button("Select Path to Comments Directory")
+        self.comments_dir_button = Button("Choose…")
         self.comments_dir = LineEdit("Comments")
         self.comments_dir.setPlaceholderText("Not chosen yet")
 
         # Optional: the Zendesk Jira links export pages, imported after the tickets.
         self.jira_links_paths: List[str] = []
-        self.jira_links_button = Button("Select Jira Links Files (Optional)")
+        self.jira_links_button = Button("Choose…")
         self.jira_links_clear_button = Button("Clear")
         self.jira_links_file = LineEdit("Jira links")
         self.jira_links_file.setPlaceholderText("Optional: not chosen")
@@ -243,8 +260,8 @@ class MainWindow(QMainWindow, QDialog):
         self.bertopic_runs_button.clicked.connect(self.show_previous_bertopic_run)
         self.train_model_button.setEnabled(False)
 
-        # The training inputs, side by side
-        self.form_layout = QHBoxLayout()
+        # The training inputs, one above the other
+        self.form_layout = QVBoxLayout()
         self.num_topics_input = LineEdit("Number of Topics")
         self.iterations_input = LineEdit("Iterations")
         self.passes_input = LineEdit("Passes")
@@ -272,7 +289,8 @@ class MainWindow(QMainWindow, QDialog):
         self.log_output.setPlainText(
             f"Welcome, {os.getenv('USER', 'Learnosity Support Engineer')}!! Starting Lasso on {datetime.now().strftime('%A, %B %m, %Y')} at {datetime.now().strftime('%I:%M %p')}. \n Errors, logs and standard output will be show here... \n Well What Are You Waiting For?!?! Get to Work!"
         )
-        # Arrange layout: one card per step, ticket data first.
+        # Arrange layout: the ticket data on the left, the two topic models
+        # stacked on the right, each column filling the tab's height.
         data_card = Card("Ticket Data")
         data_card.body.addLayout(self.instruction_layout)
         for field, button in [
@@ -288,34 +306,57 @@ class MainWindow(QMainWindow, QDialog):
         jira_row.addWidget(self.jira_links_clear_button)
         jira_row.addWidget(self.jira_links_button)
         data_card.body.addLayout(jira_row)
-        data_card.body.addLayout(button_row(self.process_button, self.mongo_button))
+        # The two things to do with the files, each explained, at the card's foot.
+        data_card.body.addStretch()
+        data_card.body.addLayout(button_row(self.process_button))
+        data_card.body.addWidget(
+            hint(
+                "Cleans the tickets and their comments into a corpus and saves it as "
+                "local JSON files, ready for the LDA model. Nothing is written to MongoDB."
+            )
+        )
+        data_card.body.addSpacing(8)
+        data_card.body.addLayout(button_row(self.mongo_button))
+        data_card.body.addWidget(
+            hint(
+                "Stores the tickets, with their comments and any Jira links, in MongoDB "
+                "for the Decision Engine and BERTopic. Re-running only adds what's new. "
+                "Needs Mongo URI in Settings (Preferences on macOS)."
+            )
+        )
 
         lda_card = Card("LDA Topic Model")
         lda_card.body.addWidget(disabled_notice)
         lda_card.body.addLayout(self.form_layout)
+        lda_card.body.addStretch()
         lda_card.body.addLayout(
-            button_row(
-                self.train_model_button,
-                self.previous_runs_button,
-                self.assign_topics_button,
-            )
+            button_row(self.train_model_button, self.previous_runs_button)
         )
+        lda_card.body.addLayout(button_row(self.assign_topics_button))
 
         bertopic_card = Card("Embedding Topics (BERTopic)")
-        bertopic_card.body.addWidget(hint("Trains on the tickets in MongoDB."))
-        bertopic_card.body.addLayout(
-            button_row(self.bertopic_button, self.bertopic_runs_button)
+        bertopic_card.body.addWidget(
+            hint(
+                "Trains on the tickets in MongoDB (Write Tickets to MongoDB puts them "
+                "there), using their embeddings rather than the processed files."
+            )
         )
+        bertopic_card.body.addStretch()
+        bertopic_card.body.addLayout(button_row(self.bertopic_button))
+        bertopic_card.body.addLayout(button_row(self.bertopic_runs_button))
+
+        models_column = QVBoxLayout()
+        models_column.setSpacing(12)
+        models_column.addWidget(lda_card, stretch=1)
+        models_column.addWidget(bertopic_card, stretch=1)
 
         self.data_entry_layout.setSpacing(12)
-        self.data_entry_layout.addWidget(data_card)
-        self.data_entry_layout.addWidget(lda_card)
-        self.data_entry_layout.addWidget(bertopic_card)
-        self.data_entry_layout.addStretch()
+        self.data_entry_layout.addWidget(data_card, stretch=1)
+        self.data_entry_layout.addLayout(models_column, stretch=1)
 
         # Topic modeling and the decision engine each get a tab; the log opens
         # in its own window so the tabs get the full height. The topic tab
-        # scrolls when the window is too short for its three cards.
+        # scrolls when the window is too small for its cards.
         topic_page = QWidget()
         topic_page.setLayout(self.data_entry_layout)
         topic_tab = use_si_scrollbars(QScrollArea())
@@ -1598,25 +1639,21 @@ class MainWindow(QMainWindow, QDialog):
         self.notify_user_of_error((False, message))
 
 
-# The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
-ICON_PATH = (
-    pathlib.Path(sys._MEIPASS) / "assets"
-    if settings.is_frozen()
-    else pathlib.Path(__file__).resolve().parents[1] / "packaging"
-) / "icon.png"
-
-
 def main() -> int:
-    # Before the QApplication: the macOS menu bar reads the name when it starts.
-    macos.set_app_name("Lasso")
-    app = QApplication(sys.argv)
+    # Created above, with the splash, when run as the app.
+    app = QApplication.instance()
+    if app is None:
+        macos.set_app_name("Lasso")
+        app = QApplication(sys.argv)
     app.setApplicationName("Lasso")
     app.setWindowIcon(QIcon(str(ICON_PATH)))
     theme.apply(app)
+    splash.message("Setting up the window…")
     window = MainWindow("Lasso — Support Ticket Triage")
     app.aboutToQuit.connect(window.join_threads_on_quit)
     app.aboutToQuit.connect(chart_viewer.shutdown)
     window.show()
+    splash.finish(window)
     QTimer.singleShot(0, window.prompt_for_missing_settings)
     return app.exec_()
 
