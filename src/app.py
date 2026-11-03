@@ -62,7 +62,12 @@ from tags import tag_normalizer
 from ui import theme
 from topics import topic_store
 from ui.dialogs.bertopic_dialog import BertopicOptionsDialog, BertopicResultsDialog
-from decision_engine.persistence import get_database, reset_clients
+from decision_engine import jira_links
+from decision_engine.persistence import (
+    get_database,
+    get_tickets_collection,
+    reset_clients,
+)
 from topics.LDA_logic import LatentDirichletAllocator, stopwords
 from ui.dialogs.results_dialog import ResultsDialog
 from ui.dialogs.settings_dialog import SettingsDialog
@@ -182,7 +187,9 @@ class MainWindow(QMainWindow, QDialog):
             "Choose the ticket file from the Zendesk Tickets API and the directory of "
             "JSON comments for each ticket, then Process Data. Write Tickets to MongoDB "
             "loads them into the decision engine's tickets collection (needs Mongo URI "
-            "in Settings; Preferences on macOS)."
+            "in Settings; Preferences on macOS). Optionally choose the Zendesk Jira links "
+            "export too (one or more pages): its links are added to the tickets after "
+            "they're written."
         )
         warning_label = hint(
             "Ticket and comment files must be in JSON format.", role="warning"
@@ -200,6 +207,13 @@ class MainWindow(QMainWindow, QDialog):
         self.comments_dir = LineEdit("Comments")
         self.comments_dir.setPlaceholderText("Not chosen yet")
 
+        # Optional: the Zendesk Jira links export pages, imported after the tickets.
+        self.jira_links_paths: List[str] = []
+        self.jira_links_button = Button("Select Jira Links Files (Optional)")
+        self.jira_links_clear_button = Button("Clear")
+        self.jira_links_file = LineEdit("Jira links")
+        self.jira_links_file.setPlaceholderText("Optional: not chosen")
+
         self.process_button = Button("Process Data", primary=True)
         self.mongo_button = Button("Write Tickets to MongoDB")
         self.train_model_button = Button("Train Model", primary=True)
@@ -212,9 +226,13 @@ class MainWindow(QMainWindow, QDialog):
 
         self.comments_dir.setReadOnly(True)
         self.ticket_file.setReadOnly(True)
+        self.jira_links_file.setReadOnly(True)
+        self.jira_links_clear_button.setEnabled(False)
 
         self.ticket_file_button.clicked.connect(self.select_ticket_file)
         self.comments_dir_button.clicked.connect(self.select_comments_dir)
+        self.jira_links_button.clicked.connect(self.select_jira_links_file)
+        self.jira_links_clear_button.clicked.connect(self.clear_jira_links_file)
         self.process_button.clicked.connect(self.init_start_process)
         self.mongo_button.clicked.connect(self.start_mongo_worker)
         self.train_model_button.clicked.connect(self.start_allocator_worker)
@@ -264,6 +282,11 @@ class MainWindow(QMainWindow, QDialog):
             row.addWidget(field, stretch=1)
             row.addWidget(button)
             data_card.body.addLayout(row)
+        jira_row = QHBoxLayout()
+        jira_row.addWidget(self.jira_links_file, stretch=1)
+        jira_row.addWidget(self.jira_links_clear_button)
+        jira_row.addWidget(self.jira_links_button)
+        data_card.body.addLayout(jira_row)
         data_card.body.addLayout(button_row(self.process_button, self.mongo_button))
 
         lda_card = Card("LDA Topic Model")
@@ -819,14 +842,31 @@ class MainWindow(QMainWindow, QDialog):
                 (False, f"Error: Could not read the ticket file: {e}")
             )
             return
+        # Read and check every page before writing anything, so a bad links
+        # file stops the run with nothing written.
+        jira = None
+        if self.jira_links_paths:
+            try:
+                links = [
+                    link
+                    for path in self.jira_links_paths
+                    for link in jira_links.read_export(path)
+                ]
+            except (OSError, ValueError) as e:  # JSONDecodeError is a ValueError
+                self.notify_user_of_error(
+                    (False, f"Error: Could not read the Jira links file: {e}")
+                )
+                return
+            jira = (len(links), jira_links.links_by_ticket(links))
 
-        self.mongo_ticket_count = len(tickets)
+        # Progress covers the tickets, then each ticket with links.
+        self.mongo_ticket_count = len(tickets) + (len(jira[1]) if jira else 0)
         self.mongo_button.setEnabled(False)
         self.show_progress_bar("Writing Tickets to MongoDB...")
 
         self.mongo_thread = worker_thread()
         self.mongo_worker = ThreadWorker(
-            lambda: self.wrangler.write_tickets_to_mongo(tickets),
+            lambda: self._write_tickets_and_links(tickets, jira),
             "Writing tickets to MongoDB",
         )
         self.mongo_worker.moveToThread(self.mongo_thread)
@@ -839,6 +879,37 @@ class MainWindow(QMainWindow, QDialog):
         self.mongo_worker.error.connect(self.on_mongo_error)
         self.mongo_thread.started.connect(self.mongo_worker.run)
         self.mongo_thread.start()
+
+    def _write_tickets_and_links(self, tickets: list, jira: Optional[tuple]) -> dict:
+        """Runs on the worker thread: writes the tickets, then merges the Jira
+        links (when files were chosen) into the same collection.
+
+        Args:
+            jira: (how many links were read, links_by_ticket of them), or None.
+        """
+        # One collection for both, so a settings change mid-run can't split them.
+        collection = get_tickets_collection()
+        summaries = self.wrangler.write_tickets_to_mongo(tickets, collection)
+        jira_summary = None
+        if jira is not None:
+            link_count, by_ticket = jira
+            self.wrangler.worker_status.emit("Storing Jira links")
+            try:
+                updated = jira_links.store_links(
+                    collection,
+                    by_ticket,
+                    progress=lambda done: self.wrangler.mongo_write_progress.emit(
+                        len(tickets) + done
+                    ),
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"The tickets were written, but storing the Jira links stopped "
+                    f"partway: {e}. Run Write Tickets to MongoDB again with the same "
+                    f"files to finish; links already stored are kept."
+                ) from e
+            jira_summary = jira_links.describe_import(link_count, len(by_ticket), updated)
+        return {"summaries": summaries, "jira": jira_summary}
 
     def update_mongo_progress(self, written: int):
         self.update_training_progress_bar(
@@ -856,9 +927,10 @@ class MainWindow(QMainWindow, QDialog):
         self.mongo_worker = None
         self.mongo_button.setEnabled(True)
 
-    def on_mongo_finished(self, summaries: list):
+    def on_mongo_finished(self, result: dict):
         """Cleans up the thread and summarises what was written."""
         self._stop_mongo_thread()
+        summaries = result["summaries"]
         if self._close_pending:
             logger.info(
                 f"MongoDB write finished while closing ({len(summaries)} tickets)."
@@ -872,6 +944,8 @@ class MainWindow(QMainWindow, QDialog):
             f"Wrote {len(summaries)} tickets to MongoDB: "
             f"{inserted} new, {updated} updated, {new_comments} new comments."
         )
+        if result["jira"]:
+            message += f"\n{result['jira']}"
         logger.success(message)
         QMessageBox.information(self, "MongoDB Write Complete", message)
 
@@ -960,6 +1034,26 @@ class MainWindow(QMainWindow, QDialog):
         if dir_path := QFileDialog.getExistingDirectory():
             logger.info(f"Comments Dir Selected: {dir_path}")
             self.wrangler.comments_dir = dir_path
+
+    def select_jira_links_file(self):
+        """Chooses the optional Zendesk Jira links export (JSON), one or more
+        pages, that Write Tickets to MongoDB imports after writing the tickets."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Jira Links Files", "", "JSON files (*.json)"
+        )
+        if paths:
+            logger.info(f"Jira Links Files Selected: {', '.join(paths)}")
+            self.jira_links_paths = paths
+            self.jira_links_file.setText(
+                paths[0] if len(paths) == 1 else f"{len(paths)} files: {', '.join(paths)}"
+            )
+            self.jira_links_clear_button.setEnabled(True)
+
+    def clear_jira_links_file(self):
+        """Stops Write Tickets to MongoDB from importing Jira links."""
+        self.jira_links_paths = []
+        self.jira_links_file.clear()
+        self.jira_links_clear_button.setEnabled(False)
 
     def present_results(self, run: dict) -> None:
         """

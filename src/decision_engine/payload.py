@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from .authors import author_role, SUPPORT
-from .jira_links import JIRA_LINKS_KEY
+from .jira_links import JIRA_LINKS_KEY, is_issue_key, is_timestamp
 
 
 def _iso(value):
@@ -18,6 +18,27 @@ def wrap_untrusted(text: Optional[str]) -> str:
     can't close the wrapper early and have what follows read as instructions.
     """
     return f"<customer_text>{html.escape(text or '', quote=False)}</customer_text>"
+
+
+def jira_link_data(ticket_doc: dict) -> List[dict]:
+    """The ticket's Jira links as the model sees them. The values come from an
+    imported file, so only well-formed ones are shown: a key, a numeric ID or
+    a time can't carry instructions. Imports already reject anything else;
+    this also covers links stored before that check."""
+    shown = []
+    for link in ticket_doc.get(JIRA_LINKS_KEY) or []:
+        if not isinstance(link, dict):
+            continue
+        key, issue_id = link.get("issue_key"), str(link.get("issue_id") or "")
+        if is_issue_key(key):
+            issue = key
+        elif issue_id.isascii() and issue_id.isdigit():
+            issue = f"issue {issue_id}"
+        else:
+            continue
+        linked_at = link.get("linked_at")
+        shown.append({"issue": issue, "linked_at": linked_at if is_timestamp(linked_at) else None})
+    return shown
 
 
 def support_comment_times(ticket_doc: dict) -> List[str]:
@@ -69,13 +90,7 @@ def build_ticket_payload(ticket_doc: dict, as_of: Optional[datetime] = None) -> 
         "created_at": _iso(ticket_doc.get("created_at")),
         "updated_at": _iso(ticket_doc.get("updated_at")),
         # Link records only: when each issue was linked, never its status.
-        "jira_links": [
-            {
-                "issue": link.get("issue_key") or f"issue {link.get('issue_id')}",
-                "linked_at": link.get("linked_at"),
-            }
-            for link in ticket_doc.get(JIRA_LINKS_KEY) or []
-        ],
+        "jira_links": jira_link_data(ticket_doc),
         "transcript": [
             {
                 "author": c.get("author"),
