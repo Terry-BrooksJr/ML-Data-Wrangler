@@ -331,12 +331,19 @@ def draft_lessons_learned(
     week: datetime,
     summary_text: str,
     case_ids: Iterable = (),
+    cases: Optional[Collection] = None,
 ) -> ObjectId:
     """Stores an unapproved lessons_learned entry built on that week's reviewed
     log entries and the manual-triage cases resolved that week (case_ids).
 
+    Args:
+        cases: The triage cases collection, to recheck case_ids; needed when
+            any are given.
+
     Raises:
-        ValueError: if the week has neither reviewed entries nor resolved cases.
+        ValueError: if the week has neither reviewed entries nor resolved cases,
+            or a case in case_ids is no longer resolved that week (reopened
+            since the summary was written).
     """
     week = week_of(week)
     if not summary_text.strip():
@@ -346,6 +353,20 @@ def draft_lessons_learned(
         for entry in log.find({"week_of": week, "reviewed": True}, {"_id": 1})
     ]
     case_ids = list(case_ids)
+    if case_ids:
+        if cases is None:
+            raise ValueError("cases is required to check case_ids")
+        still = {
+            c["_id"]
+            for c in cases.find(
+                {"_id": {"$in": case_ids}, "status": "resolved", "week_of": week}, {"_id": 1}
+            )
+        }
+        if len(still) != len(set(case_ids)):
+            raise ValueError(
+                f"{len(set(case_ids) - still)} triage case(s) are no longer resolved in the week of "
+                f"{week:%Y-%m-%d}; refresh and check the summary before saving it."
+            )
     if not log_ids and not case_ids:
         raise ValueError(
             f"No reviewed misclassifications or resolved triage cases for the week of {week:%Y-%m-%d}"

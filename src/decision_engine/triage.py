@@ -89,6 +89,10 @@ OTHER_COLLECTIONS = {
     "AB_RESULT_COLLECTION": "ab_results",
     "MISCLASSIFICATION_COLLECTION": "misclassification_log",
     "LESSONS_COLLECTION": "lessons_learned",
+    "TOPIC_RUNS_COLLECTION": "topic_modeling_run_log",
+    "BERTOPIC_RUNS_COLLECTION": "bertopic_run_log",
+    "TAG_RUNS_COLLECTION": "tag_normalization_run_log",
+    "NORMALIZED_TAGS_COLLECTION": "normalized_tags",
 }
 
 
@@ -537,13 +541,15 @@ def _sweep_unflagged(tickets: Collection, cases: Collection) -> int:
     """Opens cases for manual-triage reviews of any age that have neither a
     case nor a pending flag (opening the case and flagging it both failed).
     Reads only review IDs across the tickets, and runs at most once per
-    SWEEP_INTERVAL.
+    SWEEP_INTERVAL; a sweep that fails, or leaves a case it couldn't open,
+    is tried again on the next refresh.
     """
     global _last_sweep
     now = datetime.now(timezone.utc)
     if _last_sweep is not None and now - _last_sweep < SWEEP_INTERVAL:
         return 0
-    _last_sweep = now
+    # Narrows the first $match to tickets with a manual-triage review.
+    tickets.create_index("agent_reviews.classification")
     reviews = list(
         tickets.aggregate(
             [
@@ -561,7 +567,7 @@ def _sweep_unflagged(tickets: Collection, cases: Collection) -> int:
             allowDiskUse=True,
         )
     )
-    opened = 0
+    opened = failed = 0
     for start in range(0, len(reviews), 1000):
         batch = reviews[start : start + 1000]
         have = {
@@ -578,7 +584,10 @@ def _sweep_unflagged(tickets: Collection, cases: Collection) -> int:
                 if review is not None and open_case(cases, missing["zendesk_id"], review, review, tickets=tickets):
                     opened += 1
             except Exception as e:
+                failed += 1
                 logger.warning(f"{missing['zendesk_id']}: still couldn't open its manual-triage case: {e}")
+    if not failed:
+        _last_sweep = now
     return opened
 
 
@@ -871,7 +880,11 @@ def finish_pending(tickets: Collection, cases: Collection, case: dict) -> bool:
     if pushed.matched_count or tickets.find_one(
         {"zendesk_id": zendesk_id, "agent_reviews.review_id": entry["review_id"]}, {"_id": 1}
     ):
-        cases.update_one({"_id": case["_id"]}, {"$unset": {"pending_review": ""}})
+        # Only this review's marker: a newer re-run may have set its own since.
+        cases.update_one(
+            {"_id": case["_id"], "pending_review.entry.review_id": entry["review_id"]},
+            {"$unset": {"pending_review": ""}},
+        )
         return True
     before = pending.get("before") or {}
     restore = {
@@ -880,7 +893,7 @@ def finish_pending(tickets: Collection, cases: Collection, case: dict) -> bool:
     }
     if before:
         restore["$set"] = before
-    cases.update_one({"_id": case["_id"]}, restore)
+    cases.update_one({"_id": case["_id"], "pending_review.entry.review_id": entry["review_id"]}, restore)
     logger.warning(f"{zendesk_id}: the ticket is gone; re-run {entry['review_id']} taken back off its case.")
     return False
 

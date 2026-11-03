@@ -634,7 +634,7 @@ def test_review_added_marks_only_the_selected_review(qapp, configured, dialogs, 
 def test_status_says_when_reviews_are_capped(qapp, configured, monkeypatch, stored):
     monkeypatch.setattr(triage_tab, "REVIEW_ROW_LIMIT", 2)
     tab = make_tab(stored)
-    tab._show_loaded((1, recent_reviews(stored, limit=2)))
+    tab._show_loaded((1, recent_reviews(stored, limit=2), 0))
     assert tab.status_label.text() == (
         "1 ticket(s) awaiting review. Showing the newest 2 reviews."
     )

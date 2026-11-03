@@ -97,6 +97,8 @@ COLUMNS = [
 SUBJECT_MAX_WIDTH = 280
 # The most reviews the table loads: past this, its widgets use too much memory.
 REVIEW_ROW_LIMIT = 5000
+# The most older reviews with an open manual-triage case added after those.
+OPEN_CASE_ROW_LIMIT = 1000
 # The Decision column's text for each manual outcome; "pending" shows blank.
 DECISION_LABELS = {"good": "Correct", "bad": "Misclassified"}
 CONNECTION_HINT = (
@@ -147,6 +149,20 @@ def count_awaiting(tickets: Collection) -> int:
     return tickets.count_documents({"awaiting_review": True, **persistence.REVIEWABLE})
 
 
+# One row per agent_reviews entry, after $unwind.
+_ROW_PROJECTION = {
+    "$project": {
+        "_id": 0,
+        "zendesk_id": 1,
+        "subject": 1,
+        "outcomes": 1,
+        REVIEW_ADDED_KEY: 1,
+        ADDED_REVIEWS_KEY: 1,
+        "review": "$agent_reviews",
+    }
+}
+
+
 def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[dict]:
     """Returns the newest `limit` reviews across all tickets, newest first.
 
@@ -159,19 +175,40 @@ def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[d
         {"$unwind": "$agent_reviews"},
         {"$sort": {"agent_reviews.reviewed_at": -1}},
         {"$limit": limit},
-        {
-            "$project": {
-                "_id": 0,
-                "zendesk_id": 1,
-                "subject": 1,
-                "outcomes": 1,
-                REVIEW_ADDED_KEY: 1,
-                ADDED_REVIEWS_KEY: 1,
-                "review": "$agent_reviews",
-            }
-        },
+        _ROW_PROJECTION,
     ]
     # A large sort can pass Atlas's in-memory cap, so let it spill to disk.
+    return list(tickets.aggregate(pipeline, allowDiskUse=True))
+
+
+def open_case_reviews(
+    tickets: Collection, rows: List[dict], limit: int = OPEN_CASE_ROW_LIMIT
+) -> List[dict]:
+    """Rows for the open manual-triage cases that none of `rows` belongs to
+    (newer reviews pushed them past REVIEW_ROW_LIMIT), so they can still be
+    given evidence and re-run. Each is the case's latest review, newest
+    first, in recent_reviews' row shape.
+    """
+    cases = triage.get_cases_collection(tickets.database)
+    shown = {row["review"].get("review_id") for row in rows}
+    latest = []
+    for case in cases.find(
+        {"status": triage.OPEN}, {"review_id": 1, "reruns.review_id": 1, "created_at": 1}
+    ).sort("created_at", -1):
+        ids = [case["review_id"], *(r["review_id"] for r in case.get("reruns") or [])]
+        if not shown.intersection(ids):
+            latest.append(ids[-1])
+            if len(latest) >= limit:
+                break
+    if not latest:
+        return []
+    pipeline = [
+        {"$match": {"agent_reviews.review_id": {"$in": latest}}},
+        {"$unwind": "$agent_reviews"},
+        {"$match": {"agent_reviews.review_id": {"$in": latest}}},
+        {"$sort": {"agent_reviews.reviewed_at": -1}},
+        _ROW_PROJECTION,
+    ]
     return list(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
@@ -961,7 +998,9 @@ class TriageTab(QWidget):
 
         def load():
             tickets = self.collection_factory()
-            return count_awaiting(tickets), attach_cases(tickets, recent_reviews(tickets))
+            rows = recent_reviews(tickets)
+            older = open_case_reviews(tickets, rows)
+            return count_awaiting(tickets), attach_cases(tickets, rows + older), len(older)
 
         self._run(load, "Loading reviews from MongoDB", self._show_loaded)
 
@@ -969,13 +1008,15 @@ class TriageTab(QWidget):
         """Displays the result of a refresh.
 
         Args:
-            loaded: A (awaiting_count, review_rows) tuple, as produced by the
-                refresh task.
+            loaded: A (awaiting_count, review_rows, older_open_cases) tuple,
+                as produced by the refresh task; older_open_cases rows are
+                at the end of review_rows (open_case_reviews).
         """
-        awaiting, rows = loaded
+        awaiting, rows, older = loaded
         status = f"{awaiting} ticket(s) awaiting review."
-        if len(rows) >= REVIEW_ROW_LIMIT:
-            status += f" Showing the newest {REVIEW_ROW_LIMIT:,} reviews."
+        if len(rows) - older >= REVIEW_ROW_LIMIT:
+            status += f" Showing the newest {REVIEW_ROW_LIMIT:,} reviews"
+            status += f", and {older:,} older open manual-triage case(s)." if older else "."
         self.status_label.setText(status)
         self._rows = rows
         self._fill_table()

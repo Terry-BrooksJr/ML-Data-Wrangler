@@ -621,10 +621,22 @@ def test_resolved_cases_feed_lessons_learned(monkeypatch, tickets, cases):
         "It answered: Has LRN-1234 been released?."
     )
     log, lessons = feedback.get_feedback_collections(tickets.database)
-    lesson_id = feedback.draft_lessons_learned(log, lessons, week, summary, [case["_id"]])
+    lesson_id = feedback.draft_lessons_learned(log, lessons, week, summary, [case["_id"]], cases)
     assert lessons.find_one({"_id": lesson_id})["based_on_case_ids"] == [case["_id"]]
     with pytest.raises(ValueError, match="resolved triage cases"):
         feedback.draft_lessons_learned(log, lessons, week, summary)
+
+
+def test_a_case_reopened_since_loading_is_not_drafted_as_resolved(monkeypatch, tickets, cases):
+    case = resolve_a_case(monkeypatch, tickets, cases)
+    week = datetime.now(timezone.utc)
+    summary = feedback.suggest_lessons_summary([], triage.resolved_cases_for_week(cases, week))
+    cases.update_one({"_id": case["_id"]}, {"$set": {"status": triage.OPEN}})
+    log, lessons = feedback.get_feedback_collections(tickets.database)
+
+    with pytest.raises(ValueError, match="no longer resolved"):
+        feedback.draft_lessons_learned(log, lessons, week, summary, [case["_id"]], cases)
+    assert lessons.count_documents({}) == 0
 
 
 def test_a_rerun_marked_correct_is_exported_with_its_evidence(monkeypatch, tickets, cases, tmp_path):
@@ -1215,3 +1227,56 @@ def test_any_pypdf_failure_is_a_rejection(monkeypatch):
     monkeypatch.setattr(pypdf, "PdfReader", broken)
     with pytest.raises(evidence.EvidenceError, match="can't be read \\(KeyError"):
         evidence.extract(evidence.AHA, b"%PDF-1.7 whatever")
+
+
+def test_finishing_an_older_rerun_keeps_a_newer_ones_pending_review(monkeypatch, tickets, cases):
+    case = open_case(monkeypatch, tickets, cases)
+    add_jira(cases, case)
+    arbiter_reply(monkeypatch, SOLVE)
+    real_finish = stop_after_the_case(monkeypatch)
+    with pytest.raises(RuntimeError):
+        triage.rerun_case(tickets, cases, case["_id"])
+    monkeypatch.setattr(triage, "finish_pending", real_finish)
+    stale = cases.find_one({})
+    assert triage.finish_pending(tickets, cases, stale)
+    newer = {"entry": {"review_id": "newer-rerun"}, "before": {}}
+    cases.update_one({"_id": case["_id"]}, {"$set": {"pending_review": newer}})
+
+    assert triage.finish_pending(tickets, cases, stale)  # a second worker with the old snapshot
+
+    assert cases.find_one({})["pending_review"] == newer
+
+
+def test_the_cases_collection_cant_be_a_tag_collection(monkeypatch, tickets):
+    monkeypatch.setenv("TRIAGE_CASES_COLLECTION", "normalized_tags")
+    with pytest.raises(ValueError, match="same as NORMALIZED_TAGS_COLLECTION"):
+        triage.get_cases_collection(tickets.database)
+
+
+def test_an_open_case_past_the_row_limit_is_still_listed(monkeypatch, tickets, cases):
+    from ui.tabs import triage_tab
+
+    case = open_case(monkeypatch, tickets, cases)
+    assert triage_tab.open_case_reviews(tickets, triage_tab.recent_reviews(tickets)) == []
+
+    rows = triage_tab.open_case_reviews(tickets, [])  # newer reviews filled the table
+
+    assert [row["review"]["review_id"] for row in rows] == [case["review_id"]]
+    cases.update_one({"_id": case["_id"]}, {"$set": {"status": triage.RESOLVED}})
+    assert triage_tab.open_case_reviews(tickets, []) == []
+
+
+def test_a_sweep_that_failed_runs_again_next_refresh(monkeypatch, tickets, cases):
+    monkeypatch.setattr(triage, "open_case", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(triage, "mark_case_pending", lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
+    review_manual_ticket(monkeypatch, tickets)
+    monkeypatch.setattr(triage, "_last_sweep", None)
+
+    assert triage.recover_missing_cases(tickets, cases) == 0
+    assert triage._last_sweep is None
+    monkeypatch.undo()
+    monkeypatch.setattr(triage, "_last_sweep", None)
+    monkeypatch.delenv("MODEL_BUCKET", raising=False)
+    assert triage.recover_missing_cases(tickets, cases) == 1
+    assert triage._last_sweep is not None
+    assert "agent_reviews.classification_1" in tickets.index_information()

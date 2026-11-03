@@ -435,7 +435,8 @@ class WeeklyReviewDialog(QDialog):
 
         def draft():
             log, lessons = self.collections()
-            return feedback.draft_lessons_learned(log, lessons, week, text, case_ids)
+            cases = self.case_collection() if case_ids else None
+            return feedback.draft_lessons_learned(log, lessons, week, text, case_ids, cases)
 
         def done(_):
             logger.success(f"Lessons learned drafted for the week of {week:%Y-%m-%d}.")
