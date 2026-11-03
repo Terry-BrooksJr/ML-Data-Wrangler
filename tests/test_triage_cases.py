@@ -1356,3 +1356,21 @@ def test_the_trail_folder_can_never_be_a_model_run():
 
     with pytest.raises(ValueError):
         model_storage.check_run_id(triage.TRAIL_FOLDER.rstrip("/"))
+
+
+@mock_aws
+def test_a_trail_kept_on_a_pending_review_is_moved_too(monkeypatch, tickets, cases):
+    real_open = triage.open_case
+    monkeypatch.setattr(triage, "open_case", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    review_manual_ticket(monkeypatch, tickets)  # storage off: the trail stays on the review
+    monkeypatch.setattr(triage, "open_case", real_open)
+    assert triage.kept_trail_count(cases) == 0
+    assert triage.kept_trail_count(cases, tickets) == 1
+    use_storage(monkeypatch)
+
+    assert triage.upload_kept_trails(cases, tickets) == 1
+
+    case = cases.find_one({})
+    assert case["trail"]["key"] == f"topic-models/_triage-cases/{case['_id']}.json"
+    assert triage.load_trail(case)["first"]["thinking"] == ["I weighed S3 against R1."]
+    assert triage.kept_trail_count(cases, tickets) == 0

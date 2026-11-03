@@ -1796,7 +1796,7 @@ def test_retry_trail_uploads_reports_a_failure_and_a_success(qapp, configured, m
     select_classification(tab, "manual_triage")
     assert "its S3 upload failed: use Retry Trail Uploads" in tab.detail.toPlainText()
 
-    def refuse(cases):
+    def refuse(cases, tickets=None):
         raise triage.TrailUploadFailed("Couldn't upload s3://models/x.json (closed).")
 
     monkeypatch.setattr(triage, "upload_kept_trails", refuse)
@@ -1805,9 +1805,24 @@ def test_retry_trail_uploads_reports_a_failure_and_a_success(qapp, configured, m
     assert dialogs[-1][0] == "warning"
     assert "1 case(s) still have a trail kept in MongoDB" in dialogs[-1][1]
 
-    monkeypatch.setattr(triage, "upload_kept_trails", lambda cases: 1)
+    monkeypatch.setattr(triage, "upload_kept_trails", lambda cases, tickets=None: 1)
     done = []
     monkeypatch.setattr(tab, "_feedback_done", done.append)
     tab.retry_trail_uploads()
     wait_until_idle(qapp, tab)
     assert done == ["Moved 1 reasoning trail(s) to S3."]
+
+
+def test_a_reruns_failed_upload_is_shown():
+    lines = triage_tab.format_case(
+        {
+            "status": triage.OPEN,
+            "route": triage.ABSTAINED,
+            "trail": {"stored": "s3", "bucket": "b", "key": "k"},
+            "reruns": [
+                {"classification": "manual_triage", "confidence": 40, "model": "arbiter",
+                 "trail": {"stored": "inline", "trail": {}, "upload_error": "closed"}},
+            ],
+        }
+    )
+    assert "  Re-run 1's reasoning trail is kept in MongoDB (its S3 upload failed: use Retry Trail Uploads)" in lines

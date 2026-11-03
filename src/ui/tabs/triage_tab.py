@@ -267,6 +267,11 @@ def format_case(case: dict) -> List[str]:
             f"Re-run {n}: {rerun.get('classification')} (confidence {rerun.get('confidence')}) "
             f"on {rerun.get('model')}" + (f", {at:%Y-%m-%d %H:%M} UTC" if at else "")
         )
+        if (rerun.get("trail") or {}).get("upload_error"):
+            lines.append(
+                f"  Re-run {n}'s reasoning trail is kept in MongoDB "
+                "(its S3 upload failed: use Retry Trail Uploads)"
+            )
     return lines
 
 
@@ -1576,11 +1581,13 @@ class TriageTab(QWidget):
             return
 
         def upload():
-            cases = triage.get_cases_collection(self.collection_factory().database)
+            tickets = self.collection_factory()
+            cases = triage.get_cases_collection(tickets.database)
             try:
-                return triage.upload_kept_trails(cases), None, triage.kept_trail_count(cases)
+                moved = triage.upload_kept_trails(cases, tickets)
+                return moved, None, triage.kept_trail_count(cases, tickets)
             except triage.TrailUploadFailed as e:
-                return None, str(e), triage.kept_trail_count(cases)
+                return None, str(e), triage.kept_trail_count(cases, tickets)
 
         def done(result):
             moved, error, left = result

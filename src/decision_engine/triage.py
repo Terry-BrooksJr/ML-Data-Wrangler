@@ -336,19 +336,27 @@ def store_trail(name: str, trail: dict, inline_room: Optional[int] = None) -> di
     return kept
 
 
-def kept_trail_count(cases: Collection) -> int:
-    """How many cases have a trail (their own or a re-run's) kept in MongoDB."""
-    return cases.count_documents(_KEPT_INLINE)
+def kept_trail_count(cases: Collection, tickets: Optional[Collection] = None) -> int:
+    """How many cases have a trail (their own or a re-run's) kept in MongoDB,
+    plus, given the tickets, the reviews still holding one for a case that
+    hasn't been opened yet (mark_case_pending)."""
+    count = cases.count_documents(_KEPT_INLINE)
+    if tickets is not None:
+        count += tickets.count_documents({"agent_reviews.pending_trail.stored": "inline"})
+    return count
 
 
 _KEPT_INLINE = {"$or": [{"trail.stored": "inline"}, {"reruns.trail.stored": "inline"}]}
 
 
-def upload_kept_trails(cases: Collection) -> int:
+def upload_kept_trails(cases: Collection, tickets: Optional[Collection] = None) -> int:
     """Moves the trails kept in MongoDB (storage was off, or the upload
     failed) to S3, replacing each with its S3 record. A trail whose thinking
     was cut to fit MongoDB is uploaded as kept. Stops at the first failure,
     since the rest would most likely fail the same way.
+
+    Given the tickets, first opens the cases still pending on a review
+    (recover_missing_cases), so a trail kept on the review moves too.
 
     Returns:
         How many trails were moved.
@@ -363,6 +371,8 @@ def upload_kept_trails(cases: Collection) -> int:
         raise TrailUploadFailed(f"S3 storage isn't usable: {e}") from e
     if storage is None:
         raise TrailUploadFailed("S3 storage isn't set up: check the storage settings.")
+    if tickets is not None:
+        recover_missing_cases(tickets, cases)
     moved = 0
     for case in cases.find(_KEPT_INLINE, {"trail": 1, "reruns.review_id": 1, "reruns.trail": 1}):
         where = case.get("trail") or {}

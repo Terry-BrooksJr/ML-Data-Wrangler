@@ -197,10 +197,10 @@ tasks:
       - packaging/**/*
       - uv.lock
       - exclude: "{{.SRC}}/**/__pycache__/**"
-    generates: 
-      - dist/Lasso.app
-      - dist/Lasso
-      - dist/Lasso-*.pkg
+    # One glob for every platform's output (Lasso.app and its .pkg on macOS,
+    # Lasso/ on Linux), so neither platform waits on the other's files.
+    generates:
+      - dist/Lasso*
     cmds: 
       - cmd: packaging/build.sh
       - cmd: packaging/build_pkg.sh
