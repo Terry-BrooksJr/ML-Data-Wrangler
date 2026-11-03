@@ -55,3 +55,19 @@ def test_no_window_is_made_on_import():
     # Two guards: one puts up the splash before the slow imports, the last runs main().
     guards = [node for node in module.body if isinstance(node, ast.If)]
     assert {ast.unparse(node.test) for node in guards} == {"__name__ == '__main__'"}
+
+
+def test_scale_factor_is_set_before_each_qapplication():
+    # Qt reads QT_SCALE_FACTOR when the QApplication is created, which app.py
+    # does before ui.theme imports SiliconUI (whose import used to set it).
+    for node in ast.walk(_module()):
+        if not isinstance(node, (ast.If, ast.FunctionDef)):
+            continue
+        calls = [
+            ast.unparse(call.func)
+            for statement in node.body
+            for call in ast.walk(statement)
+            if isinstance(call, ast.Call)
+        ]
+        if "QApplication" in calls:
+            assert "scaling.use_windows_scale_factor" in calls[: calls.index("QApplication")]

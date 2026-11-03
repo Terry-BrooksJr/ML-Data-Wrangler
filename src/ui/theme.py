@@ -17,7 +17,9 @@ import sys
 with contextlib.redirect_stdout(io.StringIO()):
     # Importing siui prints a note (in Chinese) and sets QT_SCALE_FACTOR from
     # the Windows DPI. Keep stdout quiet, and keep the variable only where the
-    # library means it to apply: on Windows, if the user hadn't set it.
+    # library means it to apply: on Windows, if the user hadn't set it. app.py
+    # creates the QApplication before this import, so ui.scaling sets the same
+    # value first; here it is then kept as a user-set one.
     _user_scale = os.environ.get("QT_SCALE_FACTOR")
     import siui  # noqa: F401  (runs the library's set-up)
     from siui.core import SiColor, SiGlobal

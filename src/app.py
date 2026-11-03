@@ -48,6 +48,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ui import macos
+from ui import scaling
 from ui import splash
 
 # The packaged build bundles the icon under assets/ (see packaging/lasso.spec).
@@ -61,8 +62,10 @@ ICON_PATH = (
 # the splash up first. Only when run as the app: a "spawn" worker process
 # re-imports this module (as __mp_main__) and must not open a window.
 if __name__ == "__main__":
-    # Before the QApplication: the macOS menu bar reads the name when it starts.
+    # Before the QApplication: the macOS menu bar reads the name, and Qt the
+    # scale factor, when it starts.
     macos.set_app_name("Lasso")
+    scaling.use_windows_scale_factor()
     # Kept in a variable: an unreferenced QApplication is deleted at once.
     _app = QApplication(sys.argv)
     splash.show(_app, str(ICON_PATH))
@@ -1644,6 +1647,7 @@ def main() -> int:
     app = QApplication.instance()
     if app is None:
         macos.set_app_name("Lasso")
+        scaling.use_windows_scale_factor()
         app = QApplication(sys.argv)
     app.setApplicationName("Lasso")
     app.setWindowIcon(QIcon(str(ICON_PATH)))
