@@ -111,7 +111,7 @@ you launch from.
 uv run python src/app.py
 ```
 
-1. **Select Path to Ticket File** (`tickets-only.json`) and **Select Path to Comments Directory** (`comments/`).
+1. On the **Ticket file** and **Comments** rows, **Choose…** the ticket file (`tickets-only.json`) and the comments directory (`comments/`).
 2. **Process Data** reshapes the tickets, binds each ticket's comments and builds the corpus. It writes `completed/processed_tickets<date>.json` and `completed/corpus_<date>.json`.
 3. Enter **Number of Topics**, **Iterations** and **Passes**, then click **Train Model**. All three must be integers: at least 2 topics, fewer than 200 iterations, fewer than 20 passes.
 
