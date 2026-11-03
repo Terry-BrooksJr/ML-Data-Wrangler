@@ -73,6 +73,7 @@ from ui.dialogs.results_dialog import ResultsDialog
 from ui.dialogs.settings_dialog import SettingsDialog
 from ui.tabs.tag_tab import TagTab
 from ui.tabs.triage_tab import TriageTab
+from ui.log_window import LogWindow
 from ui.utility import LogHighlighter, QTextEditStream, ThreadWorker, worker_thread
 from ui.widgets import button_row, Button, Card, hint, LineEdit, ProgressBar, use_si_scrollbars
 from core.wrangler import DataWrangler, process_progress
@@ -312,8 +313,8 @@ class MainWindow(QMainWindow, QDialog):
         self.data_entry_layout.addWidget(bertopic_card)
         self.data_entry_layout.addStretch()
 
-        # Topic modeling and the decision engine each get a tab; the log pane
-        # sits below both so either tab's output stays visible. The topic tab
+        # Topic modeling and the decision engine each get a tab; the log opens
+        # in its own window so the tabs get the full height. The topic tab
         # scrolls when the window is too short for its three cards.
         topic_page = QWidget()
         topic_page.setLayout(self.data_entry_layout)
@@ -322,8 +323,11 @@ class MainWindow(QMainWindow, QDialog):
         topic_tab.setWidgetResizable(True)
         topic_tab.setWidget(topic_page)
 
+        self.log_window = LogWindow(self.log_output, self)
+
         self.triage_tab = TriageTab()
         self.triage_tab.idle.connect(self._finish_pending_close)
+        self.triage_tab.open_logs.connect(self.log_window.open_window)
 
         # spaCy tag grouping reuses the model already loaded for LDA.
         self.tag_tab = TagTab(
@@ -341,14 +345,10 @@ class MainWindow(QMainWindow, QDialog):
         self.tabs.addTab(self.triage_tab, "Decision Engine")
         self.tabs.addTab(self.tag_tab, "Tag Normalizer")
 
-        log_card = Card("Log")
-        log_card.body.addWidget(self.log_output)
-
         # Main layout arrangement
         self.main_layout.setContentsMargins(16, 8, 16, 16)
         self.main_layout.setSpacing(12)
-        self.main_layout.addWidget(self.tabs, stretch=3)
-        self.main_layout.addWidget(log_card, stretch=1)
+        self.main_layout.addWidget(self.tabs, stretch=1)
 
     def init_menu(self) -> None:
         """Adds the Settings… action (the app menu's Preferences… on macOS)."""
@@ -360,6 +360,12 @@ class MainWindow(QMainWindow, QDialog):
         settings_action.setShortcuts(standard or [QKeySequence("Ctrl+,")])
         settings_action.triggered.connect(self.open_settings)
         self.menuBar().addMenu("&File").addAction(settings_action)
+
+        # Other tabs say "see the log" too, so the log opens from any tab.
+        logs_action = QAction("Logs", self)
+        logs_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        logs_action.triggered.connect(self.log_window.open_window)
+        self.menuBar().addMenu("&Window").addAction(logs_action)
 
     def open_settings(self) -> None:
         """Shows the settings dialog; saved values apply to the next action."""

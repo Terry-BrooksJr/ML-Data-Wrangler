@@ -21,5 +21,6 @@
             "envManager": "ms-python.python:venv",
             "packageManager": "ms-python.python:pip"
         }
-    ]
+    ],
+    "python.terminal.useEnvFile": true
 }

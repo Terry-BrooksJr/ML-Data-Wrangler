@@ -53,7 +53,10 @@ ROUTE_LABELS = {
     ENGINE_ERROR: "the engine failed repeatedly",
 }
 EVIDENCE_KINDS = ("jira", "aha")
-TRAIL_PREFIX = "triage-cases/"
+# Trails go in this folder under the storage prefix (MODEL_PREFIX), which
+# the storage key is already allowed to write. The leading "_" keeps it
+# from ever being a model run's folder (model_storage.check_run_id).
+TRAIL_FOLDER = "_triage-cases/"
 # Above this, the trail goes to S3; without S3 its thinking is cut to fit.
 MAX_INLINE_TRAIL_BYTES = 512 * 1024
 # Extracted evidence, per entry and per case, measured as the arbiter will
@@ -268,6 +271,36 @@ def _storage():
     return cfg, model_storage.make_client(cfg)
 
 
+class TrailUploadFailed(RuntimeError):
+    """A trail couldn't be uploaded to S3."""
+
+
+def _upload_trail(cfg, client, name: str, trail: dict) -> dict:
+    """Uploads a trail and returns its {"stored": "s3", ...} record.
+
+    Raises:
+        TrailUploadFailed: the upload failed (botocore has already retried).
+    """
+    body = json.dumps(trail, ensure_ascii=False, default=str).encode("utf-8")
+    key = f"{cfg.prefix}{TRAIL_FOLDER}{name}.json"
+    try:
+        client.put_object(Bucket=cfg.bucket, Key=key, Body=body, ContentType="application/json")
+    except Exception as e:
+        raise TrailUploadFailed(
+            f"Couldn't upload s3://{cfg.bucket}/{key} ({e}). If this keeps happening, check "
+            f"that the storage key (B2_KEY_ID) may write to {cfg.prefix or 'the bucket root'}: "
+            "B2 can close the connection instead of refusing a key that isn't allowed to."
+        ) from e
+    return {
+        "stored": "s3",
+        "bucket": cfg.bucket,
+        "key": key,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "bytes": len(body),
+        "roles": sorted(r for r, e in trail.items() if e.get("raw_response")),
+    }
+
+
 def store_trail(name: str, trail: dict, inline_room: Optional[int] = None) -> dict:
     """Saves a reasoning trail and returns where it went.
 
@@ -275,41 +308,96 @@ def store_trail(name: str, trail: dict, inline_room: Optional[int] = None) -> di
     "bytes", "roles"}. Otherwise inline: {"stored": "inline", "trail": ...},
     its thinking cut so the whole stays under MAX_INLINE_TRAIL_BYTES, or
     under inline_room when that is smaller; with no room at all it is left
-    out ({"stored": "dropped"}). `name` must be unique to the trail.
+    out ({"stored": "dropped"}). An inline trail whose upload failed also
+    has "upload_error", and upload_kept_trails can move it later. `name`
+    must be unique to the trail.
     """
     if not trail:
         return {"stored": None}
-    body = json.dumps(trail, ensure_ascii=False, default=str).encode("utf-8")
+    upload_error = None
     try:
         storage = _storage()
     except Exception as e:  # a storage problem must never lose the case
         logger.warning(f"Triage trail storage unavailable ({e}); keeping it in MongoDB.")
-        storage = None
+        storage, upload_error = None, str(e)
     if storage is not None:
-        cfg, client = storage
-        key = f"{TRAIL_PREFIX}{name}.json"
         try:
-            client.put_object(
-                Bucket=cfg.bucket,
-                Key=key,
-                Body=body,
-                ContentType="application/json",
-            )
-            return {
-                "stored": "s3",
-                "bucket": cfg.bucket,
-                "key": key,
-                "sha256": hashlib.sha256(body).hexdigest(),
-                "bytes": len(body),
-                "roles": sorted(r for r, e in trail.items() if e.get("raw_response")),
-            }
-        except Exception as e:
-            logger.warning(f"Couldn't upload triage trail {key} ({e}); keeping it in MongoDB.")
+            return _upload_trail(*storage, name, trail)
+        except TrailUploadFailed as e:
+            logger.warning(f"{e} Keeping the trail in MongoDB.")
+            upload_error = str(e)
     limit = MAX_INLINE_TRAIL_BYTES if inline_room is None else min(MAX_INLINE_TRAIL_BYTES, inline_room)
     if limit < 4096:
         logger.warning(f"Triage trail {name} left out: its case is near MongoDB's size limit.")
         return {"stored": "dropped"}
-    return {"stored": "inline", "trail": _fit_inline(trail, limit)}
+    kept = {"stored": "inline", "trail": _fit_inline(trail, limit)}
+    if upload_error:
+        kept["upload_error"] = upload_error
+    return kept
+
+
+def kept_trail_count(cases: Collection, tickets: Optional[Collection] = None) -> int:
+    """How many cases have a trail (their own or a re-run's) kept in MongoDB,
+    plus, given the tickets, the reviews still holding one for a case that
+    hasn't been opened yet (mark_case_pending)."""
+    count = cases.count_documents(_KEPT_INLINE)
+    if tickets is not None:
+        count += tickets.count_documents({"agent_reviews.pending_trail.stored": "inline"})
+    return count
+
+
+_KEPT_INLINE = {"$or": [{"trail.stored": "inline"}, {"reruns.trail.stored": "inline"}]}
+
+
+def upload_kept_trails(cases: Collection, tickets: Optional[Collection] = None) -> int:
+    """Moves the trails kept in MongoDB (storage was off, or the upload
+    failed) to S3, replacing each with its S3 record. A trail whose thinking
+    was cut to fit MongoDB is uploaded as kept. Stops at the first failure,
+    since the rest would most likely fail the same way.
+
+    Given the tickets, first opens the cases still pending on a review
+    (recover_missing_cases), so a trail kept on the review moves too.
+
+    Returns:
+        How many trails were moved.
+
+    Raises:
+        TrailUploadFailed: storage isn't set up, or an upload failed; the
+            trails moved before it stay moved.
+    """
+    try:
+        storage = _storage()
+    except Exception as e:
+        raise TrailUploadFailed(f"S3 storage isn't usable: {e}") from e
+    if storage is None:
+        raise TrailUploadFailed("S3 storage isn't set up: check the storage settings.")
+    if tickets is not None:
+        recover_missing_cases(tickets, cases)
+    moved = 0
+    for case in cases.find(_KEPT_INLINE, {"trail": 1, "reruns.review_id": 1, "reruns.trail": 1}):
+        where = case.get("trail") or {}
+        if where.get("stored") == "inline":
+            record = _upload_trail(*storage, str(case["_id"]), where.get("trail") or {})
+            moved += cases.update_one(
+                {"_id": case["_id"], "trail.stored": "inline"}, {"$set": {"trail": record}}
+            ).modified_count
+        for rerun in case.get("reruns") or []:
+            where = rerun.get("trail") or {}
+            if where.get("stored") != "inline":
+                continue
+            record = _upload_trail(
+                *storage, f"{case['_id']}-rerun-{rerun['review_id']}", where.get("trail") or {}
+            )
+            moved += cases.update_one(
+                {
+                    "_id": case["_id"],
+                    "reruns": {"$elemMatch": {"review_id": rerun["review_id"], "trail.stored": "inline"}},
+                },
+                {"$set": {"reruns.$.trail": record}},
+            ).modified_count
+    if moved:
+        logger.info(f"Moved {moved} triage trail(s) from MongoDB to S3.")
+    return moved
 
 
 def _fit_inline(trail: dict, limit: int = MAX_INLINE_TRAIL_BYTES) -> dict:
