@@ -78,7 +78,9 @@ cymem==2.0.13
     #   spacy
     #   thinc
 defusedxml==0.7.1
-    # via nltk
+    # via
+    #   ml-data-wrangler
+    #   nltk
 distro==1.9.0 ; python_full_version != '3.13.*'
     # via langsmith
 dnspython==2.8.0 ; python_full_version < '3.11'
@@ -374,6 +376,8 @@ pynndescent==0.6.0
     # via umap-learn
 pyparsing==3.3.3
     # via matplotlib
+pypdf==6.21.4
+    # via ml-data-wrangler
 pyqt-siliconui @ git+https://github.com/ChinaIceF/PyQt-SiliconUI@7005080698e3e813dd923898317788edc8f6b8da
     # via ml-data-wrangler
 pyqt5==5.15.11
@@ -554,6 +558,7 @@ typing-extensions==4.16.0
     #   opentelemetry-api
     #   pydantic
     #   pydantic-core
+    #   pypdf
     #   pyqt-siliconui
     #   sentence-transformers
     #   torch

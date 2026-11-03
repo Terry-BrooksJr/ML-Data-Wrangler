@@ -30,6 +30,8 @@ dependencies = [
     "umap-learn>=0.5.12",
     "validators>=0.34.0,<0.35",
     "voyageai>=0.3.2",
+    "defusedxml>=0.7.1",
+    "pypdf>=6.21",  # apply_configuration (evidence.read_pdf_text)
 ]
 
 [dependency-groups]

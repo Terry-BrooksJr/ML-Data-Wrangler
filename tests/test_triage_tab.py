@@ -634,7 +634,7 @@ def test_review_added_marks_only_the_selected_review(qapp, configured, dialogs, 
 def test_status_says_when_reviews_are_capped(qapp, configured, monkeypatch, stored):
     monkeypatch.setattr(triage_tab, "REVIEW_ROW_LIMIT", 2)
     tab = make_tab(stored)
-    tab._show_loaded((1, recent_reviews(stored, limit=2)))
+    tab._show_loaded((1, recent_reviews(stored, limit=2), 0))
     assert tab.status_label.text() == (
         "1 ticket(s) awaiting review. Showing the newest 2 reviews."
     )
@@ -1653,3 +1653,136 @@ def test_review_text_names_each_trigger():
         {"zendesk_id": "1", "review": {"signals_matched": ["L6"]}}
     )
     assert "  - L6 — Genuine churn risk" in text
+
+
+# --- manual-triage cases ---------------------------------------------------------
+
+from decision_engine import evidence, triage  # noqa: E402
+from test_triage_cases import JIRA_XML  # noqa: E402
+from ui.dialogs.evidence_dialog import EvidenceDialog  # noqa: E402
+
+
+@pytest.fixture
+def with_case(stored):
+    """A manual-triage case for the flag_solve ticket's first review."""
+    cases = triage.get_cases_collection(stored.database)
+    cases.insert_one(
+        {
+            "zendesk_id": CATEGORY_FIXTURES["flag_solve"]["zendesk_id"],
+            "review_id": "r-manual_triage-60",
+            "status": triage.OPEN,
+            "route": triage.GUARD_OVERRIDE,
+            "answers": [],
+            "arbitration": None,
+            "open_questions": ["Has LRN-1234 been released?"],
+            "trail": {"stored": "inline", "trail": {}},
+            "evidence": [],
+            "reruns": [],
+        }
+    )
+    return cases
+
+
+def select_classification(tab, classification):
+    column = triage_tab.COLUMNS.index("Classification")
+    for row in range(tab.table.rowCount()):
+        if tab.table.item(row, column).text() == classification:
+            tab.table.selectRow(row)
+            return
+    raise AssertionError(classification)
+
+
+def test_a_case_is_shown_with_its_controls(qapp, configured, stored, with_case):
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    select_classification(tab, "manual_triage")
+    text = tab.detail.toPlainText()
+    assert "Manual-triage case (open): a code check downgraded the model's answer" in text
+    assert "  - Has LRN-1234 been released?" in text
+    assert "(none yet: use Add Evidence…)" in text
+    assert tab.add_evidence_button.isEnabled()
+    assert not tab.rerun_button.isEnabled()
+    assert "Add Jira or Aha evidence" in tab.rerun_button.toolTip()
+
+    select_classification(tab, "flag_reengage")
+    assert not tab.add_evidence_button.isEnabled()
+
+
+def test_evidence_and_a_rerun_from_the_tab(qapp, configured, monkeypatch, dialogs, stored, with_case):
+    found = evidence.extract(evidence.JIRA, JIRA_XML, "export.xml")
+
+    class Accepting:
+        Accepted = EvidenceDialog.Accepted
+
+        def __init__(self, *args):
+            self.evidence = found
+
+        def exec_(self):
+            return EvidenceDialog.Accepted
+
+    monkeypatch.setattr(triage_tab, "EvidenceDialog", Accepting)
+    reruns = []
+    monkeypatch.setattr(
+        triage,
+        "rerun_case",
+        lambda tickets, cases, case_id: reruns.append(case_id)
+        or {"classification": "flag_solve", "confidence": 90},
+    )
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    select_classification(tab, "manual_triage")
+
+    tab.add_evidence_to_selected()
+    wait_until_idle(qapp, tab)
+
+    case = with_case.find_one({})
+    assert [e["data"]["issues"][0]["key"] for e in case["evidence"]] == ["LRN-1234"]
+    select_classification(tab, "manual_triage")
+    assert "Jira LRN-1234 (Released, Fixed), added by" in tab.detail.toPlainText()
+    assert tab.rerun_button.isEnabled()
+
+    tab.rerun_selected()
+    wait_until_idle(qapp, tab)
+
+    assert reruns == [case["_id"]]
+    assert dialogs[-1][0] == "question" and "paid model call" in dialogs[-1][1]
+
+
+def test_the_evidence_dialog_refuses_what_it_cant_parse(qapp, monkeypatch, dialogs):
+    from ui.dialogs import evidence_dialog
+
+    monkeypatch.setattr(
+        evidence_dialog,
+        "confirm_plain",
+        lambda parent, title, text: dialogs.append(("question", text)) or True,
+    )
+    dialog = EvidenceDialog("90001")
+    assert dialog.error_label.textFormat() == QtCore.Qt.PlainText
+    dialog.load_file("broken.xml", b"<rss><channel>")
+    dialog.check_and_add()
+    assert dialog.evidence is None
+    assert dialog.error_label.text().startswith("Can't add this: The XML isn't well-formed")
+
+    dialog.paste_box.setPlainText(JIRA_XML)
+    assert dialog.file_label.text() == "No file chosen."
+    dialog.check_and_add()
+    assert dialog.evidence.data["issues"][0]["key"] == "LRN-1234"
+    assert dialog.evidence.source == "pasted"
+    assert "Found: Jira LRN-1234" in dialogs[-1][1]
+
+
+def test_rerun_is_disabled_while_another_rerun_holds_the_case(qapp, configured, stored, with_case):
+    found = evidence.extract(evidence.JIRA, JIRA_XML, "export.xml")
+    case = with_case.find_one({})
+    triage.add_evidence(with_case, case["_id"], found.kind, found.data, found.source, found.sha256, "r")
+    triage._claim(with_case, case["_id"], "another-worker")
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    select_classification(tab, "manual_triage")
+    assert not tab.rerun_button.isEnabled()
+    assert tab.rerun_button.toolTip() == "A re-run of this case is in progress."

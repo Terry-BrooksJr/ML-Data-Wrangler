@@ -272,6 +272,13 @@ SETTINGS: List[Setting] = [
         default="lessons_learned",
     ),
     Setting(
+        "TRIAGE_CASES_COLLECTION",
+        "Triage cases collection",
+        "Storage",
+        default="triage_cases",
+        help="One document per manual-triage review: how it got there, reviewer evidence and re-runs.",
+    ),
+    Setting(
         "AB_TEST_COLLECTION",
         "A/B runs collection",
         "Storage",

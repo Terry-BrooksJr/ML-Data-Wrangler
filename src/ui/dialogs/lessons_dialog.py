@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
 from ui import zendesk_links
-from decision_engine import feedback
+from decision_engine import feedback, triage
 from loguru import logger
 from pymongo.collection import Collection
 from PyQt5 import QtCore
@@ -75,11 +75,14 @@ class WeeklyReviewDialog(QDialog):
         collections: Callable[[], Tuple[Collection, Collection]],
         parent: Optional[QWidget] = None,
         week: Optional[datetime] = None,
+        cases: Optional[Callable[[], Collection]] = None,
     ) -> None:
         super().__init__(parent)
         self.run = run
         self.collections = collections
+        self.case_collection = cases
         self.entries: List[dict] = []
+        self.cases: List[dict] = []
         self.lessons: List[dict] = []
         self._busy = False
         self.setWindowTitle("Weekly Review")
@@ -235,7 +238,7 @@ class WeeklyReviewDialog(QDialog):
         self.approve_button.setEnabled(
             idle and lesson is not None and not lesson.get("approved")
         )
-        has_reviewed = any(e.get("reviewed") for e in self.entries)
+        has_reviewed = any(e.get("reviewed") for e in self.entries) or bool(self.cases)
         self.suggest_button.setEnabled(idle and has_reviewed)
         self.save_draft_button.setEnabled(
             idle and has_reviewed and bool(self.draft_input.toPlainText().strip())
@@ -284,9 +287,16 @@ class WeeklyReviewDialog(QDialog):
 
         def read():
             log, lessons = self.collections()
-            return feedback.misclassifications_for_week(
-                log, week
-            ), feedback.lessons_for_week(lessons, week)
+            cases = (
+                triage.resolved_cases_for_week(self.case_collection(), week)
+                if self.case_collection
+                else []
+            )
+            return (
+                feedback.misclassifications_for_week(log, week),
+                feedback.lessons_for_week(lessons, week),
+                cases,
+            )
 
         self._job(
             read,
@@ -294,16 +304,23 @@ class WeeklyReviewDialog(QDialog):
             lambda found: self._show(week, *found),
         )
 
-    def _show(self, week: datetime, entries: List[dict], lessons: List[dict]) -> None:
+    def _show(
+        self,
+        week: datetime,
+        entries: List[dict],
+        lessons: List[dict],
+        cases: Optional[List[dict]] = None,
+    ) -> None:
         if week != self.week():
             # The week changed while this one loaded; show the newer one instead.
             self.load()
             return
-        self.entries, self.lessons = entries, lessons
+        self.entries, self.lessons, self.cases = entries, lessons, cases or []
         reviewed = sum(1 for e in entries if e.get("reviewed"))
         approved = sum(1 for lesson in lessons if lesson.get("approved"))
         self.status_label.setText(
             f"Week of {week:%Y-%m-%d}: {len(entries)} misclassification(s), {reviewed} reviewed; "
+            f"{len(self.cases)} manual-triage case(s) resolved with evidence; "
             f"{len(lessons)} summary(ies), {approved} approved."
         )
         self._fill(
@@ -330,7 +347,8 @@ class WeeklyReviewDialog(QDialog):
                         if lesson.get("approved")
                         else "Draft"
                     ),
-                    len(lesson.get("based_on_log_ids") or []),
+                    len(lesson.get("based_on_log_ids") or [])
+                    + len(lesson.get("based_on_case_ids") or []),
                     (
                         (lesson.get("summary_text") or "").splitlines()[0]
                         if lesson.get("summary_text")
@@ -359,13 +377,16 @@ class WeeklyReviewDialog(QDialog):
             self.lesson_view.clear()
         else:
             based_on = len(lesson.get("based_on_log_ids") or [])
+            cases = len(lesson.get("based_on_case_ids") or [])
             approval = (
                 f"Approved by {lesson.get('approved_by')} at {_fmt(lesson.get('approved_at'))} UTC"
                 if lesson.get("approved")
                 else "Draft, not approved"
             )
             self.lesson_view.setPlainText(
-                f"{approval}. Built on {based_on} reviewed entry(ies).\n\n{lesson.get('summary_text') or ''}"
+                f"{approval}. Built on {based_on} reviewed entry(ies)"
+                + (f" and {cases} resolved triage case(s)" if cases else "")
+                + f".\n\n{lesson.get('summary_text') or ''}"
             )
         self._update_buttons()
 
@@ -391,7 +412,7 @@ class WeeklyReviewDialog(QDialog):
 
     def suggest_summary(self) -> None:
         """Fills the draft with a summary of the reviewed entries, unless something is typed there."""
-        suggestion = feedback.suggest_lessons_summary(self.entries)
+        suggestion = feedback.suggest_lessons_summary(self.entries, self.cases)
         if self.draft_input.toPlainText().strip():
             answer = QMessageBox.question(
                 self,
@@ -410,10 +431,12 @@ class WeeklyReviewDialog(QDialog):
         if not text:
             return
         week = self.week()
+        case_ids = [case["_id"] for case in self.cases]
 
         def draft():
             log, lessons = self.collections()
-            return feedback.draft_lessons_learned(log, lessons, week, text)
+            cases = self.case_collection() if case_ids else None
+            return feedback.draft_lessons_learned(log, lessons, week, text, case_ids, cases)
 
         def done(_):
             logger.success(f"Lessons learned drafted for the week of {week:%Y-%m-%d}.")

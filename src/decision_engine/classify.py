@@ -474,7 +474,10 @@ def classify_ticket(
             "model_version",
             "classification",
             "confidence",
+            "signals_matched",
             "reasoning",
+            "open_questions",
+            "guard_overrides",
             "audit",
         )
     }
@@ -511,29 +514,52 @@ def arbitrate(
     answer is returned. Otherwise, or with no distinct arbiter set, or if
     the arbiter fails, the ticket goes to manual triage.
 
-    The result records the step under "arbitration".
+    The result records the step under "arbitration". The judging call's
+    and the ruling's audits (raw reply, thinking) go under "arbiter_audits",
+    which a review doesn't keep; a manual-triage case file does (triage.py).
     """
     arbiter = config.arbiter
     answers = (first, confirmed)
-    record = {"model": arbiter, "preferred": None, "ruling": None, "error": None}
+    record = {
+        "model": arbiter,
+        "preferred": None,
+        "preferred_reasoning": None,
+        "ruling": None,
+        "error": None,
+    }
     if arbiter in (None, *(a.get("model_version") for a in answers)):
         record["error"] = "no distinct arbiter model"
         return _disagreement(confirmed, record)
+    audits = {}
     try:
-        preferred = judge_answers(arbiter, first, confirmed, config, calls)
+        preferred = judge_answers(arbiter, first, confirmed, config, calls, record)
+        audits["judge"] = record.pop("judge_audit", None)
         record["preferred"] = answers[preferred]["classification"]
         ruling = classify_with(arbiter)
         record["ruling"] = ruling["classification"]
+        audits["ruling"] = ruling.get("audit")
     except (anthropic.APIError, EngineError) as e:
         if is_fatal(e):
             raise
         logger.warning(f"Arbiter {arbiter} failed ({e}); sending to manual triage.")
         record["error"] = type(e).__name__
-        return _disagreement(confirmed, record)
+        failed = getattr(e, "audit", None)
+        if "judge" in audits:
+            # The judge answered; the ruling is what failed.
+            audits["ruling"] = failed
+        else:
+            audits["judge"] = record.pop("judge_audit", None) or failed
+        result = _disagreement(confirmed, record)
+        result["arbiter_audits"] = {k: v for k, v in audits.items() if v}
+        return result
     if record["ruling"] != record["preferred"]:
-        return _disagreement(confirmed, record)
+        result = _disagreement(confirmed, record)
+        result["arbiter_audits"] = {k: v for k, v in audits.items() if v}
+        return result
     ruling["confirmation_of"] = confirmed["confirmation_of"]
     ruling["arbitration"] = {**record, "confirmation": _summary(confirmed)}
+    # Kept even when the arbiter agreed: its ruling may be manual_triage.
+    ruling["arbiter_audits"] = {k: v for k, v in audits.items() if v}
     return ruling
 
 
@@ -587,10 +613,17 @@ Respond with a single JSON object: {"preferred": "A" | "B", "reasoning": string}
 
 
 def judge_answers(
-    model: str, first: dict, second: dict, config: EngineConfig, calls: list
+    model: str,
+    first: dict,
+    second: dict,
+    config: EngineConfig,
+    calls: list,
+    record: Optional[dict] = None,
 ) -> int:
     """The arbiter's first ruling: 0 if the first answer applies the
-    taxonomy better, 1 for the second. The ticket isn't sent.
+    taxonomy better, 1 for the second. The ticket isn't sent. With a
+    record, the judge's reasoning goes to record["preferred_reasoning"] and
+    its audit, with the raw reply and any thinking, to record["judge_audit"].
 
     Raises:
         anthropic.APIError, or EngineError for an unusable reply.
@@ -627,11 +660,20 @@ def judge_answers(
             "billed_cost_usd": (getattr(response, "billing", None) or {}).get(
                 "billed_cost_usd"
             ),
+            "raw_response": raw_text,
         }
+        thinking = _thinking(response)
+        if thinking:
+            audit["thinking"] = thinking
+        if record is not None:
+            record["judge_audit"] = audit
         try:
-            preferred = extract_json(raw_text).get("preferred")
+            judgement = extract_json(raw_text)
+            preferred = judgement.get("preferred")
         except (ValueError, AttributeError) as e:
             raise EngineError(f"Unusable arbiter reply: {e}", model, audit) from e
+        if record is not None and isinstance(judgement.get("reasoning"), str):
+            record["preferred_reasoning"] = judgement["reasoning"]
         if preferred not in ("A", "B"):
             raise EngineError("Arbiter reply names neither A nor B", model, audit)
     except (anthropic.APIError, EngineError) as e:
@@ -639,6 +681,15 @@ def judge_answers(
         raise
     _record_call(calls, model, audit)
     return "AB".index(preferred)
+
+
+def _thinking(response) -> list:
+    """The text of a reply's thinking blocks; [] when there are none."""
+    return [
+        b.thinking
+        for b in response.content
+        if b.type == "thinking" and getattr(b, "thinking", None)
+    ]
 
 
 def needs_confirmation(result: dict) -> bool:
@@ -711,6 +762,9 @@ def _classify_with(
     # thinking block on models that think by default.
     raw_text = next((b.text for b in response.content if b.type == "text"), "")
     stop_reason = getattr(response, "stop_reason", None)
+    # Kept for a manual-triage case file (triage.py), never for the review:
+    # it can be long, and persistence._review_entry drops it.
+    thinking = _thinking(response)
     audit = {
         "usage": _usage(response),
         "latency_ms": int((time.monotonic() - started) * 1000),
@@ -723,6 +777,8 @@ def _classify_with(
             "billed_cost_usd"
         ),
     }
+    if thinking:
+        audit["thinking"] = thinking
 
     if stop_reason == "max_tokens":
         logger.error(f"{model}: reply cut off at max_tokens ({max_tokens}).")
