@@ -350,20 +350,58 @@ def test_aha_page_text_is_parsed():
         ("Scoping", "Parked"),
         ("New", "Scoping"),
     ]
-    # Deleted comments are left out, whether or not a live copy follows.
+    # Vlad's comment was deleted later, and Neil's deletion has no live copy:
+    # neither is evidence.
     assert [(c["author"], c["internal"], c["text"]) for c in data["comments"]] == [
-        ("Vlad Manu", False, "Try this JSON"),
         ("Audrey Auyang", True, "Strategic Alignment: request from Cengage"),
     ]
+    assert "Try this JSON" not in json.dumps(data["comments"])
     assert "wrong idea" not in json.dumps(data["comments"])
+    created = next(a for a in data["activity"] if a["action"] == "commented on")
+    assert created["deleted_later"] is True
     assert data["activity_days"] == ["04 June", "12 December"]
     assert "" not in json.dumps(data)
+
+
+def test_a_linked_jira_key_isnt_taken_for_the_aha_item():
+    text = AHA_TEXT.replace(
+        "Does Learnosity have any plans", "Linked Jira: LRN-1234. Does Learnosity have any plans"
+    ).replace("https://example.aha.io/ideas/ideas/LAPIPLAT-I-543", "https://example.aha.io/ideas/ideas/OTHER-I-1 https://example.aha.io/ideas/ideas/LAPIPLAT-I-543")
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["reference"] == "LAPIPLAT-I-543"
+    assert data["url"].startswith("https://example.aha.io/ideas/ideas/LAPIPLAT-I-543")
+    assert "LRN-1234" in data["description"]
+
+
+def test_a_page_naming_two_aha_items_is_rejected():
+    text = AHA_TEXT.replace("IdeaLAPIPLAT-I-543", "IdeaLAPIPLAT-I-999", 1)
+    with pytest.raises(evidence.EvidenceError, match="LAPIPLAT-I-543, LAPIPLAT-I-999"):
+        evidence.extract(evidence.AHA, text)
+
+
+def test_only_one_of_two_identical_comments_is_withdrawn_by_one_deletion():
+    page = """Created by Terry Brooks in Ideas on Dec 12, 2025 IdeaLAPIPLAT-I-543
+Future PDF Viewer support?
+6:20pmAudrey Auyang deleted comment on idea LAPIPLAT-I-543 Future PDF Viewer support?
+Comment by Vlad Manu
++1
+6:11pmVlad Manu commented on idea LAPIPLAT-I-543 Future PDF Viewer support?
+Comment by Vlad Manu
++1
+6:10pmVlad Manu commented on idea LAPIPLAT-I-543 Future PDF Viewer support?
+Comment by Vlad Manu
++1
+"""
+    data = evidence.extract(evidence.AHA, page).data
+    # The deletion was by Audrey, of Vlad's comment: matched by the comment's author.
+    assert [(c["author"], c["text"]) for c in data["comments"]] == [("Vlad Manu", "+1")]
 
 
 @pytest.mark.parametrize(
     "content, reason",
     [
         ("just some notes", "No Aha reference"),
+        ("Linked Jira: LRN-1234 and LAPIPLAT-I-543 in passing", "No Aha reference"),
         (b"%PDF-1.7 not really a pdf", "PDF"),
         (b"\xff\xfe\x00bad", "UTF-8"),
     ],

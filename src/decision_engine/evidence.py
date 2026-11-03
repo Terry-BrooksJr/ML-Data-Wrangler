@@ -17,6 +17,7 @@ read.
 import hashlib
 import html
 import re
+from collections import Counter
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import BytesIO
@@ -38,16 +39,24 @@ MAX_PDF_PAGES = 40
 MAX_TEXT_CHARS = 2_000_000
 # Jira's RSS fields the engine can use; issue keys look like LRN-1234.
 _ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
-# Aha references: ideas (PROJ-I-543) and features (PROJ-123).
-_AHA_REF = re.compile(r"\b([A-Z][A-Z0-9]+-(?:I-)?\d+)\b")
+# Aha references: ideas (PROJ-I-543) and features (PROJ-123). A Jira key
+# looks the same, so the item's own reference is read only from where the
+# page names it (_aha_reference), never from its free text.
+_REF = r"[A-Z][A-Z0-9]+-(?:I-)?\d+"
 _AHA_URL = re.compile(r"https://[\w.-]+\.aha\.io/\S+")
 _AHA_ACTIVITY = re.compile(
     r"^(?P<time>\d{1,2}:\d{2}\s?[ap]m)\s*(?P<actor>.+?) "
     r"(?P<action>created internal comment on|deleted comment on|commented on|"
-    r"added vote for|updated|described|created|added|removed|deleted)"
-    r" (?:idea|feature)\b",
+    rf"added vote for|updated|described|created|added|removed|deleted)"
+    rf" (?:idea|feature)\b(?: (?P<ref>{_REF})\b)?",
     re.MULTILINE,
 )
+# The page header: "Created by <name> in <where> on Dec 12, 2025 Idea<REF>".
+_AHA_HEADER = re.compile(
+    rf"Created by .+? on [A-Z][a-z]{{2}} \d{{1,2}}, \d{{4}}\s*(?:Idea|Feature)\s?({_REF})\b"
+)
+# The browser's print footer: "<REF> <title> | Aha!".
+_AHA_FOOTER = re.compile(rf"\b({_REF}) [^\n]+? \| Aha!\s*$", re.MULTILINE)
 _AHA_WORKFLOW = re.compile(r"Workflow status\s*(?P<old>.+?)\s*→\s*(?P<new>.+?)(?:\s+Assigned to\b|$)", re.MULTILINE)
 _AHA_DAY = re.compile(r"^\s*(\d{1,2} (?:January|February|March|April|May|June|July|August|"
                       r"September|October|November|December))\s*$", re.MULTILINE)
@@ -319,6 +328,28 @@ def _aha_title(text: str, reference: str) -> Optional[str]:
     return None
 
 
+def _aha_reference(text: str, headers: list) -> str:
+    """The item's reference, from the places the page names it: its header,
+    its activity entries ("updated idea <REF>") and the print footer.
+
+    Raises:
+        EvidenceError: none of them names it, or they name different items.
+    """
+    found = {m.group(1) for m in _AHA_HEADER.finditer(text)}
+    found |= {m.group(1) for m in _AHA_FOOTER.finditer(text)}
+    found |= {h.group("ref") for h in headers if h.group("ref")}
+    if not found:
+        raise EvidenceError(
+            "No Aha reference found in the page's header, history or footer "
+            "(expected something like LAPIPLAT-I-543)."
+        )
+    if len(found) > 1:
+        raise EvidenceError(
+            f"The page names more than one Aha item ({', '.join(sorted(found))}): add one page at a time."
+        )
+    return found.pop()
+
+
 def _last_value_after(text: str, label: str) -> Optional[str]:
     """The value on the line after the last bare `label` line (the
     sidebar's), or on the same line."""
@@ -329,17 +360,19 @@ def _last_value_after(text: str, label: str) -> Optional[str]:
 def parse_aha(text: str) -> dict:
     """The fields of an Aha idea or feature page, printed to PDF or copied.
 
+    A comment later deleted is left out: Aha's history shows the deletion
+    with the comment's text, and the comment's creation separately.
+
     Raises:
-        EvidenceError: no Aha reference (e.g. PROJ-I-123) or no title.
+        EvidenceError: no Aha reference (e.g. PROJ-I-123) where the page
+            names its item, more than one, or no title.
     """
     if len(text) > MAX_TEXT_CHARS:
         raise EvidenceError(f"The text is over {MAX_TEXT_CHARS:,} characters; an Aha page is far shorter.")
     # Aha's icon font prints as private-use characters; they carry nothing.
     text = re.sub(r"[\ue000-\uf8ff]", "", text.replace("\r\n", "\n"))
-    ref = _AHA_REF.search(text)
-    if not ref:
-        raise EvidenceError("No Aha reference found (expected something like LAPIPLAT-I-543).")
-    reference = ref.group(1)
+    headers = list(_AHA_ACTIVITY.finditer(text))
+    reference = _aha_reference(text, headers)
     title = _aha_title(text, reference)
     if not title:
         raise EvidenceError(f"Found {reference}, but not its title.")
@@ -348,35 +381,53 @@ def parse_aha(text: str) -> dict:
         r"Created by (?P<by>.+?) in (?P<where>.+?) on (?P<on>[A-Z][a-z]{2} \d{1,2}, \d{4})", text
     )
     status = re.findall(r"^Status\s+(\S.*?)\s*$", text, re.MULTILINE)
-    url = _AHA_URL.search(text)
+    # The item's own link: a comment may link other Aha items.
+    url = next((u.group(0) for u in _AHA_URL.finditer(text) if reference in u.group(0)), None)
     votes = re.search(r"\bVotes\s*(\d+)", text)
     score = re.search(r"\bScore\s*(\d+)", text)
 
-    headers = list(_AHA_ACTIVITY.finditer(text))
     description_end = headers[0].start() if headers else len(text)
     description_start = text.find(title)
     description_start = description_start + len(title) if description_start != -1 else 0
     description = text[description_start:description_end].strip()
 
-    activity, comments, workflow, seen_comments = [], [], [], set()
+    events = []
     for n, header in enumerate(headers):
         body_end = headers[n + 1].start() if n + 1 < len(headers) else len(text)
         body = text[header.end():body_end]
         # The header runs on to the end of its line (the idea's title).
-        body = body.split("\n", 1)[1] if "\n" in body else ""
+        events.append((header, body.split("\n", 1)[1] if "\n" in body else ""))
+
+    def comment_of(header, body) -> tuple:
+        """(author, text): the author is on the "Comment by" line, since a
+        deletion's actor may be someone else."""
+        by = re.match(r"\s*Comment by (.+)\n", body)
+        comment_text = body[by.end():] if by else body
+        # Only the comment: the sidebar and tab strip follow the last entry.
+        comment_text = comment_text.split("\nName", 1)[0].strip()
+        return ((by.group(1) if by else header.group("actor")).strip(), comment_text)
+
+    # Each deletion withdraws one comment with its author and text.
+    deleted = Counter(
+        comment_of(h, b) for h, b in events if h.group("action") == "deleted comment on"
+    )
+    activity, comments, workflow = [], [], []
+    for header, body in events:
         action = header.group("action")
         actor = header.group("actor").strip()
         entry = {"time": header.group("time"), "actor": actor, "action": action}
         if "comment" in action:
             entry["deleted"] = action.startswith("deleted")
-            comment_text = re.sub(r"^\s*Comment by .+\n", "", body, count=1).strip()
-            # Only the comment: the sidebar and tab strip follow the last entry.
-            comment_text = comment_text.split("\nName", 1)[0].strip()
-            if not entry["deleted"] and (actor, comment_text) not in seen_comments:
-                seen_comments.add((actor, comment_text))
+            author, comment_text = comment_of(header, body)
+            if entry["deleted"]:
+                pass
+            elif deleted[(author, comment_text)]:
+                deleted[(author, comment_text)] -= 1
+                entry["deleted_later"] = True
+            else:
                 comments.append(
                     {
-                        "author": actor,
+                        "author": author,
                         "internal": "internal" in action,
                         "time": header.group("time"),
                         "text": comment_text,
@@ -391,7 +442,7 @@ def parse_aha(text: str) -> dict:
     return {
         "reference": reference,
         "title": title,
-        "url": url.group(0) if url else None,
+        "url": url,
         "created_by": created["by"].strip() if created else None,
         "created_in": created["where"].strip() if created else None,
         "created_on": created["on"] if created else None,
