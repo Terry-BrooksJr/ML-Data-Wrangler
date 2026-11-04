@@ -1917,3 +1917,33 @@ def test_an_older_open_case_stays_reachable_when_the_newest_is_resolved(
     assert "Manual-triage case (resolved)" in text
     assert "Another manual-triage case on this ticket is still open:" in text
     assert "  - Has LRN-1234 been released?" in text
+
+
+def test_reviews_with_the_same_time_show_the_later_one(tickets):
+    from bson import ObjectId
+
+    earlier, later = ObjectId(), ObjectId()
+    add_reviewed(
+        tickets,
+        "tie",
+        # Stored older first, so only the tie-break puts the later review first.
+        review("manual_triage", 5, review_id=earlier),
+        review("flag_solve", 5, review_id=later),
+    )
+    (row,) = recent_reviews(tickets)
+    assert row["review"]["review_id"] == later
+    assert [e["review_id"] for e in row["earlier_reviews"]] == [earlier]
+
+
+def test_reopening_results_deletes_the_previous_dialog(qapp, configured, stored):
+    from PyQt5 import sip
+
+    tab = make_tab(stored)
+    row = {"zendesk_id": "1", "review": {"classification": "flag_solve", "rerun_of": "x"}}
+    tab.show_results(row)
+    first = tab._results_dialog
+    tab.show_results(row)
+    QApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    assert sip.isdeleted(first)
+    assert tab._results_dialog is not first and tab._results_dialog.isVisible()
+    tab._results_dialog.close()

@@ -1609,3 +1609,13 @@ def test_client_copies_proxy_request_id():
     response = httpx.Response(200)
     classify._copy_proxy_request_id(response)
     assert "request-id" not in response.headers
+
+
+def test_the_arbiters_judging_call_records_its_request_id(monkeypatch):
+    client = FakeClient(json.dumps({"preferred": "B", "reasoning": "B fits"}))
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    answer = {"classification": "on_track", "confidence": 70, "signals_matched": [], "reasoning": "r"}
+    record, calls = {}, []
+    config = classify.EngineConfig.from_env()
+    assert classify.judge_answers("arbiter", answer, answer, config, calls, record) == 1
+    assert record["judge_audit"]["request_id"] == "req_test"

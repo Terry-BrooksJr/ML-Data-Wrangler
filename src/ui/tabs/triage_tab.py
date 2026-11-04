@@ -170,7 +170,8 @@ def _latest_review_pipeline(match: dict, limit: int) -> List[dict]:
         {"$match": match},
         {"$project": {"_id": 1, "agent_reviews": 1, **{f: 1 for f in _ROW_TICKET_FIELDS}}},
         {"$unwind": "$agent_reviews"},
-        {"$sort": {"agent_reviews.reviewed_at": -1}},
+        # review_id breaks ties: an ObjectId, so a later review sorts first.
+        {"$sort": {"agent_reviews.reviewed_at": -1, "agent_reviews.review_id": -1}},
         {
             "$group": {
                 "_id": "$_id",
@@ -185,7 +186,7 @@ def _latest_review_pipeline(match: dict, limit: int) -> List[dict]:
                 },
             }
         },
-        {"$sort": {"review.reviewed_at": -1}},
+        {"$sort": {"review.reviewed_at": -1, "review.review_id": -1}},
         {"$limit": limit},
     ]
 
@@ -1693,7 +1694,9 @@ class TriageTab(QWidget):
             row, added=row_added(row), decided=bool(decision_label(row))
         )
         if self._results_dialog is not None:
+            # Deleted, not just hidden: the tab would keep each one alive.
             self._results_dialog.close()
+            self._results_dialog.deleteLater()
         self._results_dialog = ArbitrationDialog(text, str(row.get("zendesk_id")), self)
         self._results_dialog.show()
 

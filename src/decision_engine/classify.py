@@ -674,6 +674,7 @@ def judge_answers(
         audit = {
             "usage": _usage(response),
             "latency_ms": int((time.monotonic() - started) * 1000),
+            "request_id": getattr(response, "_request_id", None),
             "billed_cost_usd": (getattr(response, "billing", None) or {}).get(
                 "billed_cost_usd"
             ),
