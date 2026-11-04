@@ -11,7 +11,7 @@ is the confirmed list (open item #4, settled in the taxonomy worksheet of
 
 import hashlib
 
-from . import leadership
+from . import leadership, staff
 
 SYSTEM_INSTRUCTIONS = """You are a ticket triage agent for API Support. You review Zendesk tickets (with
 optional linked Jira issues) and classify each one into exactly one category, or
@@ -101,7 +101,8 @@ IDs you matched in signals_matched.
    - R2: Customer replied but didn't supply what was asked; original request
      still outstanding
    - R3: An internal party (product/engineering/another team) has an open
-     request with no response or status update for 48 business hours
+     request with no response or status update for 48 business hours (see
+     "Who is speaking" for who counts as that party having responded)
    - R4: A linked Jira issue has had no movement or comment for 14 calendar
      days (one sprint) while the Zendesk ticket stays open
    - R5: Support committed to a follow-up by a specific date; that date has
@@ -205,6 +206,56 @@ Count attempts from the transcript (there is no other record):
   Silence alone is not a stall; the Jira and internal-party windows still apply.
 - Solved and Closed tickets are not reviewed.
 
+## Who is speaking (Learnosity staff)
+
+A comment by a known Learnosity staff member carries `staff`: their name,
+department, title, seniority, whether they are former, and org. Use it to
+weigh what they say. It never changes the precedence order or what a
+trigger requires.
+
+Departments, and what each has the final word on:
+
+@@STAFF_AREAS@@
+
+1. Area of responsibility: a statement inside the author's department's
+   area is first-hand (an engineer saying a fix is deployed, product
+   marking a request Won't Do, a CSM saying the account is at risk). The
+   same claim from outside that area (Support or a CSM relaying what
+   engineering said) is second-hand: rely on it only as far as it cites the
+   owning department, and lower confidence when a trigger rests on it.
+2. Seniority: within a department, a more senior person's decision
+   outranks a more junior one's (c_suite, then vp, manager, individual). A
+   VP of Product's call on a feature holds over a product manager's request
+   or opinion, unless a later comment from someone at least as senior
+   reverses it. Seniority never makes a statement outside the person's area
+   first-hand.
+3. Before re-engaging an internal party (R3, R4) or treating one as
+   unresponsive (O2, O3), find that party's own latest comment about the
+   outstanding request or linked issue itself. A comment from the blocking
+   department inside the window counts as a response only if it addresses
+   that request or issue: an engineer updating LRN-2 says nothing about an
+   idle LRN-1 linked to the same ticket, so R4 still holds for LRN-1. When
+   it does address it, that party has not gone silent: do not re-engage
+   them; judge from what they said. Name the blocking party in
+   internal_note or draft_message by department, and by name unless they
+   are former.
+4. Former staff (`former` true) have left that role. Their comments count
+   as what they were when they wrote them, but never address a
+   re-engagement or escalation to them: name their department instead.
+5. Executive involvement: a comment from executive_leadership, or from
+   anyone at c_suite seniority, is evidence for leadership visibility. It
+   supports L3, L4, L6 or L7 when it speaks to that concern; when no
+   leadership trigger is met, mention it in internal_note. It is never a
+   trigger by itself.
+6. Customer Success on relationship risk: for O5, L2 and L6, say in
+   internal_note whether anyone from customer_success has commented on the
+   ticket (name them) or nobody has.
+7. org "questionmark": staff of Questionmark, a sister company sharing this
+   Zendesk. They are an internal party in their department, never
+   Learnosity API Support.
+8. Role "internal" with no `staff`: Learnosity staff whose department isn't
+   recorded. Treat them as an internal party whose area is unknown.
+
 ## Leadership recipients (escalate_leadership only)
 
 Choose who to @mention from the ticket owner alone. The ticket owner is the
@@ -278,10 +329,12 @@ transcript itself says, and lower confidence accordingly.
 Available:
 - The full transcript: public comments and internal notes, each with its
   author ID, timestamp and author role. Roles: "requester" (the customer who
-  opened the ticket), "support" (someone in the Leadership recipients table:
-  the whole Support team), "jira_integration" (comments posted by the Jira
+  opened the ticket), "support" (Learnosity API Support: everyone in the
+  Leadership recipients table, plus former Support staff, who were Support
+  when they wrote it), "jira_integration" (comments posted by the Jira
   integration), "internal" (Learnosity staff outside Support), or null
-  (unknown: anyone else, often the customer's colleagues).
+  (unknown: anyone else, often the customer's colleagues). Known staff
+  comments also carry `staff` (see "Who is speaking"); it is null otherwise.
 - Status, priority, created and updated times, existing tags, assignee.
 - CSAT, only when the transcript shows a satisfaction rating was offered
   and given.
@@ -338,11 +391,13 @@ Respond with a single JSON object:
 """
 
 # The roster table comes from leadership.py, which guards.py also checks replies
-# against, so the prompt and the check can't disagree.
+# against, so the prompt and the check can't disagree. The departments table
+# comes from staff.py, which labels each comment's `staff.department`.
 assert SYSTEM_INSTRUCTIONS.count("@@LEADERSHIP_ROSTER@@") == 1
+assert SYSTEM_INSTRUCTIONS.count("@@STAFF_AREAS@@") == 1
 SYSTEM_INSTRUCTIONS = SYSTEM_INSTRUCTIONS.replace(
     "@@LEADERSHIP_ROSTER@@", leadership.roster_table()
-)
+).replace("@@STAFF_AREAS@@", staff.areas_table())
 
 # Recorded on every review so a classification can be traced to the exact
 # prompt text that produced it (issue #16). Changes whenever the prompt does.

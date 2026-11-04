@@ -4,10 +4,11 @@ Ingestion only knows the requester (wrangler.ticket_to_document); every
 other author's role is stored as None. The payload fills that in from IDs
 we know (author_role), so the model can tell Support's comments, the Jira
 integration's and the customer's apart, which triggers like "Support asked
-for info" and "Jira integration note confirms the release" rely on.
+for info" and "Jira integration note confirms the release" rely on. For
+Learnosity staff it also attaches who they are (author_staff, from
+staff.ROSTER), so the model can weigh a comment by department and seniority.
 
-INTERNAL_AUTHORS holds Learnosity staff outside Support (product,
-engineering, CSMs). It starts empty: list candidates with
+To find staff missing from staff.py, list candidates with
 
     python -m decision_engine.authors candidates
 
@@ -21,7 +22,7 @@ from typing import Dict, List, Optional
 
 from pymongo.collection import Collection
 
-from . import leadership
+from . import leadership, staff
 
 REQUESTER = "requester"
 SUPPORT = "support"
@@ -31,16 +32,15 @@ JIRA_INTEGRATION = "jira_integration"
 # The Zendesk user the Jira integration posts its comments as.
 JIRA_INTEGRATION_USER_ID = "1031430881"
 
-# Learnosity staff outside Support, by Zendesk user ID -> what they do
-# (e.g. "Product"). Filled in from `candidates` once someone confirms each.
-INTERNAL_AUTHORS: Dict[str, str] = {}
 
-
-def author_role(author, stored_role: Optional[str] = None) -> Optional[str]:
+def author_role(author, stored_role: Optional[str] = None, when=None) -> Optional[str]:
     """The role to show for a comment's author; None when unknown.
 
     A role stored at ingestion (the requester) wins; then the leadership
-    roster (Support), the Jira integration, and INTERNAL_AUTHORS.
+    roster (Support), the Jira integration, former Support staff (Support
+    when they wrote it), and anyone else at Learnosity (internal).
+    `when` is the comment's timestamp: staff who changed department are
+    labelled with the one they were in then (staff.Staff.at).
     """
     if stored_role:
         return stored_role
@@ -51,9 +51,23 @@ def author_role(author, stored_role: Optional[str] = None) -> Optional[str]:
         return SUPPORT
     if author == JIRA_INTEGRATION_USER_ID:
         return JIRA_INTEGRATION
-    if author in INTERNAL_AUTHORS:
+    person = staff.lookup(author, when)
+    if (
+        person is not None
+        and person.department == staff.SUPPORT
+        and person.org == staff.LEARNOSITY
+    ):
+        return SUPPORT
+    if staff.is_staff(author):
         return INTERNAL
     return None
+
+
+def author_staff(author, when=None) -> Optional[dict]:
+    """Who the author was at Learnosity on `when` (staff.Staff.describe),
+    or None."""
+    person = staff.lookup(author, when)
+    return person.describe() if person is not None else None
 
 
 def internal_only_candidates(tickets: Collection) -> List[dict]:
