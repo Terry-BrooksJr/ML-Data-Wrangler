@@ -268,6 +268,115 @@ def _check_xml_shape(content: bytes) -> None:
             element.clear()
 
 
+_XML_SPACE = frozenset(b" \t\r\n")
+# Markup copied untouched by _drop_duplicate_attributes: (opener, closer).
+_SKIPPED_MARKUP = ((b"<![CDATA[", b"]]>"), (b"<!--", b"-->"), (b"<?", b"?>"), (b"<!", b">"), (b"</", b">"))
+
+
+def _start_tag_without_duplicates(content: bytes, start: int):
+    """Reads the start tag at `start`, forward only: (end, the tag with the
+    first of each repeated attribute kept). Quoted values may hold ">".
+    Anything malformed is returned unchanged up to where reading stopped,
+    for the parser to report."""
+    n = len(content)
+    k = start + 1
+    while k < n and content[k] not in _XML_SPACE and content[k] not in b"/>":
+        k += 1
+    parts, seen = [content[start:k]], set()
+    while True:
+        gap = k
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n:
+            return n, b"".join(parts) + content[gap:n]
+        if content[k] == ord(">"):
+            parts.append(content[gap : k + 1])
+            return k + 1, b"".join(parts)
+        if content.startswith(b"/>", k):
+            parts.append(content[gap : k + 2])
+            return k + 2, b"".join(parts)
+        name_start = k
+        while k < n and content[k] not in _XML_SPACE and content[k] not in b"=/>":
+            k += 1
+        name = content[name_start:k]
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n or content[k] != ord("="):
+            return k, b"".join(parts) + content[gap:k]
+        k += 1
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n or content[k] not in b"\"'":
+            return k, b"".join(parts) + content[gap:k]
+        close = content.find(content[k : k + 1], k + 1)
+        if close < 0:
+            return n, b"".join(parts) + content[gap:n]
+        k = close + 1
+        if name not in seen:
+            seen.add(name)
+            parts.append(content[gap:k])
+
+
+def _drop_duplicate_attributes(content: bytes) -> bytes:
+    """Keeps the first of each repeated attribute in every start tag.
+
+    Jira's export writes an @mention link in a comment with rel twice
+    (rel="<account id>" ... rel="noreferrer"), which XML forbids, so a
+    comment that mentions anyone made the whole export fail to parse.
+
+    One forward pass, so its time grows with the file's size: CDATA,
+    comments, declarations and end tags are copied as they are, and only
+    start tags are rewritten.
+    """
+    out, i, n = [], 0, len(content)
+    while i < n:
+        j = content.find(b"<", i)
+        if j < 0:
+            out.append(content[i:])
+            break
+        out.append(content[i:j])
+        for opener, closer in _SKIPPED_MARKUP:
+            if content.startswith(opener, j):
+                end = content.find(closer, j + len(opener))
+                i = n if end < 0 else end + len(closer)
+                out.append(content[j:i])
+                break
+        else:
+            i, tag = _start_tag_without_duplicates(content, j)
+            out.append(tag)
+    return b"".join(out)
+
+
+# A UTF-16 file's first bytes, with or without a byte-order mark: '<?' or
+# the mark, in either byte order.
+_UTF16_STARTS = {
+    b"\xff\xfe": "utf-16",
+    b"\xfe\xff": "utf-16",
+    b"<\x00": "utf-16-le",
+    b"\x00<": "utf-16-be",
+}
+_DECLARED_ENCODING = re.compile(r"""\A(<\?xml[^>]{0,200}?encoding\s*=\s*)(["'])[^"']{0,40}\2""")
+
+
+def _as_utf8(content: bytes) -> bytes:
+    """A UTF-16 export re-encoded as UTF-8, with its declaration saying so,
+    so _drop_duplicate_attributes can find its markup. Other files are
+    returned as they are."""
+    encoding = _UTF16_STARTS.get(content[:2])
+    if encoding is None:
+        return content
+    try:
+        text = content.decode(encoding).lstrip("\ufeff")
+    except UnicodeDecodeError:
+        return content  # left for the parser to report
+    return _DECLARED_ENCODING.sub(r"\1\2UTF-8\2", text, count=1).encode("utf-8")
+
+
+def _parse_xml(content: bytes):
+    _check_xml_shape(content)
+    return ElementTree.fromstring(content)
+
+
 def parse_jira(content: Union[bytes, str]) -> dict:
     """The issues in a Jira XML (RSS) export: {"issues": [...]}.
 
@@ -278,8 +387,14 @@ def parse_jira(content: Union[bytes, str]) -> dict:
     if isinstance(content, str):
         content = content.encode("utf-8")
     try:
-        _check_xml_shape(content)
-        root = ElementTree.fromstring(content)
+        try:
+            root = _parse_xml(content)
+        except ElementTree.ParseError as e:
+            # Only Jira's repeated attributes are repaired; any other fault,
+            # or one left after the repair, is reported.
+            if "duplicate attribute" not in str(e):
+                raise
+            root = _parse_xml(_drop_duplicate_attributes(_as_utf8(content)))
     except DefusedXmlException as e:
         raise EvidenceError(f"The XML uses a feature that isn't allowed ({type(e).__name__}).") from e
     except ElementTree.ParseError as e:

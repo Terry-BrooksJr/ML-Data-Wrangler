@@ -1374,3 +1374,72 @@ def test_a_trail_kept_on_a_pending_review_is_moved_too(monkeypatch, tickets, cas
     assert case["trail"]["key"] == f"topic-models/_triage-cases/{case['_id']}.json"
     assert triage.load_trail(case)["first"]["thinking"] == ["I weighed S3 against R1."]
     assert triage.kept_trail_count(cases, tickets) == 0
+
+
+# How Jira's export writes a comment that @mentions someone: rel twice.
+MENTION_COMMENT = (
+    '<comment id="11" author="pm" created="Mon, 2 Nov 2026 10:00:00 -0500">'
+    '<p><a href="https://jira.example.com/ViewProfile.jspa" class="user-hover" '
+    'rel="712020:abc" data-account-id="712020:abc" rel="noreferrer">Dev Person</a> '
+    "fixed in the next release</p></comment>"
+)
+
+
+def test_a_comment_mentioning_someone_still_parses():
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>")
+    found = evidence.extract(evidence.JIRA, xml.encode())
+    (issue,) = found.data["issues"]
+    assert issue["comments"][-1]["text"] == "Dev Person fixed in the next release"
+    # Hashed as given, so the same export can't be added twice.
+    assert found.sha256 == evidence._sha256(xml.encode())
+
+
+def test_only_repeated_attributes_are_repaired():
+    assert evidence._drop_duplicate_attributes(
+        b'<a rel="1" b=\'2\' rel="3">x <y></y> rel="4"</a>'
+    ) == b'<a rel="1" b=\'2\'>x <y></y> rel="4"</a>'
+    # Another fault in a file with repeated attributes is still reported.
+    broken = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace("</channel>", "")
+    with pytest.raises(evidence.EvidenceError, match="well-formed"):
+        evidence.extract(evidence.JIRA, broken.encode())
+
+
+def test_the_repair_leaves_cdata_and_quoted_brackets_alone():
+    repair = evidence._drop_duplicate_attributes
+    # CDATA is text, not markup: tag-like text in it is kept as written.
+    cdata = b'<s><![CDATA[Support <input x="1" x="2"> syntax]]></s><a x="1" x="2"/>'
+    assert repair(cdata) == b'<s><![CDATA[Support <input x="1" x="2"> syntax]]></s><a x="1"/>'
+    # A ">" inside a quoted value doesn't end the tag.
+    assert repair(b'<a title="a > b" rel="id" rel="noreferrer">Dev</a>') == (
+        b'<a title="a > b" rel="id">Dev</a>'
+    )
+    assert repair(b"<!-- <a x='1' x='2'> --><?pi <b c='1' c='2'>?>") == (
+        b"<!-- <a x='1' x='2'> --><?pi <b c='1' c='2'>?>"
+    )
+
+
+def test_a_cdata_summary_survives_a_repaired_export():
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace(
+        "<summary>Inline PDF viewer</summary>",
+        '<summary><![CDATA[Support <input x="1" x="2"> syntax]]></summary>',
+    )
+    (issue,) = evidence.extract(evidence.JIRA, xml.encode()).data["issues"]
+    assert issue["summary"] == 'Support <input x="1" x="2"> syntax'
+
+
+def test_the_repair_takes_linear_time_on_long_whitespace():
+    import time
+
+    content = b"<a" + b" " * 2_000_000 + b"><b x='1' x='2'/></a>"
+    started = time.monotonic()
+    assert evidence._drop_duplicate_attributes(content).endswith(b"><b x='1'/></a>")
+    assert time.monotonic() - started < 2  # the regex took ~1 s for 8,000 spaces
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_a_utf16_export_with_a_mention_still_parses(encoding):
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace(
+        'encoding="UTF-8"', 'encoding="UTF-16"'
+    )
+    (issue,) = evidence.extract(evidence.JIRA, xml.encode(encoding)).data["issues"]
+    assert issue["comments"][-1]["text"] == "Dev Person fixed in the next release"
