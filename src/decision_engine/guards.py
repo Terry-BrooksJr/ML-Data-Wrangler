@@ -356,6 +356,8 @@ def apply_guards(
     attempts = _verified_attempts(result, support_comment_times)
     result["reengage_attempts"] = attempts
     attempt_count = max(reengage_count, len(attempts))
+    # Kept on the review, so its next steps count attempts the same way.
+    result["reengage_attempt_count"] = attempt_count
     if result["classification"] == "flag_reengage" and attempt_count >= REENGAGE_LIMIT:
         drafted = result.get("draft_message")
         result["classification"] = "escalation_internal"

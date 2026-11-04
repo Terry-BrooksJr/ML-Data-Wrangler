@@ -33,14 +33,12 @@ def _answer(answer: Optional[dict], model_key: str = "model_version") -> str:
 
 
 def _before(row: dict) -> Optional[dict]:
-    """The answer this review replaced: the re-run review's, or the first model's."""
+    """The answer this review replaced: for a re-run, the ticket's review just
+    before it (rerun_of names the case's first review, which a later re-run
+    doesn't replace); otherwise the first model's."""
     review = row["review"]
     if review.get("rerun_of") is not None:
-        rerun_of = review["rerun_of"]
-        for earlier in row.get("earlier_reviews") or []:
-            if earlier.get("review_id") == rerun_of:
-                return earlier
-        return None
+        return next(iter(row.get("earlier_reviews") or []), None)
     return review.get("confirmation_of")
 
 
@@ -106,6 +104,16 @@ def _considered(row: dict) -> List[str]:
     return lines
 
 
+def attempts_so_far(row: dict) -> int:
+    """Re-engagement attempts already made in the stall, counted as the
+    engine's limit check counts them: max(the ticket's, the model's)."""
+    review = row["review"]
+    stored = review.get("reengage_attempt_count")
+    if stored is not None:
+        return stored
+    return max(len(review.get("reengage_attempts") or []), len(row.get("reengage_attempts") or []))
+
+
 def _next_steps(row: dict, added: bool, decided: bool) -> List[str]:
     review = row["review"]
     classification = review.get("classification")
@@ -114,7 +122,7 @@ def _next_steps(row: dict, added: bool, decided: bool) -> List[str]:
     if review.get("engine_error"):
         lines.append("The engine failed on this ticket: review it by hand, or classify it again.")
     elif classification == "flag_reengage":
-        attempt = len(review.get("reengage_attempts") or []) + 1
+        attempt = attempts_so_far(row) + 1
         lines.append(
             f"Check the draft below, then send it to the customer. This is re-engagement "
             f"attempt {attempt} of {REENGAGE_LIMIT} in the current stall"

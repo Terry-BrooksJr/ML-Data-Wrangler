@@ -160,7 +160,16 @@ EARLIER_REVIEW_FIELDS = (
     "rerun_of",
 )
 # The ticket fields a row carries besides its review.
-_ROW_TICKET_FIELDS = ("zendesk_id", "subject", "outcomes", REVIEW_ADDED_KEY, ADDED_REVIEWS_KEY)
+# reengage_attempts: the ticket's recorded attempts, for Arbitration Results
+# on reviews saved before they stored reengage_attempt_count.
+_ROW_TICKET_FIELDS = (
+    "zendesk_id",
+    "subject",
+    "outcomes",
+    REVIEW_ADDED_KEY,
+    ADDED_REVIEWS_KEY,
+    "reengage_attempts",
+)
 
 
 def _latest_review_pipeline(match: dict, limit: int) -> List[dict]:

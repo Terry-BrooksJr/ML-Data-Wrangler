@@ -132,3 +132,29 @@ def test_the_dialog_shows_plain_text(qapp):
     dialog = ArbitrationDialog("<b>not bold</b>", "30906")
     assert dialog.text.toPlainText() == "<b>not bold</b>"
     assert dialog.windowTitle() == "Arbitration Results: Ticket 30906"
+
+
+def test_a_later_rerun_is_compared_with_the_review_just_before_it():
+    # manual_triage -> flag_solve (re-run 1) -> manual_triage (re-run 2): both
+    # re-runs name the case's first review in rerun_of.
+    row = rerun_row("manual_triage", rerun_of="first", draft_message=None)
+    row["earlier_reviews"].insert(
+        0,
+        {"review_id": "rerun1", "classification": "flag_solve", "confidence": 85,
+         "model_version": "claude-opus-5.5", "rerun_of": "first"},
+    )
+    text = results_text(row)
+    assert "Yes: flag_solve (confidence 85, claude-opus-5.5) became manual_triage" in text
+
+
+def test_attempts_count_like_the_engines_limit_check():
+    from ui.dialogs.arbitration_dialog import attempts_so_far
+
+    # Older reviews: the ticket's recorded attempts count when the model cited none.
+    row = rerun_row(reengage_attempts=[])
+    row["reengage_attempts"] = ["2026-09-24T03:00:00Z"]
+    assert attempts_so_far(row) == 1
+    assert "attempt 2 of 2 in the current stall, so it should say it is the final follow-up." in results_text(row)
+    # Newer reviews store the count guards checked.
+    row["review"]["reengage_attempt_count"] = 0
+    assert attempts_so_far(row) == 0

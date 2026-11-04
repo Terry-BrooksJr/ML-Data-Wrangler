@@ -1619,3 +1619,11 @@ def test_the_arbiters_judging_call_records_its_request_id(monkeypatch):
     config = classify.EngineConfig.from_env()
     assert classify.judge_answers("arbiter", answer, answer, config, calls, record) == 1
     assert record["judge_audit"]["request_id"] == "req_test"
+
+
+def test_guards_keep_the_attempt_count_they_checked():
+    from decision_engine.guards import apply_guards
+
+    result = {"classification": "on_track", "confidence": 90, "signals_matched": [], "reengage_attempts": []}
+    apply_guards(result, reengage_count=1)
+    assert result["reengage_attempt_count"] == 1
