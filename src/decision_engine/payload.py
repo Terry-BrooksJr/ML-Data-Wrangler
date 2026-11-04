@@ -50,7 +50,7 @@ def support_comment_times(ticket_doc: dict) -> List[str]:
         _iso(c.get("timestamp"))
         for c in ticket_doc.get("transcript", [])
         if c.get("timestamp") is not None
-        and author_role(c.get("author"), c.get("role")) == SUPPORT
+        and author_role(c.get("author"), c.get("role"), c.get("timestamp")) == SUPPORT
     ]
 
 
@@ -100,8 +100,8 @@ def build_ticket_payload(
         "transcript": [
             {
                 "author": c.get("author"),
-                "role": author_role(c.get("author"), c.get("role")),
-                "staff": author_staff(c.get("author")),
+                "role": author_role(c.get("author"), c.get("role"), c.get("timestamp")),
+                "staff": author_staff(c.get("author"), c.get("timestamp")),
                 "is_internal_note": c.get("is_internal_note"),
                 "timestamp": _iso(c.get("timestamp")),
                 "body": wrap_untrusted(c.get("body")),

@@ -33,12 +33,14 @@ JIRA_INTEGRATION = "jira_integration"
 JIRA_INTEGRATION_USER_ID = "1031430881"
 
 
-def author_role(author, stored_role: Optional[str] = None) -> Optional[str]:
+def author_role(author, stored_role: Optional[str] = None, when=None) -> Optional[str]:
     """The role to show for a comment's author; None when unknown.
 
     A role stored at ingestion (the requester) wins; then the leadership
     roster (Support), the Jira integration, former Support staff (Support
     when they wrote it), and anyone else at Learnosity (internal).
+    `when` is the comment's timestamp: staff who changed department are
+    labelled with the one they were in then (staff.Staff.at).
     """
     if stored_role:
         return stored_role
@@ -49,7 +51,7 @@ def author_role(author, stored_role: Optional[str] = None) -> Optional[str]:
         return SUPPORT
     if author == JIRA_INTEGRATION_USER_ID:
         return JIRA_INTEGRATION
-    person = staff.lookup(author)
+    person = staff.lookup(author, when)
     if (
         person is not None
         and person.department == staff.SUPPORT
@@ -61,9 +63,10 @@ def author_role(author, stored_role: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def author_staff(author) -> Optional[dict]:
-    """Who the author is at Learnosity (staff.Staff.describe), or None."""
-    person = staff.lookup(author)
+def author_staff(author, when=None) -> Optional[dict]:
+    """Who the author was at Learnosity on `when` (staff.Staff.describe),
+    or None."""
+    person = staff.lookup(author, when)
     return person.describe() if person is not None else None
 
 

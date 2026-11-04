@@ -1,11 +1,12 @@
 """What the model is told about a ticket's authors and Jira links."""
 
 import json
+from datetime import datetime, timezone
 
 import mongomock
 import pytest
 from decision_engine import authors, jira_links, leadership, staff
-from decision_engine.payload import build_ticket_payload
+from decision_engine.payload import build_ticket_payload, support_comment_times
 from fixtures import CATEGORY_FIXTURES
 from test_wrangler_mongo import data_dir, wrangler  # noqa: F401 (fixtures)
 
@@ -13,6 +14,7 @@ STEPHEN = "384720527257"  # on the leadership roster
 KATE = "377734889717"  # VP of Product Management
 LILLY = "375248489818"  # former Support Engineer
 DOUGLAS = "22496509323677"  # Questionmark support
+CONOR = "361029724105"  # Support until mid-2023, then engineering
 
 
 def payload_data(ticket):
@@ -71,9 +73,45 @@ def test_staff_roster_is_consistent():
         assert person.department in staff.AREAS, person
         assert person.seniority in staff.SENIORITY, person
         assert person.org in (staff.LEARNOSITY, staff.QUESTIONMARK), person
-    # Support routing and the staff roster agree on who is in Support.
+        for stint in person.earlier:
+            assert stint.department in staff.AREAS, person
+            assert stint.seniority in staff.SENIORITY, person
+    # Support routing and the staff roster agree on who is in Support, and
+    # call them the same thing.
     for person in leadership.ROSTER:
-        assert staff.lookup(person.user_id).department == staff.SUPPORT, person
+        member = staff.lookup(person.user_id)
+        assert member.department == staff.SUPPORT, person
+        assert member.name == person.name, person
+
+
+@pytest.mark.parametrize(
+    "when, role, department, former",
+    [
+        (datetime(2022, 9, 16, tzinfo=timezone.utc), "support", staff.SUPPORT, True),
+        ("2023-06-20T09:00:00Z", "support", staff.SUPPORT, True),
+        ("2024-01-02T09:00:00Z", "internal", staff.ENGINEERING, False),
+        (None, "internal", staff.ENGINEERING, False),
+        ("not a time", "internal", staff.ENGINEERING, False),
+    ],
+)
+def test_staff_who_moved_are_labelled_by_when_they_wrote(
+    when, role, department, former
+):
+    assert authors.author_role(CONOR, None, when) == role
+    described = authors.author_staff(CONOR, when)
+    assert (described["department"], described["former"]) == (department, former)
+
+
+def test_support_comment_times_include_support_era_comments():
+    old = datetime(2022, 9, 16, tzinfo=timezone.utc)
+    new = datetime(2024, 1, 2, tzinfo=timezone.utc)
+    ticket = {
+        "transcript": [
+            {"author": CONOR, "role": None, "timestamp": old},
+            {"author": CONOR, "role": None, "timestamp": new},
+        ]
+    }
+    assert support_comment_times(ticket) == [old.isoformat()]
 
 
 def test_prompt_lists_every_department():

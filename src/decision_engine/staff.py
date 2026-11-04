@@ -13,10 +13,16 @@ but with no department recorded, so their comments show as "internal". Only
 IDs and names are kept here, never emails.
 
 leadership.ROSTER stays the source for Support routing; everyone on it is
-here too, under SUPPORT (test_decision_data checks it).
+here too, under SUPPORT and the same name (test_decision_data checks it).
+
+Someone who changed department keeps their earlier roles in `earlier`, so a
+comment is labelled with the role its author held when they wrote it
+(lookup's `when`): a Support engineer's old replies stay Support's after
+they move to engineering.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from typing import Dict, Optional, Tuple
 
 # Departments. Each is a value the payload's `staff.department` can hold.
@@ -59,6 +65,16 @@ QUESTIONMARK = "questionmark"
 
 
 @dataclass(frozen=True)
+class Stint:
+    """A role someone held before their current one, up to `until`."""
+
+    until: date  # the first day they were no longer in this role
+    department: str
+    title: str
+    seniority: str
+
+
+@dataclass(frozen=True)
 class Staff:
     user_id: str  # Zendesk user ID, as a comment's `author` holds it
     name: str
@@ -67,6 +83,27 @@ class Staff:
     seniority: str
     former: bool = False  # has left that role; still shown for old comments
     org: str = LEARNOSITY
+    earlier: Tuple[Stint, ...] = ()  # oldest first
+
+    def at(self, when) -> "Staff":
+        """This person as they were on `when` (a date, datetime or ISO
+        string); as they are now when `when` is missing or unreadable.
+
+        In an earlier role they are `former`: they've since left it.
+        """
+        day = _day(when)
+        if day is not None:
+            for stint in self.earlier:
+                if day < stint.until:
+                    return replace(
+                        self,
+                        department=stint.department,
+                        title=stint.title,
+                        seniority=stint.seniority,
+                        former=True,
+                        earlier=(),
+                    )
+        return self
 
     def describe(self) -> dict:
         """What the payload shows for this person's comments."""
@@ -83,14 +120,14 @@ class Staff:
 ROSTER: Tuple[Staff, ...] = (
     Staff("387134954297", "Chris Short", SUPPORT, "Engineer", INDIVIDUAL),
     Staff("384720516977", "Anthony Mai", SUPPORT, "Engineer", INDIVIDUAL),
-    Staff("372535774197", "Kit Tumulak", SUPPORT, "Engineer", INDIVIDUAL),
+    Staff("372535774197", "Kit Amiel Tumulak", SUPPORT, "Engineer", INDIVIDUAL),
     Staff("1085778551", "Rich Shupe", SUPPORT, "VP of Support", VP),
     Staff("12289991012893", "Will Griffiths", SUPPORT, "Engineer", INDIVIDUAL),
     Staff("361165286529", "Allain Dollete", SUPPORT, "Team Lead", MANAGER),
     Staff("384720527257", "Stephen Sayage", SUPPORT, "Engineer", INDIVIDUAL),
     Staff("385812489257", "Michael Fares", SUPPORT, "Engineer", INDIVIDUAL),
-    Staff("12289975534365", "JR Brooks", SUPPORT, "Engineer", INDIVIDUAL),
-    Staff("361165271809", "Horacio Balseiro", SUPPORT, "Team Lead", MANAGER),
+    Staff("12289975534365", "Terry Brooks", SUPPORT, "Engineer", INDIVIDUAL),
+    Staff("361165271809", "Horacio Balserio", SUPPORT, "Team Lead", MANAGER),
     Staff("9281613249", "Vikram Pai", PRODUCT, "Product Manager", INDIVIDUAL),
     Staff("377734889717", "Kate Hake", PRODUCT, "VP of Product Management", VP),
     Staff("16633656808861", "Patrick Taylor", PRODUCT, "Product Manager", INDIVIDUAL),
@@ -99,8 +136,10 @@ ROSTER: Tuple[Staff, ...] = (
         "361029724105",
         "Conor Walsh",
         ENGINEERING,
-        "Former Support Engineer/Current Product Engineer",
+        "Product Engineer",
         INDIVIDUAL,
+        # Every comment of his in the export (to 2023-06-20) is Support work.
+        earlier=(Stint(date(2023, 7, 1), SUPPORT, "Support Engineer", INDIVIDUAL),),
     ),
     Staff("22685852360221", "Audrey Auyang", PRODUCT, "Product Manager", INDIVIDUAL),
     Staff(
@@ -170,9 +209,7 @@ ROSTER: Tuple[Staff, ...] = (
         "Customer Success Manager",
         INDIVIDUAL,
     ),
-    Staff(
-        "361395273645", "Mutya Aller", PLATFORM_SRE, "Service Desk Manager", INDIVIDUAL
-    ),
+    Staff("361395273645", "Mutya Aller", PLATFORM_SRE, "Service Desk Manager", MANAGER),
     Staff("1086515311", "Adam Bextream", PRODUCT, "Product Manager", INDIVIDUAL),
     Staff(
         "17352655439901",
@@ -536,9 +573,23 @@ OTHER_STAFF_IDS = frozenset(
 _BY_ID = {s.user_id: s for s in ROSTER}
 
 
-def lookup(user_id) -> Optional[Staff]:
-    """The roster entry for user_id, or None."""
-    return _BY_ID.get(str(user_id).strip()) if user_id is not None else None
+def _day(when) -> Optional[date]:
+    if isinstance(when, datetime):
+        return when.date()
+    if isinstance(when, date):
+        return when
+    if isinstance(when, str):
+        try:
+            return datetime.fromisoformat(when.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+    return None
+
+
+def lookup(user_id, when=None) -> Optional[Staff]:
+    """The roster entry for user_id as of `when` (Staff.at), or None."""
+    person = _BY_ID.get(str(user_id).strip()) if user_id is not None else None
+    return person.at(when) if person is not None else None
 
 
 def is_staff(user_id) -> bool:
