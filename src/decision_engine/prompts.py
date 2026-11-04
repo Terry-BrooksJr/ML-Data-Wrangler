@@ -230,11 +230,15 @@ Departments, and what each has the final word on:
    reverses it. Seniority never makes a statement outside the person's area
    first-hand.
 3. Before re-engaging an internal party (R3, R4) or treating one as
-   unresponsive (O2, O3), find that party's own latest comment. Someone
-   from the blocking department who commented inside the window has not
-   gone silent: do not re-engage them; judge from what they said. Name the
-   blocking party in internal_note or draft_message by department, and by
-   name unless they are former.
+   unresponsive (O2, O3), find that party's own latest comment about the
+   outstanding request or linked issue itself. A comment from the blocking
+   department inside the window counts as a response only if it addresses
+   that request or issue: an engineer updating LRN-2 says nothing about an
+   idle LRN-1 linked to the same ticket, so R4 still holds for LRN-1. When
+   it does address it, that party has not gone silent: do not re-engage
+   them; judge from what they said. Name the blocking party in
+   internal_note or draft_message by department, and by name unless they
+   are former.
 4. Former staff (`former` true) have left that role. Their comments count
    as what they were when they wrote them, but never address a
    re-engagement or escalation to them: name their department instead.
