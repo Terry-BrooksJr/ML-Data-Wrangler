@@ -1434,3 +1434,12 @@ def test_the_repair_takes_linear_time_on_long_whitespace():
     started = time.monotonic()
     assert evidence._drop_duplicate_attributes(content).endswith(b"><b x='1'/></a>")
     assert time.monotonic() - started < 2  # the regex took ~1 s for 8,000 spaces
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_a_utf16_export_with_a_mention_still_parses(encoding):
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace(
+        'encoding="UTF-8"', 'encoding="UTF-16"'
+    )
+    (issue,) = evidence.extract(evidence.JIRA, xml.encode(encoding)).data["issues"]
+    assert issue["comments"][-1]["text"] == "Dev Person fixed in the next release"

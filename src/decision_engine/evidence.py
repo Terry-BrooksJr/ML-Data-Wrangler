@@ -347,6 +347,31 @@ def _drop_duplicate_attributes(content: bytes) -> bytes:
     return b"".join(out)
 
 
+# A UTF-16 file's first bytes, with or without a byte-order mark: '<?' or
+# the mark, in either byte order.
+_UTF16_STARTS = {
+    b"\xff\xfe": "utf-16",
+    b"\xfe\xff": "utf-16",
+    b"<\x00": "utf-16-le",
+    b"\x00<": "utf-16-be",
+}
+_DECLARED_ENCODING = re.compile(r"""\A(<\?xml[^>]{0,200}?encoding\s*=\s*)(["'])[^"']{0,40}\2""")
+
+
+def _as_utf8(content: bytes) -> bytes:
+    """A UTF-16 export re-encoded as UTF-8, with its declaration saying so,
+    so _drop_duplicate_attributes can find its markup. Other files are
+    returned as they are."""
+    encoding = _UTF16_STARTS.get(content[:2])
+    if encoding is None:
+        return content
+    try:
+        text = content.decode(encoding).lstrip("\ufeff")
+    except UnicodeDecodeError:
+        return content  # left for the parser to report
+    return _DECLARED_ENCODING.sub(r"\1\2UTF-8\2", text, count=1).encode("utf-8")
+
+
 def _parse_xml(content: bytes):
     _check_xml_shape(content)
     return ElementTree.fromstring(content)
@@ -369,7 +394,7 @@ def parse_jira(content: Union[bytes, str]) -> dict:
             # or one left after the repair, is reported.
             if "duplicate attribute" not in str(e):
                 raise
-            root = _parse_xml(_drop_duplicate_attributes(content))
+            root = _parse_xml(_drop_duplicate_attributes(_as_utf8(content)))
     except DefusedXmlException as e:
         raise EvidenceError(f"The XML uses a feature that isn't allowed ({type(e).__name__}).") from e
     except ElementTree.ParseError as e:
