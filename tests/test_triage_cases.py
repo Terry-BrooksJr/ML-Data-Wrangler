@@ -1402,3 +1402,35 @@ def test_only_repeated_attributes_are_repaired():
     broken = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace("</channel>", "")
     with pytest.raises(evidence.EvidenceError, match="well-formed"):
         evidence.extract(evidence.JIRA, broken.encode())
+
+
+def test_the_repair_leaves_cdata_and_quoted_brackets_alone():
+    repair = evidence._drop_duplicate_attributes
+    # CDATA is text, not markup: tag-like text in it is kept as written.
+    cdata = b'<s><![CDATA[Support <input x="1" x="2"> syntax]]></s><a x="1" x="2"/>'
+    assert repair(cdata) == b'<s><![CDATA[Support <input x="1" x="2"> syntax]]></s><a x="1"/>'
+    # A ">" inside a quoted value doesn't end the tag.
+    assert repair(b'<a title="a > b" rel="id" rel="noreferrer">Dev</a>') == (
+        b'<a title="a > b" rel="id">Dev</a>'
+    )
+    assert repair(b"<!-- <a x='1' x='2'> --><?pi <b c='1' c='2'>?>") == (
+        b"<!-- <a x='1' x='2'> --><?pi <b c='1' c='2'>?>"
+    )
+
+
+def test_a_cdata_summary_survives_a_repaired_export():
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace(
+        "<summary>Inline PDF viewer</summary>",
+        '<summary><![CDATA[Support <input x="1" x="2"> syntax]]></summary>',
+    )
+    (issue,) = evidence.extract(evidence.JIRA, xml.encode()).data["issues"]
+    assert issue["summary"] == 'Support <input x="1" x="2"> syntax'
+
+
+def test_the_repair_takes_linear_time_on_long_whitespace():
+    import time
+
+    content = b"<a" + b" " * 2_000_000 + b"><b x='1' x='2'/></a>"
+    started = time.monotonic()
+    assert evidence._drop_duplicate_attributes(content).endswith(b"><b x='1'/></a>")
+    assert time.monotonic() - started < 2  # the regex took ~1 s for 8,000 spaces

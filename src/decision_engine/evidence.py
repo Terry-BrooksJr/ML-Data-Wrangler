@@ -268,9 +268,53 @@ def _check_xml_shape(content: bytes) -> None:
             element.clear()
 
 
-# A start tag, and one attribute in it, for _drop_duplicate_attributes.
-_START_TAG = re.compile(rb"<[A-Za-z_][^<>]*>")
-_ATTRIBUTE = re.compile(rb"""\s+([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')""")
+_XML_SPACE = frozenset(b" \t\r\n")
+# Markup copied untouched by _drop_duplicate_attributes: (opener, closer).
+_SKIPPED_MARKUP = ((b"<![CDATA[", b"]]>"), (b"<!--", b"-->"), (b"<?", b"?>"), (b"<!", b">"), (b"</", b">"))
+
+
+def _start_tag_without_duplicates(content: bytes, start: int):
+    """Reads the start tag at `start`, forward only: (end, the tag with the
+    first of each repeated attribute kept). Quoted values may hold ">".
+    Anything malformed is returned unchanged up to where reading stopped,
+    for the parser to report."""
+    n = len(content)
+    k = start + 1
+    while k < n and content[k] not in _XML_SPACE and content[k] not in b"/>":
+        k += 1
+    parts, seen = [content[start:k]], set()
+    while True:
+        gap = k
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n:
+            return n, b"".join(parts) + content[gap:n]
+        if content[k] == ord(">"):
+            parts.append(content[gap : k + 1])
+            return k + 1, b"".join(parts)
+        if content.startswith(b"/>", k):
+            parts.append(content[gap : k + 2])
+            return k + 2, b"".join(parts)
+        name_start = k
+        while k < n and content[k] not in _XML_SPACE and content[k] not in b"=/>":
+            k += 1
+        name = content[name_start:k]
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n or content[k] != ord("="):
+            return k, b"".join(parts) + content[gap:k]
+        k += 1
+        while k < n and content[k] in _XML_SPACE:
+            k += 1
+        if k >= n or content[k] not in b"\"'":
+            return k, b"".join(parts) + content[gap:k]
+        close = content.find(content[k : k + 1], k + 1)
+        if close < 0:
+            return n, b"".join(parts) + content[gap:n]
+        k = close + 1
+        if name not in seen:
+            seen.add(name)
+            parts.append(content[gap:k])
 
 
 def _drop_duplicate_attributes(content: bytes) -> bytes:
@@ -279,21 +323,28 @@ def _drop_duplicate_attributes(content: bytes) -> bytes:
     Jira's export writes an @mention link in a comment with rel twice
     (rel="<account id>" ... rel="noreferrer"), which XML forbids, so a
     comment that mentions anyone made the whole export fail to parse.
+
+    One forward pass, so its time grows with the file's size: CDATA,
+    comments, declarations and end tags are copied as they are, and only
+    start tags are rewritten.
     """
-
-    def tag(match):
-        seen = set()
-
-        def attribute(attr):
-            name = attr.group(1)
-            if name in seen:
-                return b""
-            seen.add(name)
-            return attr.group(0)
-
-        return _ATTRIBUTE.sub(attribute, match.group(0))
-
-    return _START_TAG.sub(tag, content)
+    out, i, n = [], 0, len(content)
+    while i < n:
+        j = content.find(b"<", i)
+        if j < 0:
+            out.append(content[i:])
+            break
+        out.append(content[i:j])
+        for opener, closer in _SKIPPED_MARKUP:
+            if content.startswith(opener, j):
+                end = content.find(closer, j + len(opener))
+                i = n if end < 0 else end + len(closer)
+                out.append(content[j:i])
+                break
+        else:
+            i, tag = _start_tag_without_duplicates(content, j)
+            out.append(tag)
+    return b"".join(out)
 
 
 def _parse_xml(content: bytes):
