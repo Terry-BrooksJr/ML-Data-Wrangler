@@ -268,6 +268,39 @@ def _check_xml_shape(content: bytes) -> None:
             element.clear()
 
 
+# A start tag, and one attribute in it, for _drop_duplicate_attributes.
+_START_TAG = re.compile(rb"<[A-Za-z_][^<>]*>")
+_ATTRIBUTE = re.compile(rb"""\s+([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')""")
+
+
+def _drop_duplicate_attributes(content: bytes) -> bytes:
+    """Keeps the first of each repeated attribute in every start tag.
+
+    Jira's export writes an @mention link in a comment with rel twice
+    (rel="<account id>" ... rel="noreferrer"), which XML forbids, so a
+    comment that mentions anyone made the whole export fail to parse.
+    """
+
+    def tag(match):
+        seen = set()
+
+        def attribute(attr):
+            name = attr.group(1)
+            if name in seen:
+                return b""
+            seen.add(name)
+            return attr.group(0)
+
+        return _ATTRIBUTE.sub(attribute, match.group(0))
+
+    return _START_TAG.sub(tag, content)
+
+
+def _parse_xml(content: bytes):
+    _check_xml_shape(content)
+    return ElementTree.fromstring(content)
+
+
 def parse_jira(content: Union[bytes, str]) -> dict:
     """The issues in a Jira XML (RSS) export: {"issues": [...]}.
 
@@ -278,8 +311,14 @@ def parse_jira(content: Union[bytes, str]) -> dict:
     if isinstance(content, str):
         content = content.encode("utf-8")
     try:
-        _check_xml_shape(content)
-        root = ElementTree.fromstring(content)
+        try:
+            root = _parse_xml(content)
+        except ElementTree.ParseError as e:
+            # Only Jira's repeated attributes are repaired; any other fault,
+            # or one left after the repair, is reported.
+            if "duplicate attribute" not in str(e):
+                raise
+            root = _parse_xml(_drop_duplicate_attributes(content))
     except DefusedXmlException as e:
         raise EvidenceError(f"The XML uses a feature that isn't allowed ({type(e).__name__}).") from e
     except ElementTree.ParseError as e:

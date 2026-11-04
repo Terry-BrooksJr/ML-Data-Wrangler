@@ -1374,3 +1374,31 @@ def test_a_trail_kept_on_a_pending_review_is_moved_too(monkeypatch, tickets, cas
     assert case["trail"]["key"] == f"topic-models/_triage-cases/{case['_id']}.json"
     assert triage.load_trail(case)["first"]["thinking"] == ["I weighed S3 against R1."]
     assert triage.kept_trail_count(cases, tickets) == 0
+
+
+# How Jira's export writes a comment that @mentions someone: rel twice.
+MENTION_COMMENT = (
+    '<comment id="11" author="pm" created="Mon, 2 Nov 2026 10:00:00 -0500">'
+    '<p><a href="https://jira.example.com/ViewProfile.jspa" class="user-hover" '
+    'rel="712020:abc" data-account-id="712020:abc" rel="noreferrer">Dev Person</a> '
+    "fixed in the next release</p></comment>"
+)
+
+
+def test_a_comment_mentioning_someone_still_parses():
+    xml = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>")
+    found = evidence.extract(evidence.JIRA, xml.encode())
+    (issue,) = found.data["issues"]
+    assert issue["comments"][-1]["text"] == "Dev Person fixed in the next release"
+    # Hashed as given, so the same export can't be added twice.
+    assert found.sha256 == evidence._sha256(xml.encode())
+
+
+def test_only_repeated_attributes_are_repaired():
+    assert evidence._drop_duplicate_attributes(
+        b'<a rel="1" b=\'2\' rel="3">x <y></y> rel="4"</a>'
+    ) == b'<a rel="1" b=\'2\'>x <y></y> rel="4"</a>'
+    # Another fault in a file with repeated attributes is still reported.
+    broken = JIRA_XML.replace("</comments>", MENTION_COMMENT + "</comments>").replace("</channel>", "")
+    with pytest.raises(evidence.EvidenceError, match="well-formed"):
+        evidence.extract(evidence.JIRA, broken.encode())
