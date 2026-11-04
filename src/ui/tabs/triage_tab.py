@@ -240,26 +240,34 @@ def open_case_reviews(
 
 def attach_cases(tickets: Collection, rows: List[dict]) -> List[dict]:
     """Adds each row's manual-triage case (triage.py) as row["case"]: the
-    case its review opened, or the one it re-ran. A manual-triage review
-    whose case wasn't opened when it was saved gets one now."""
+    case its review opened, or the one it re-ran, else the ticket's open
+    case. When row["case"] isn't open but the ticket has another case that
+    is, that one is row["open_case"] (see actionable_case). A manual-triage
+    review whose case wasn't opened when it was saved gets one now."""
     cases = triage.get_cases_collection(tickets.database)
     review_ids = [row["review"].get("review_id") for row in rows]
     found = triage.cases_for_reviews(cases, review_ids)
     if triage.recover_missing_cases(tickets, cases, rows, found):
         found = triage.cases_for_reviews(cases, review_ids)
     # A ticket's newest review may be a later one than its open case's
-    # (reviewed again since): the row still offers the case's buttons.
-    unmatched = [row["zendesk_id"] for row in rows if row["review"].get("review_id") not in found]
+    # (reviewed again since), or a re-run that resolved one case while an
+    # older one stays open: the row still offers the open case's buttons.
+    needs_open = [
+        row["zendesk_id"]
+        for row in rows
+        if (found.get(row["review"].get("review_id")) or {}).get("status") != triage.OPEN
+    ]
     open_by_ticket = {}
-    if unmatched:
+    if needs_open:
         for case in cases.find(
-            {"zendesk_id": {"$in": unmatched}, "status": triage.OPEN}, {"trail.trail": 0}
+            {"zendesk_id": {"$in": needs_open}, "status": triage.OPEN}, {"trail.trail": 0}
         ).sort("created_at", 1):
             open_by_ticket[case["zendesk_id"]] = case  # the newest wins
     for row in rows:
-        row["case"] = found.get(row["review"].get("review_id")) or open_by_ticket.get(
-            row.get("zendesk_id")
-        )
+        own = found.get(row["review"].get("review_id"))
+        still_open = open_by_ticket.get(row.get("zendesk_id"))
+        row["case"] = own or still_open
+        row["open_case"] = still_open if own is not None and still_open is not None else None
     return rows
 
 
@@ -378,6 +386,9 @@ def format_review(row: dict) -> str:
     lines += format_earlier_reviews(row)
     if row.get("case"):
         lines += format_case(row["case"])
+    if row.get("open_case"):
+        lines += ["", "Another manual-triage case on this ticket is still open:"]
+        lines += format_case(row["open_case"])
     lines += ["", f"Review added to Zendesk: {'Yes' if row_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
@@ -396,6 +407,12 @@ def format_review(row: dict) -> str:
     return "\n".join(lines)
 
 
+def actionable_case(row: dict) -> Optional[dict]:
+    """The case Add Evidence and Re-run act on: the ticket's still-open case
+    when the row's own case is resolved, else the row's case."""
+    return row.get("open_case") or row.get("case")
+
+
 def replace_ticket_row(rows: List[dict], row: dict) -> List[dict]:
     """`row` first, in place of its ticket's old row: the table shows each
     ticket's newest review. The old review joins earlier_reviews, and an
@@ -404,8 +421,9 @@ def replace_ticket_row(rows: List[dict], row: dict) -> List[dict]:
     if old is not None:
         summary = {f: old["review"].get(f) for f in EARLIER_REVIEW_FIELDS}
         row = {**row, "earlier_reviews": [summary, *(old.get("earlier_reviews") or [])]}
-        if (old.get("case") or {}).get("status") == triage.OPEN and not row.get("case"):
-            row["case"] = old["case"]
+        still_open = actionable_case(old)
+        if (still_open or {}).get("status") == triage.OPEN and not row.get("case"):
+            row["case"] = still_open
     return [row, *(r for r in rows if r is not old)]
 
 
@@ -1583,7 +1601,7 @@ class TriageTab(QWidget):
     def _enable_case_buttons(self, busy: bool) -> None:
         """Add Evidence and Re-run, for a review with a manual-triage case."""
         row = self._selected_row()
-        case = row.get("case") if row is not None else None
+        case = actionable_case(row) if row is not None else None
         self.add_evidence_button.setEnabled(not busy and case is not None)
         problem = triage.rerun_problem(case) if case is not None else None
         self.rerun_button.setEnabled(not busy and case is not None and problem is None)
@@ -1596,9 +1614,10 @@ class TriageTab(QWidget):
     def add_evidence_to_selected(self) -> None:
         """Asks for a Jira export or Aha page and adds what it holds to the case."""
         row = self._selected_row()
-        if row is None or not row.get("case") or not self._configured(READ_ENV, notify=True):
+        case = actionable_case(row) if row is not None else None
+        if case is None or not self._configured(READ_ENV, notify=True):
             return
-        zendesk_id, case_id = row["zendesk_id"], row["case"]["_id"]
+        zendesk_id, case_id = row["zendesk_id"], case["_id"]
         dialog = EvidenceDialog(zendesk_id, self)
         if dialog.exec_() != EvidenceDialog.Accepted or dialog.evidence is None:
             return
@@ -1621,7 +1640,7 @@ class TriageTab(QWidget):
     def rerun_selected(self) -> None:
         """Confirms, then re-classifies the case's ticket on the arbiter with its evidence."""
         row = self._selected_row()
-        case = row.get("case") if row is not None else None
+        case = actionable_case(row) if row is not None else None
         if case is None or not self._configured(REVIEW_ENV, notify=True):
             return
         problem = triage.rerun_problem(case)

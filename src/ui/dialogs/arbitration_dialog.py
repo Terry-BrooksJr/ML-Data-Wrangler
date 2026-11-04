@@ -136,7 +136,7 @@ def _next_steps(row: dict, added: bool, decided: bool) -> List[str]:
         questions = review.get("open_questions") or (row.get("case") or {}).get("open_questions") or []
         lines.append("A person needs to decide this ticket. Settle these open questions:")
         lines += [f"  - {q}" for q in questions] or ["  (none recorded: see the reasoning above)"]
-        if (row.get("case") or {}).get("status") == "open":
+        if (row.get("open_case") or row.get("case") or {}).get("status") == "open":
             lines.append("Add Jira or Aha evidence that answers them, then use Re-run with Evidence.")
     if note and classification != "flag_reengage":
         lines += ["", "Internal note:", note]

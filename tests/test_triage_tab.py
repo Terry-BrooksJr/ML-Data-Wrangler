@@ -1884,3 +1884,36 @@ def test_a_rerun_opens_its_arbitration_results(qapp, configured, stored):
         tab.table.selectRow(row)
         is_rerun = tab._selected_row()["zendesk_id"] == zendesk_id
         assert tab.results_button.isEnabled() == is_rerun
+
+
+def test_an_older_open_case_stays_reachable_when_the_newest_is_resolved(
+    qapp, configured, stored, with_case
+):
+    # The ticket's newest review re-ran a second case and resolved it; the
+    # first case (with_case's) is still open.
+    open_id = with_case.find_one({})["_id"]
+    with_case.insert_one(
+        {
+            "zendesk_id": CATEGORY_FIXTURES["flag_solve"]["zendesk_id"],
+            "review_id": "r-other",
+            "status": triage.RESOLVED,
+            "route": triage.GUARD_OVERRIDE,
+            "open_questions": [],
+            "trail": {"stored": "inline", "trail": {}},
+            "evidence": [],
+            "reruns": [{"review_id": "r-flag_solve-5", "classification": "flag_solve", "confidence": 90}],
+        }
+    )
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    select_classification(tab, "flag_solve")
+
+    row = tab._selected_row()
+    assert row["case"]["review_id"] == "r-other"
+    assert triage_tab.actionable_case(row)["_id"] == open_id
+    assert tab.add_evidence_button.isEnabled()
+    text = tab.detail.toPlainText()
+    assert "Manual-triage case (resolved)" in text
+    assert "Another manual-triage case on this ticket is still open:" in text
+    assert "  - Has LRN-1234 been released?" in text
