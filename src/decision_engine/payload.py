@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from .authors import author_role, SUPPORT
+from .authors import author_role, author_staff, SUPPORT
 from .jira_links import JIRA_LINKS_KEY, is_issue_key, is_timestamp
 
 
@@ -65,7 +65,8 @@ def build_ticket_payload(
     the agent's working input. Send the already-mapped, structured fields,
     since those are what the taxonomy's trigger conditions reference
     (IsInternalNote, Assignee, linked Jira issues, etc). Each comment's
-    role is filled in from known IDs (authors.author_role).
+    role is filled in from known IDs (authors.author_role), and a staff
+    member's department, title and seniority added (authors.author_staff).
 
     Customer- and agent-authored text (comment bodies and the subject) is
     wrapped in <customer_text> tags. This is an injection guard: that content
@@ -100,6 +101,7 @@ def build_ticket_payload(
             {
                 "author": c.get("author"),
                 "role": author_role(c.get("author"), c.get("role")),
+                "staff": author_staff(c.get("author")),
                 "is_internal_note": c.get("is_internal_note"),
                 "timestamp": _iso(c.get("timestamp")),
                 "body": wrap_untrusted(c.get("body")),
