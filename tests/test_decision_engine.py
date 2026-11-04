@@ -1592,3 +1592,20 @@ def test_a_failed_classification_carries_its_calls(routed_model):
     with pytest.raises(classify.EngineError) as raised:
         classify.classify_ticket("payload")
     assert [c["model"] for c in raised.value.model_calls] == ["primary", "secondary"]
+
+
+def test_client_copies_proxy_request_id():
+    """Cheaper Inference sends x-ci-request-id, not request-id (#30906 audit)."""
+    import httpx
+
+    response = httpx.Response(200, headers={"x-ci-request-id": "ci-123"})
+    classify._copy_proxy_request_id(response)
+    assert response.headers["request-id"] == "ci-123"
+
+    response = httpx.Response(200, headers={"request-id": "req_1", "x-ci-request-id": "ci-123"})
+    classify._copy_proxy_request_id(response)
+    assert response.headers["request-id"] == "req_1"
+
+    response = httpx.Response(200)
+    classify._copy_proxy_request_id(response)
+    assert "request-id" not in response.headers
