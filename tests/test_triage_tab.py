@@ -68,27 +68,58 @@ def test_count_awaiting(stored):
     assert count_awaiting(stored) == 1
 
 
-def test_recent_reviews_flattens_newest_first(stored):
+def add_reviewed(tickets, zendesk_id, *reviews):
+    """Another reviewed ticket, so a test has more than two rows."""
+    ticket = copy.deepcopy(CATEGORY_FIXTURES["on_track"])
+    ticket.update(zendesk_id=zendesk_id, awaiting_review=False, agent_reviews=list(reviews))
+    tickets.insert_one(ticket)
+
+
+def test_recent_reviews_shows_each_tickets_latest_review(stored):
     rows = recent_reviews(stored)
-    assert [row["review"]["classification"] for row in rows] == [
-        "flag_solve",
-        "flag_reengage",
-        "manual_triage",
+    assert [row["review"]["classification"] for row in rows] == ["flag_solve", "flag_reengage"]
+    assert {"zendesk_id", "subject", "review", "earlier_reviews"} <= set(rows[0])
+    # The ticket's older review is summarised, not given its own row.
+    assert [(e["review_id"], e["classification"]) for e in rows[0]["earlier_reviews"]] == [
+        ("r-manual_triage-60", "manual_triage")
     ]
-    assert {"zendesk_id", "subject", "review"} <= set(rows[0])
+    assert rows[1]["earlier_reviews"] == []
+
+
+def test_recent_reviews_shows_a_rerun_once_it_is_the_newest(stored):
+    zendesk_id = CATEGORY_FIXTURES["flag_reengage"]["zendesk_id"]
+    stored.update_one(
+        {"zendesk_id": zendesk_id},
+        {"$push": {"agent_reviews": review("flag_reengage", 1, rerun_of="r-flag_reengage-30")}},
+    )
+    rows = {row["zendesk_id"]: row for row in recent_reviews(stored)}
+    assert rows[zendesk_id]["review"]["rerun_of"] == "r-flag_reengage-30"
+    assert [e["review_id"] for e in rows[zendesk_id]["earlier_reviews"]] == ["r-flag_reengage-30"]
+    assert "(re-run with evidence)" not in format_review(rows[zendesk_id])
+    assert "Earlier reviews of this ticket (newest first):" in format_review(rows[zendesk_id])
 
 
 def test_recent_reviews_respects_limit(stored):
-    assert len(recent_reviews(stored, limit=2)) == 2
+    assert len(recent_reviews(stored, limit=1)) == 1
 
 
 def test_recent_reviews_returns_more_than_the_old_200(stored):
-    for minutes_ago in range(250):
-        stored.update_one(
-            {"zendesk_id": CATEGORY_FIXTURES["flag_solve"]["zendesk_id"]},
-            {"$push": {"agent_reviews": review("flag_solve", 100 + minutes_ago)}},
-        )
-    assert len(recent_reviews(stored)) == 253
+    for n in range(250):
+        add_reviewed(stored, f"t{n}", review("on_track", 100 + n, review_id=f"t{n}"))
+    assert len(recent_reviews(stored)) == 252
+
+
+def test_a_batch_review_replaces_its_tickets_row():
+    rows = [
+        {"zendesk_id": "1", "review": {"review_id": "a", "classification": "manual_triage"},
+         "earlier_reviews": [], "case": {"status": triage.OPEN}},
+        {"zendesk_id": "2", "review": {"review_id": "b"}, "earlier_reviews": []},
+    ]
+    new = {"zendesk_id": "1", "review": {"review_id": "c", "classification": "flag_solve"}}
+    replaced = triage_tab.replace_ticket_row(rows, new)
+    assert [r["review"]["review_id"] for r in replaced] == ["c", "b"]
+    assert [e["review_id"] for e in replaced[0]["earlier_reviews"]] == ["a"]
+    assert replaced[0]["case"] == {"status": triage.OPEN}
 
 
 def test_format_review_includes_draft_only_when_present(stored):
@@ -160,10 +191,10 @@ def test_refresh_fills_status_and_table(qapp, configured, stored):
     wait_until_idle(qapp, tab)
 
     assert tab.status_label.text() == "1 ticket(s) awaiting review."
-    assert tab.table.rowCount() == 3
+    assert tab.table.rowCount() == 2
     classification_column = triage_tab.COLUMNS.index("Classification")
-    shown = [tab.table.item(row, classification_column).text() for row in range(3)]
-    assert shown == ["flag_solve", "flag_reengage", "manual_triage"]
+    shown = [tab.table.item(row, classification_column).text() for row in range(2)]
+    assert shown == ["flag_solve", "flag_reengage"]
 
 
 def test_selecting_a_row_shows_its_detail(qapp, configured, stored):
@@ -191,7 +222,7 @@ def test_refresh_needs_only_mongo(qapp, monkeypatch, dialogs, stored):
     tab.refresh()
     wait_until_idle(qapp, tab)
 
-    assert tab.table.rowCount() == 3
+    assert tab.table.rowCount() == 2
     assert dialogs == []
 
 
@@ -532,6 +563,7 @@ def test_copy_puts_the_whole_review_on_the_clipboard(qapp, configured, stored):
 
 
 def test_table_shows_decision_and_added_to_zendesk(qapp, configured, stored):
+    add_reviewed(stored, "t-old", review("on_track", 90, review_id="t-old"))
     tab = make_tab(stored)
     tab.refresh()
     wait_until_idle(qapp, tab)
@@ -582,6 +614,7 @@ def test_step_awaiting_skips_decided_and_added_rows():
 
 
 def test_next_and_previous_move_between_undecided_reviews(qapp, configured, stored):
+    add_reviewed(stored, "t-old", review("on_track", 90, review_id="t-old"))
     tab = make_tab(stored)
     tab.refresh()
     wait_until_idle(qapp, tab)
@@ -609,8 +642,8 @@ def test_review_added_marks_only_the_selected_review(qapp, configured, dialogs, 
     tab = make_tab(stored)
     tab.refresh()
     wait_until_idle(qapp, tab)
-    # Rows 0 and 2 are two reviews of the same ticket.
-    assert tab._rows[0]["zendesk_id"] == tab._rows[2]["zendesk_id"]
+    # Row 0's ticket also has an earlier review, which isn't marked.
+    earlier = tab._rows[0]["earlier_reviews"][0]["review_id"]
     tab.table.selectRow(0)
     tab.mark_selected_review_added()
     wait_until_idle(qapp, tab)
@@ -620,23 +653,22 @@ def test_review_added_marks_only_the_selected_review(qapp, configured, dialogs, 
         tab._rows[tab.table.item(r, 0).data(QtCore.Qt.UserRole)]["review"]["review_id"]: (
             tab.table.item(r, added).text()
         )
-        for r in range(3)
+        for r in range(2)
     }
     assert by_review == {
         tab._rows[0]["review"]["review_id"]: "Yes",
         tab._rows[1]["review"]["review_id"]: "No",
-        tab._rows[2]["review"]["review_id"]: "No",
     }
-    # The ticket's other review still needs a decision, so Next reaches it.
-    assert triage_tab.step_awaiting(tab._rows, 1, 1) == 2
+    assert not triage_tab.review_added(tab._rows[0], earlier)
 
 
 def test_status_says_when_reviews_are_capped(qapp, configured, monkeypatch, stored):
+    add_reviewed(stored, "t-old", review("on_track", 90, review_id="t-old"))
     monkeypatch.setattr(triage_tab, "REVIEW_ROW_LIMIT", 2)
     tab = make_tab(stored)
     tab._show_loaded((1, recent_reviews(stored, limit=2), 0))
     assert tab.status_label.text() == (
-        "1 ticket(s) awaiting review. Showing the newest 2 reviews."
+        "1 ticket(s) awaiting review. Showing the 2 most recently reviewed tickets."
     )
 
 
@@ -1664,7 +1696,8 @@ from ui.dialogs.evidence_dialog import EvidenceDialog  # noqa: E402
 
 @pytest.fixture
 def with_case(stored):
-    """A manual-triage case for the flag_solve ticket's first review."""
+    """A manual-triage case for the flag_solve ticket's first review. The
+    table shows that ticket's newer flag_solve review, which carries it."""
     cases = triage.get_cases_collection(stored.database)
     cases.insert_one(
         {
@@ -1697,7 +1730,7 @@ def test_a_case_is_shown_with_its_controls(qapp, configured, stored, with_case):
     tab.refresh()
     wait_until_idle(qapp, tab)
 
-    select_classification(tab, "manual_triage")
+    select_classification(tab, "flag_solve")
     text = tab.detail.toPlainText()
     assert "Manual-triage case (open): a code check downgraded the model's answer" in text
     assert "  - Has LRN-1234 been released?" in text
@@ -1733,14 +1766,14 @@ def test_evidence_and_a_rerun_from_the_tab(qapp, configured, monkeypatch, dialog
     tab = make_tab(stored)
     tab.refresh()
     wait_until_idle(qapp, tab)
-    select_classification(tab, "manual_triage")
+    select_classification(tab, "flag_solve")
 
     tab.add_evidence_to_selected()
     wait_until_idle(qapp, tab)
 
     case = with_case.find_one({})
     assert [e["data"]["issues"][0]["key"] for e in case["evidence"]] == ["LRN-1234"]
-    select_classification(tab, "manual_triage")
+    select_classification(tab, "flag_solve")
     assert "Jira LRN-1234 (Released, Fixed), added by" in tab.detail.toPlainText()
     assert tab.rerun_button.isEnabled()
 
@@ -1783,7 +1816,7 @@ def test_rerun_is_disabled_while_another_rerun_holds_the_case(qapp, configured, 
     tab.refresh()
     wait_until_idle(qapp, tab)
 
-    select_classification(tab, "manual_triage")
+    select_classification(tab, "flag_solve")
     assert not tab.rerun_button.isEnabled()
     assert tab.rerun_button.toolTip() == "A re-run of this case is in progress."
 
@@ -1793,7 +1826,7 @@ def test_retry_trail_uploads_reports_a_failure_and_a_success(qapp, configured, m
     tab = make_tab(stored)
     tab.refresh()
     wait_until_idle(qapp, tab)
-    select_classification(tab, "manual_triage")
+    select_classification(tab, "flag_solve")
     assert "its S3 upload failed: use Retry Trail Uploads" in tab.detail.toPlainText()
 
     def refuse(cases, tickets=None):
@@ -1826,3 +1859,28 @@ def test_a_reruns_failed_upload_is_shown():
         }
     )
     assert "  Re-run 1's reasoning trail is kept in MongoDB (its S3 upload failed: use Retry Trail Uploads)" in lines
+
+
+def test_a_rerun_opens_its_arbitration_results(qapp, configured, stored):
+    zendesk_id = CATEGORY_FIXTURES["flag_reengage"]["zendesk_id"]
+    stored.update_one(
+        {"zendesk_id": zendesk_id},
+        {"$push": {"agent_reviews": review("flag_solve", 1, rerun_of="r-flag_reengage-30")}},
+    )
+    tab = make_tab(stored)
+    tab._results_for = zendesk_id  # as rerun_selected's done() sets it
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+
+    assert tab._results_for is None
+    assert tab._results_dialog is not None and tab._results_dialog.isVisible()
+    text = tab._results_dialog.text.toPlainText()
+    assert "Yes: flag_reengage (confidence 80, test-model) became flag_solve" in text
+    assert "Solve the ticket in Zendesk." in text
+    tab._results_dialog.close()
+
+    # The button is offered only for the re-run ticket's row.
+    for row in range(tab.table.rowCount()):
+        tab.table.selectRow(row)
+        is_rerun = tab._selected_row()["zendesk_id"] == zendesk_id
+        assert tab.results_button.isEnabled() == is_rerun
