@@ -1592,3 +1592,38 @@ def test_a_failed_classification_carries_its_calls(routed_model):
     with pytest.raises(classify.EngineError) as raised:
         classify.classify_ticket("payload")
     assert [c["model"] for c in raised.value.model_calls] == ["primary", "secondary"]
+
+
+def test_client_copies_proxy_request_id():
+    """Cheaper Inference sends x-ci-request-id, not request-id (#30906 audit)."""
+    import httpx
+
+    response = httpx.Response(200, headers={"x-ci-request-id": "ci-123"})
+    classify._copy_proxy_request_id(response)
+    assert response.headers["request-id"] == "ci-123"
+
+    response = httpx.Response(200, headers={"request-id": "req_1", "x-ci-request-id": "ci-123"})
+    classify._copy_proxy_request_id(response)
+    assert response.headers["request-id"] == "req_1"
+
+    response = httpx.Response(200)
+    classify._copy_proxy_request_id(response)
+    assert "request-id" not in response.headers
+
+
+def test_the_arbiters_judging_call_records_its_request_id(monkeypatch):
+    client = FakeClient(json.dumps({"preferred": "B", "reasoning": "B fits"}))
+    monkeypatch.setattr(classify, "get_client", lambda: client)
+    answer = {"classification": "on_track", "confidence": 70, "signals_matched": [], "reasoning": "r"}
+    record, calls = {}, []
+    config = classify.EngineConfig.from_env()
+    assert classify.judge_answers("arbiter", answer, answer, config, calls, record) == 1
+    assert record["judge_audit"]["request_id"] == "req_test"
+
+
+def test_guards_keep_the_attempt_count_they_checked():
+    from decision_engine.guards import apply_guards
+
+    result = {"classification": "on_track", "confidence": 90, "signals_matched": [], "reengage_attempts": []}
+    apply_guards(result, reengage_count=1)
+    assert result["reengage_attempt_count"] == 1

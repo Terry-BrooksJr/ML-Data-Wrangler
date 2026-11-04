@@ -9,7 +9,7 @@ nothing here changes how tickets are classified or stored.
 import os
 import threading
 import time
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from embedding import embeddings
 from decision_engine import (
@@ -29,6 +29,7 @@ from decision_engine.zendesk_status import (
 )
 from decision_engine.guards import CLASSIFICATIONS, describe_signal
 from ui.dialogs.ab_test_dialog import ab_collections, ABTestDialog
+from ui.dialogs.arbitration_dialog import ArbitrationDialog, has_results, results_text
 from ui import theme, zendesk_links
 from ui.dialogs.evidence_dialog import EvidenceDialog
 from ui.dialogs.lessons_dialog import WeeklyReviewDialog
@@ -149,80 +150,134 @@ def count_awaiting(tickets: Collection) -> int:
     return tickets.count_documents({"awaiting_review": True, **persistence.REVIEWABLE})
 
 
-# One row per agent_reviews entry, after $unwind.
-_ROW_PROJECTION = {
-    "$project": {
-        "_id": 0,
-        "zendesk_id": 1,
-        "subject": 1,
-        "outcomes": 1,
-        REVIEW_ADDED_KEY: 1,
-        ADDED_REVIEWS_KEY: 1,
-        "review": "$agent_reviews",
-    }
-}
+# What a row keeps of each earlier review, for the detail pane's history.
+EARLIER_REVIEW_FIELDS = (
+    "review_id",
+    "reviewed_at",
+    "classification",
+    "confidence",
+    "model_version",
+    "rerun_of",
+)
+# The ticket fields a row carries besides its review.
+# reengage_attempts: the ticket's recorded attempts, for Arbitration Results
+# on reviews saved before they stored reengage_attempt_count.
+_ROW_TICKET_FIELDS = (
+    "zendesk_id",
+    "subject",
+    "outcomes",
+    REVIEW_ADDED_KEY,
+    ADDED_REVIEWS_KEY,
+    "reengage_attempts",
+)
+
+
+def _latest_review_pipeline(match: dict, limit: int) -> List[dict]:
+    """One row per ticket: its newest review (by reviewed_at), with the
+    others summarised newest first under "earlier_reviews"."""
+    return [
+        {"$match": match},
+        {"$project": {"_id": 1, "agent_reviews": 1, **{f: 1 for f in _ROW_TICKET_FIELDS}}},
+        {"$unwind": "$agent_reviews"},
+        # review_id breaks ties: an ObjectId, so a later review sorts first.
+        {"$sort": {"agent_reviews.reviewed_at": -1, "agent_reviews.review_id": -1}},
+        {
+            "$group": {
+                "_id": "$_id",
+                **{f: {"$first": f"${f}"} for f in _ROW_TICKET_FIELDS},
+                "review": {"$first": "$agent_reviews"},
+                "all_reviews": {
+                    "$push": {
+                        # $ifNull: a field a review lacks (rerun_of) is null, not dropped.
+                        f: {"$ifNull": [f"$agent_reviews.{f}", None]}
+                        for f in EARLIER_REVIEW_FIELDS
+                    }
+                },
+            }
+        },
+        {"$sort": {"review.reviewed_at": -1, "review.review_id": -1}},
+        {"$limit": limit},
+    ]
+
+
+def _as_rows(groups: Iterable[dict]) -> List[dict]:
+    rows = []
+    for group in groups:
+        group.pop("_id", None)
+        # The first is the row's own review.
+        group["earlier_reviews"] = group.pop("all_reviews", [])[1:]
+        rows.append(group)
+    return rows
 
 
 def recent_reviews(tickets: Collection, limit: int = REVIEW_ROW_LIMIT) -> List[dict]:
-    """Returns the newest `limit` reviews across all tickets, newest first.
+    """Returns each reviewed ticket's newest review, newest first, at most `limit`.
 
     Each row is {"zendesk_id", "subject", "outcomes", REVIEW_ADDED_KEY,
-    ADDED_REVIEWS_KEY, "review"}, where review is one agent_reviews entry
-    exactly as the engine stored it.
+    ADDED_REVIEWS_KEY, "review", "earlier_reviews"}: review is the ticket's
+    latest agent_reviews entry exactly as the engine stored it (a re-run's,
+    once there is one), and earlier_reviews summarises the rest
+    (EARLIER_REVIEW_FIELDS), newest first.
     """
-    pipeline = [
-        {"$match": {"agent_reviews.0": {"$exists": True}}},
-        {"$unwind": "$agent_reviews"},
-        {"$sort": {"agent_reviews.reviewed_at": -1}},
-        {"$limit": limit},
-        _ROW_PROJECTION,
-    ]
+    pipeline = _latest_review_pipeline({"agent_reviews.0": {"$exists": True}}, limit)
     # A large sort can pass Atlas's in-memory cap, so let it spill to disk.
-    return list(tickets.aggregate(pipeline, allowDiskUse=True))
+    return _as_rows(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
 def open_case_reviews(
     tickets: Collection, rows: List[dict], limit: int = OPEN_CASE_ROW_LIMIT
 ) -> List[dict]:
-    """Rows for the open manual-triage cases that none of `rows` belongs to
-    (newer reviews pushed them past REVIEW_ROW_LIMIT), so they can still be
-    given evidence and re-run. Each is the case's latest review, newest
-    first, in recent_reviews' row shape.
+    """Rows for the tickets with an open manual-triage case that aren't among
+    `rows` (newer reviews pushed them past REVIEW_ROW_LIMIT), so they can
+    still be given evidence and re-run. Each is the ticket's latest review,
+    newest first, in recent_reviews' row shape.
     """
     cases = triage.get_cases_collection(tickets.database)
-    shown = {row["review"].get("review_id") for row in rows}
-    latest = []
-    for case in cases.find(
-        {"status": triage.OPEN}, {"review_id": 1, "reruns.review_id": 1, "created_at": 1}
-    ).sort("created_at", -1):
-        ids = [case["review_id"], *(r["review_id"] for r in case.get("reruns") or [])]
-        if not shown.intersection(ids):
-            latest.append(ids[-1])
-            if len(latest) >= limit:
+    shown = {row.get("zendesk_id") for row in rows}
+    missing = []
+    for case in cases.find({"status": triage.OPEN}, {"zendesk_id": 1, "created_at": 1}).sort(
+        "created_at", -1
+    ):
+        if case["zendesk_id"] not in shown and case["zendesk_id"] not in missing:
+            missing.append(case["zendesk_id"])
+            if len(missing) >= limit:
                 break
-    if not latest:
+    if not missing:
         return []
-    pipeline = [
-        {"$match": {"agent_reviews.review_id": {"$in": latest}}},
-        {"$unwind": "$agent_reviews"},
-        {"$match": {"agent_reviews.review_id": {"$in": latest}}},
-        {"$sort": {"agent_reviews.reviewed_at": -1}},
-        _ROW_PROJECTION,
-    ]
-    return list(tickets.aggregate(pipeline, allowDiskUse=True))
+    pipeline = _latest_review_pipeline({"zendesk_id": {"$in": missing}}, limit)
+    return _as_rows(tickets.aggregate(pipeline, allowDiskUse=True))
 
 
 def attach_cases(tickets: Collection, rows: List[dict]) -> List[dict]:
     """Adds each row's manual-triage case (triage.py) as row["case"]: the
-    case its review opened, or the one it re-ran. A manual-triage review
-    whose case wasn't opened when it was saved gets one now."""
+    case its review opened, or the one it re-ran, else the ticket's open
+    case. When row["case"] isn't open but the ticket has another case that
+    is, that one is row["open_case"] (see actionable_case). A manual-triage
+    review whose case wasn't opened when it was saved gets one now."""
     cases = triage.get_cases_collection(tickets.database)
     review_ids = [row["review"].get("review_id") for row in rows]
     found = triage.cases_for_reviews(cases, review_ids)
     if triage.recover_missing_cases(tickets, cases, rows, found):
         found = triage.cases_for_reviews(cases, review_ids)
+    # A ticket's newest review may be a later one than its open case's
+    # (reviewed again since), or a re-run that resolved one case while an
+    # older one stays open: the row still offers the open case's buttons.
+    needs_open = [
+        row["zendesk_id"]
+        for row in rows
+        if (found.get(row["review"].get("review_id")) or {}).get("status") != triage.OPEN
+    ]
+    open_by_ticket = {}
+    if needs_open:
+        for case in cases.find(
+            {"zendesk_id": {"$in": needs_open}, "status": triage.OPEN}, {"trail.trail": 0}
+        ).sort("created_at", 1):
+            open_by_ticket[case["zendesk_id"]] = case  # the newest wins
     for row in rows:
-        row["case"] = found.get(row["review"].get("review_id"))
+        own = found.get(row["review"].get("review_id"))
+        still_open = open_by_ticket.get(row.get("zendesk_id"))
+        row["case"] = own or still_open
+        row["open_case"] = still_open if own is not None and still_open is not None else None
     return rows
 
 
@@ -338,8 +393,12 @@ def format_review(row: dict) -> str:
             f"Re-run of a manual-triage review with {len(review.get('evidence_ids') or [])} "
             f"piece(s) of reviewer evidence, requested by {review.get('requested_by') or '-'}.",
         ]
+    lines += format_earlier_reviews(row)
     if row.get("case"):
         lines += format_case(row["case"])
+    if row.get("open_case"):
+        lines += ["", "Another manual-triage case on this ticket is still open:"]
+        lines += format_case(row["open_case"])
     lines += ["", f"Review added to Zendesk: {'Yes' if row_added(row) else 'No'}"]
     if outcome := latest_outcome(row):
         lines += [
@@ -356,6 +415,43 @@ def format_review(row: dict) -> str:
             f"request {audit.get('request_id') or '-'}, prompt {audit.get('prompt_version')}",
         ]
     return "\n".join(lines)
+
+
+def actionable_case(row: dict) -> Optional[dict]:
+    """The case Add Evidence and Re-run act on: the ticket's still-open case
+    when the row's own case is resolved, else the row's case."""
+    return row.get("open_case") or row.get("case")
+
+
+def replace_ticket_row(rows: List[dict], row: dict) -> List[dict]:
+    """`row` first, in place of its ticket's old row: the table shows each
+    ticket's newest review. The old review joins earlier_reviews, and an
+    open manual-triage case stays on the row."""
+    old = next((r for r in rows if r.get("zendesk_id") == row.get("zendesk_id")), None)
+    if old is not None:
+        summary = {f: old["review"].get(f) for f in EARLIER_REVIEW_FIELDS}
+        row = {**row, "earlier_reviews": [summary, *(old.get("earlier_reviews") or [])]}
+        still_open = actionable_case(old)
+        if (still_open or {}).get("status") == triage.OPEN and not row.get("case"):
+            row["case"] = still_open
+    return [row, *(r for r in rows if r is not old)]
+
+
+def format_earlier_reviews(row: dict) -> List[str]:
+    """The detail pane's lines listing the ticket's earlier reviews."""
+    earlier = row.get("earlier_reviews") or []
+    if not earlier:
+        return []
+    lines = ["", "Earlier reviews of this ticket (newest first):"]
+    for entry in earlier:
+        at = entry.get("reviewed_at")
+        lines.append(
+            f"  - {entry.get('classification')} (confidence {entry.get('confidence')}) "
+            f"on {entry.get('model_version')}"
+            + (f", {at:%Y-%m-%d %H:%M} UTC" if at else "")
+            + (" (re-run with evidence)" if entry.get("rerun_of") is not None else "")
+        )
+    return lines
 
 
 def row_added(row: dict) -> bool:
@@ -522,6 +618,9 @@ class TriageTab(QWidget):
         # interrupted safely, so it always finishes.
         self._cancel = threading.Event()
         self._closing = False
+        # A ticket whose Arbitration Results open once the next refresh loads it.
+        self._results_for: Optional[str] = None
+        self._results_dialog: Optional[ArbitrationDialog] = None
         # Called on the worker thread as review_batch(tickets, ids, on_progress=...).
         self.review_batch = review_batch or (
             lambda tickets, zendesk_ids, on_progress=None: persistence.run_review_batch(
@@ -670,6 +769,12 @@ class TriageTab(QWidget):
         self.add_evidence_button.clicked.connect(self.add_evidence_to_selected)
         self.rerun_button = Button("Re-run with Evidence…")
         self.rerun_button.clicked.connect(self.rerun_selected)
+        self.results_button = Button("Arbitration Results…")
+        self.results_button.setToolTip(
+            "Whether the classification changed, what was weighed, and the next "
+            "steps, for a review the confirmation model, arbiter or a re-run decided."
+        )
+        self.results_button.clicked.connect(self.show_selected_results)
         self.copy_button = Button()
         self.copy_button.setSvgIcon(fluent_icon(COPY_ICON))
         self.copy_button.setToolTip("Copy the whole review to the clipboard.")
@@ -712,6 +817,7 @@ class TriageTab(QWidget):
         feedback_row.addWidget(self.mark_bad_button)
         feedback_row.addWidget(self.review_added_button)
         feedback_row.addStretch()
+        feedback_row.addWidget(self.results_button)
         feedback_row.addWidget(self.add_evidence_button)
         feedback_row.addWidget(self.rerun_button)
         detail_pane = QWidget()
@@ -1043,11 +1149,16 @@ class TriageTab(QWidget):
         awaiting, rows, older = loaded
         status = f"{awaiting} ticket(s) awaiting review."
         if len(rows) - older >= REVIEW_ROW_LIMIT:
-            status += f" Showing the newest {REVIEW_ROW_LIMIT:,} reviews"
+            status += f" Showing the {REVIEW_ROW_LIMIT:,} most recently reviewed tickets"
             status += f", and {older:,} older open manual-triage case(s)." if older else "."
         self.status_label.setText(status)
         self._rows = rows
         self._fill_table()
+        zendesk_id, self._results_for = self._results_for, None
+        if zendesk_id is not None:
+            row = next((r for r in rows if r.get("zendesk_id") == zendesk_id), None)
+            if row is not None and has_results(row["review"]):
+                self.show_results(row)
 
     def start_batch(self) -> None:
         """Begins a batch: lists the awaiting tickets, then asks how many to review.
@@ -1154,8 +1265,9 @@ class TriageTab(QWidget):
                 "subject": self._batch["subjects"].get(zendesk_id),
                 **{field: ticket[field] for field in TICKET_STATE_FIELDS if field in ticket},
                 "review": review,
+                "earlier_reviews": [],
             }
-            self._rows = [row, *self._rows][:REVIEW_ROW_LIMIT]
+            self._rows = [*replace_ticket_row(self._rows, row)][:REVIEW_ROW_LIMIT]
             self._fill_table()
 
     def start_embed_tickets(self) -> None:
@@ -1375,6 +1487,8 @@ class TriageTab(QWidget):
             message + (f"\n\nWarning:\n{note}" if note else ""),
         )
         self.ticket_id_input.clear()
+        if has_results(result):
+            self._results_for = zendesk_id
         self.refresh()
 
     # --- results ---------------------------------------------------------------
@@ -1461,6 +1575,7 @@ class TriageTab(QWidget):
         self.mark_bad_button.setEnabled(enabled)
         self.zendesk_button.setEnabled(row is not None)
         self.copy_button.setEnabled(row is not None)
+        self.results_button.setEnabled(row is not None and has_results(row["review"]))
         self._enable_review_added(self._job_running())
         self._enable_case_buttons(self._job_running())
         self._enable_navigation()
@@ -1496,7 +1611,7 @@ class TriageTab(QWidget):
     def _enable_case_buttons(self, busy: bool) -> None:
         """Add Evidence and Re-run, for a review with a manual-triage case."""
         row = self._selected_row()
-        case = row.get("case") if row is not None else None
+        case = actionable_case(row) if row is not None else None
         self.add_evidence_button.setEnabled(not busy and case is not None)
         problem = triage.rerun_problem(case) if case is not None else None
         self.rerun_button.setEnabled(not busy and case is not None and problem is None)
@@ -1509,9 +1624,10 @@ class TriageTab(QWidget):
     def add_evidence_to_selected(self) -> None:
         """Asks for a Jira export or Aha page and adds what it holds to the case."""
         row = self._selected_row()
-        if row is None or not row.get("case") or not self._configured(READ_ENV, notify=True):
+        case = actionable_case(row) if row is not None else None
+        if case is None or not self._configured(READ_ENV, notify=True):
             return
-        zendesk_id, case_id = row["zendesk_id"], row["case"]["_id"]
+        zendesk_id, case_id = row["zendesk_id"], case["_id"]
         dialog = EvidenceDialog(zendesk_id, self)
         if dialog.exec_() != EvidenceDialog.Accepted or dialog.evidence is None:
             return
@@ -1534,7 +1650,7 @@ class TriageTab(QWidget):
     def rerun_selected(self) -> None:
         """Confirms, then re-classifies the case's ticket on the arbiter with its evidence."""
         row = self._selected_row()
-        case = row.get("case") if row is not None else None
+        case = actionable_case(row) if row is not None else None
         if case is None or not self._configured(REVIEW_ENV, notify=True):
             return
         problem = triage.rerun_problem(case)
@@ -1561,10 +1677,9 @@ class TriageTab(QWidget):
                 tickets, triage.get_cases_collection(tickets.database), case["_id"]
             )
 
-        self._run(
-            rerun,
-            f"Re-running ticket {zendesk_id} with evidence",
-            lambda result: self._feedback_done(
+        def done(result):
+            self._results_for = zendesk_id  # shown once the refresh loads it
+            self._feedback_done(
                 f"Ticket {zendesk_id}: re-run gave {result['classification']} "
                 f"(confidence {result['confidence']})."
                 + (
@@ -1572,8 +1687,27 @@ class TriageTab(QWidget):
                     if result["classification"] == "manual_triage"
                     else " Case resolved."
                 )
-            ),
+            )
+
+        self._run(rerun, f"Re-running ticket {zendesk_id} with evidence", done)
+
+    def show_selected_results(self) -> None:
+        """Opens Arbitration Results for the selected review."""
+        row = self._selected_row()
+        if row is not None and has_results(row["review"]):
+            self.show_results(row)
+
+    def show_results(self, row: dict) -> None:
+        """Opens Arbitration Results for a row, without blocking the tab."""
+        text = results_text(
+            row, added=row_added(row), decided=bool(decision_label(row))
         )
+        if self._results_dialog is not None:
+            # Deleted, not just hidden: the tab would keep each one alive.
+            self._results_dialog.close()
+            self._results_dialog.deleteLater()
+        self._results_dialog = ArbitrationDialog(text, str(row.get("zendesk_id")), self)
+        self._results_dialog.show()
 
     def retry_trail_uploads(self) -> None:
         """Moves the trails kept in MongoDB to S3 (triage.upload_kept_trails)."""

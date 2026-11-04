@@ -159,6 +159,8 @@ def _review_entry(
         "signals_matched": result.get("signals_matched", []),
         # The attempts the model counted in the current stall, by timestamp.
         "reengage_attempts": result.get("reengage_attempts", []),
+        # The count the re-engage limit was checked against (guards.apply_guards).
+        "reengage_attempt_count": result.get("reengage_attempt_count"),
         "reasoning": result.get("reasoning", ""),
         "open_questions": result.get("open_questions") or [],
         "tag_applied": result.get("tag"),

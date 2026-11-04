@@ -308,6 +308,20 @@ def api_base_url() -> str:
     return url[: -len("/v1")] if url.endswith("/v1") else url
 
 
+# Cheaper Inference names its request ID x-ci-request-id; the SDK reads only
+# request-id, so without this every audit's request_id was None.
+PROXY_REQUEST_ID_HEADER = "x-ci-request-id"
+
+
+def _copy_proxy_request_id(response) -> None:
+    """httpx response hook: copies the proxy's request ID into request-id,
+    where the SDK looks for it, so response._request_id is set."""
+    if "request-id" not in response.headers:
+        proxy_id = response.headers.get(PROXY_REQUEST_ID_HEADER)
+        if proxy_id:
+            response.headers["request-id"] = proxy_id
+
+
 @lru_cache(maxsize=1)
 def get_client() -> anthropic.Anthropic:
     """Builds the client on first use so importing this module needs no secrets.
@@ -320,6 +334,9 @@ def get_client() -> anthropic.Anthropic:
         base_url=api_base_url(),
         timeout=request_timeout(),
         max_retries=MAX_RETRIES,
+        http_client=anthropic.DefaultHttpxClient(
+            event_hooks={"response": [_copy_proxy_request_id]}
+        ),
     )
 
 
@@ -657,6 +674,7 @@ def judge_answers(
         audit = {
             "usage": _usage(response),
             "latency_ms": int((time.monotonic() - started) * 1000),
+            "request_id": getattr(response, "_request_id", None),
             "billed_cost_usd": (getattr(response, "billing", None) or {}).get(
                 "billed_cost_usd"
             ),
