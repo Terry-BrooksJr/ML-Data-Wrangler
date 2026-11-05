@@ -400,7 +400,7 @@ scipy==1.18.1 ; python_full_version >= '3.12'
     #   umap-learn
 seaborn==0.13.2
     # via ml-data-wrangler
-sentence-transformers==6.1.0 ; sys_platform == 'never'
+sentence-transformers==6.2.0 ; sys_platform == 'never'
     # via bertopic
 setuptools==84.2.1
     # via
