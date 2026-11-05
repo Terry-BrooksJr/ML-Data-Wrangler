@@ -62,7 +62,7 @@ TRIGGER_NAMES = {
     "R1": "No reply to Support's request in 72 business hours",
     "R2": "Customer reply missing what was asked",
     "R3": "Internal party silent for 48 business hours",
-    "R4": "Linked Jira issue idle for 14 days",
+    "R4": "Linked Jira or Aha item idle for 6 months",
     "R5": "Promised follow-up date passed",
     "R6": "No public comment for 72 business hours",
     "R7": "Scheduled action has come due",
