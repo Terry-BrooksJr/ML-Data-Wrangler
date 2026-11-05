@@ -85,7 +85,7 @@ distro==1.9.0 ; python_full_version != '3.13.*'
     # via langsmith
 dnspython==2.8.0 ; python_full_version < '3.11'
     # via pymongo
-dnspython==2.9.0 ; python_full_version >= '3.11'
+dnspython==2.9.2 ; python_full_version >= '3.11'
     # via pymongo
 docstring-parser==0.18.0
     # via anthropic
@@ -99,7 +99,7 @@ filelock==4.1.0 ; python_full_version < '3.11'
     # via
     #   huggingface-hub
     #   torch
-filelock==4.2.0 ; python_full_version >= '3.11'
+filelock==4.2.9 ; python_full_version >= '3.11'
     # via
     #   huggingface-hub
     #   torch
@@ -238,7 +238,7 @@ networkx==3.6.1 ; python_full_version == '3.11.*' and sys_platform == 'never'
     # via torch
 networkx==3.7 ; python_full_version >= '3.12' and sys_platform == 'never'
     # via torch
-nltk==3.10.3
+nltk==3.10.4
     # via ml-data-wrangler
 numba==0.68.0
     # via
@@ -341,7 +341,11 @@ pandas==3.0.6 ; python_full_version >= '3.11' and python_full_version < '3.14'
     #   ml-data-wrangler
     #   pyldavis
     #   seaborn
-pillow==12.3.0
+pillow==12.3.0 ; python_full_version < '3.11'
+    # via
+    #   matplotlib
+    #   voyageai
+pillow==13.0.0 ; python_full_version >= '3.11'
     # via
     #   matplotlib
     #   voyageai
