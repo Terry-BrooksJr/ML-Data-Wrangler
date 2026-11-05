@@ -216,11 +216,26 @@ def _trigger_key(m: re.Match) -> Optional[str]:
     return key if key in TRIGGER_NAMES else None
 
 
-def describe_signal(signal) -> str:
+# Trigger names that changed in v2.0.1, as the prompts before it had them,
+# so a review keeps the rule it was judged by. PROMPT_VERSION is a hash, so
+# the earlier versions are listed: every prompt from the taxonomy rewrite
+# (2026-10-28) to v2.0.1 that carried these triggers.
+EARLIER_TRIGGER_NAMES = {
+    "O2": "Linked Jira bug idle for 28 days",
+    "R4": "Linked Jira issue idle for 14 days",
+}
+EARLIER_PROMPT_VERSIONS = frozenset(
+    {"872b556c6986", "2338a99211ab", "cd3e76f41862", "51cf859f0789", "c33981b6d2fe"}
+)
+
+
+def describe_signal(signal, prompt_version: Optional[str] = None) -> str:
     """A signal with its trigger's name: "R1" -> "R1 — No reply to Support's
     request in 72 business hours". Text the model added after the ID is kept;
     a signal that isn't a known trigger ID is returned as is (as text, since a
-    stored record may hold something else)."""
+    stored record may hold something else). prompt_version is the one the
+    signal was reported under: a trigger renamed since then keeps its old
+    name."""
     if not isinstance(signal, str):
         return str(signal)
     m = _TRIGGER_ID.match(signal)
@@ -228,7 +243,10 @@ def describe_signal(signal) -> str:
     if not key:
         return signal
     rest = signal[m.end() :].strip(" :-—")
-    return f"{key} — {TRIGGER_NAMES[key]}" + (f" ({rest})" if rest else "")
+    name = TRIGGER_NAMES[key]
+    if prompt_version in EARLIER_PROMPT_VERSIONS:
+        name = EARLIER_TRIGGER_NAMES.get(key, name)
+    return f"{key} — {name}" + (f" ({rest})" if rest else "")
 
 
 def cited_triggers(signals: Iterable[str]) -> Set[str]:

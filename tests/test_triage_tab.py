@@ -461,6 +461,16 @@ def test_review_all_warns_when_batch_stopped(qapp, configured, dialogs, stored):
     assert "Stopped early" in dialogs[-1][1]
 
 
+def test_format_review_names_triggers_as_the_reviews_prompt_did(stored):
+    def text(**audit):
+        row = {"zendesk_id": "1", "subject": "s"}
+        row["review"] = review("escalation_internal", 1, signals_matched=["O2"], audit=audit)
+        return format_review(row)
+
+    assert "  - O2 — Linked Jira bug idle for 28 days" in text(prompt_version="c33981b6d2fe")
+    assert "  - O2 — Linked Jira or Aha item idle for 6 months" in text()
+
+
 def test_format_review_shows_overrides_engine_error_and_audit(stored):
     row = {
         "zendesk_id": "1",
@@ -1420,6 +1430,16 @@ def test_batch_status_has_no_estimate_before_the_first_ticket():
 
 
 # --- A/B test: two configurations, reviewed blind ------------------------------------
+
+
+def test_an_ab_answer_names_triggers_as_its_runs_prompt_did():
+    output = {"classification": "flag_reengage", "confidence": 75, "signals_matched": ["R4"]}
+    assert "  - R4 — Linked Jira issue idle for 14 days" in ab_test_dialog.format_output(
+        output, "c33981b6d2fe"
+    )
+    assert "  - R4 — Linked Jira or Aha item idle for 6 months" in ab_test_dialog.format_output(
+        output
+    )
 
 
 def test_a_decision_answer_is_shown_blind_with_its_probabilities():

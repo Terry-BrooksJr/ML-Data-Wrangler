@@ -63,6 +63,13 @@ def rerun_row(classification="flag_reengage", **extra):
     }
 
 
+def test_triggers_keep_the_names_of_the_prompt_that_matched_them():
+    old = results_text(rerun_row(signals_matched=["R4"], audit={"prompt_version": "c33981b6d2fe"}))
+    assert "  - R4 — Linked Jira issue idle for 14 days" in old
+    new = results_text(rerun_row(signals_matched=["R4"]))
+    assert "  - R4 — Linked Jira or Aha item idle for 6 months" in new
+
+
 def test_only_reviews_past_one_model_have_results():
     assert not has_results({"classification": "flag_solve"})
     assert has_results({"confirmation_of": {"classification": "manual_triage"}})

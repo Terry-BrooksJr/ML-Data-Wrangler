@@ -547,6 +547,23 @@ def test_signals_show_their_trigger_name():
     assert guards.describe_signal(7) == "7"
 
 
+def test_signals_keep_the_trigger_name_of_their_prompt():
+    from decision_engine.prompts import PROMPT_VERSION
+
+    earlier = "c33981b6d2fe"  # v2.0.0's last prompt: 28- and 14-day Jira windows
+    assert guards.describe_signal("O2", earlier) == "O2 — Linked Jira bug idle for 28 days"
+    assert guards.describe_signal("R4: LRN-1", earlier) == (
+        "R4 — Linked Jira issue idle for 14 days (LRN-1)"
+    )
+    assert guards.describe_signal("L6", earlier) == "L6 — Genuine churn risk"
+    for version in (PROMPT_VERSION, None, "unknown"):
+        assert guards.describe_signal("O2", version) == (
+            "O2 — Linked Jira or Aha item idle for 6 months"
+        )
+    assert PROMPT_VERSION not in guards.EARLIER_PROMPT_VERSIONS
+    assert set(guards.EARLIER_TRIGGER_NAMES) <= set(guards.TRIGGER_NAMES)
+
+
 def test_blank_model_settings_count_as_unset(monkeypatch):
     for name in (
         "CHEAPER_INFERENCE_SECONDARY_MODEL_NAME",
