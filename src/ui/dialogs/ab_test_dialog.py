@@ -75,8 +75,9 @@ def reviewer_identity() -> str:
     return current_user()
 
 
-def format_output(output: Optional[dict]) -> str:
+def format_output(output: Optional[dict], prompt_version: Optional[str] = None) -> str:
     """One variant's answer, without naming its models (the review is blind).
+    prompt_version is the run's, so triggers keep the names they had then.
 
     Plain text, not HTML: the reasoning and draft can quote customer text.
     """
@@ -112,7 +113,7 @@ def format_output(output: Optional[dict]) -> str:
         "",
         "Signals matched:",
         *[
-            f"  - {describe_signal(signal)}"
+            f"  - {describe_signal(signal, prompt_version)}"
             for signal in output.get("signals_matched") or ["(none)"]
         ],
         "",
@@ -1110,7 +1111,11 @@ class ABTestDialog(QDialog):
                 if doc
                 else None
             )
-            view.setPlainText(format_output(output) if doc else "")
+            view.setPlainText(
+                format_output(output, (self.current or {}).get("prompt_version"))
+                if doc
+                else ""
+            )
         preference = (doc or {}).get("preference")
         self.verdict_label.setText(self._describe_verdict(doc, preference))
         self.note_input.setText((preference or {}).get("note", ""))

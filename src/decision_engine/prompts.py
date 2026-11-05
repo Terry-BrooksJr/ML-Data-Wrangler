@@ -69,10 +69,12 @@ IDs you matched in signals_matched.
    Trigger if ANY of:
    - O1: Customer asked the assignee a question or made a request with no
      response in 48 business hours
-   - O2: The linked Jira bug has had no meaningful action for 28 calendar days
-     (two sprints) — measured from its last jira_integration or other comment
-     about it, or from when it was linked if there is none — and the
-     assigned product engineer needs to be engaged
+   - O2: A linked Jira issue (jira_links) or an Aha feature request mentioned
+     in the transcript has had no meaningful action for 6 months (182
+     calendar days) — measured from its last jira_integration or other
+     comment about it, or from when it was linked or first mentioned if there
+     is none — and the assigned product engineer or product owner needs to be
+     engaged
    - O3: Blocked on an internal dependency (another team, a release, a vendor)
      with no visible movement and no ETA to give the customer, and a
      re-engage of that party has already gone unanswered
@@ -103,8 +105,9 @@ IDs you matched in signals_matched.
    - R3: An internal party (product/engineering/another team) has an open
      request with no response or status update for 48 business hours (see
      "Who is speaking" for who counts as that party having responded)
-   - R4: A linked Jira issue has had no movement or comment for 14 calendar
-     days (one sprint) while the Zendesk ticket stays open
+   - R4: A linked Jira issue (jira_links) or an Aha feature request mentioned
+     in the transcript has had no movement or comment for 6 months (182
+     calendar days) while the Zendesk ticket stays open
    - R5: Support committed to a follow-up by a specific date; that date has
      passed with no update sent
    - R6: No public comment from any party for 72 business hours, but the

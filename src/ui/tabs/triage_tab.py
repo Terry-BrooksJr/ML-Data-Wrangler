@@ -350,6 +350,7 @@ def format_review(row: dict) -> str:
     """Plain-text detail for one review. Plain text, not HTML, because the
     reasoning and draft message can quote customer-written content."""
     review = row["review"]
+    prompt_version = (review.get("audit") or {}).get("prompt_version")
     reviewed_at = review.get("reviewed_at")
     lines = [
         f"Ticket {row.get('zendesk_id')}: {row.get('subject') or '(no subject)'}",
@@ -362,7 +363,7 @@ def format_review(row: dict) -> str:
         "",
         "Signals matched:",
         *[
-            f"  - {describe_signal(signal)}"
+            f"  - {describe_signal(signal, prompt_version)}"
             for signal in review.get("signals_matched") or ["(none)"]
         ],
         "",

@@ -99,7 +99,10 @@ def _considered(row: dict) -> List[str]:
             lines += ["Open questions the re-run had to answer:"]
             lines += [f"  - {q}" for q in case["open_questions"]]
     lines += ["", "Triggers matched:"]
-    lines += [f"  - {describe_signal(s)}" for s in review.get("signals_matched") or []] or ["  (none)"]
+    prompt_version = (review.get("audit") or {}).get("prompt_version")
+    lines += [
+        f"  - {describe_signal(s, prompt_version)}" for s in review.get("signals_matched") or []
+    ] or ["  (none)"]
     lines += ["", "Final reasoning:", review.get("reasoning") or "(none)"]
     return lines
 
