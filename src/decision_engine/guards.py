@@ -53,7 +53,7 @@ TRIGGER_NAMES = {
     "L8": "Customer data risk",
     "L9": "SLA breach",
     "O1": "Customer question unanswered for 48 business hours",
-    "O2": "Linked Jira bug idle for 28 days",
+    "O2": "Linked Jira or Aha item idle for 6 months",
     "O3": "Blocked on an internal dependency",
     "O4": "Re-engage attempts exhausted",
     "O5": "Customer frustration or tone escalation",

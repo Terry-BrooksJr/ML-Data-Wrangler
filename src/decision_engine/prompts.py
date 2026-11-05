@@ -69,10 +69,12 @@ IDs you matched in signals_matched.
    Trigger if ANY of:
    - O1: Customer asked the assignee a question or made a request with no
      response in 48 business hours
-   - O2: The linked Jira bug has had no meaningful action for 28 calendar days
-     (two sprints) — measured from its last jira_integration or other comment
-     about it, or from when it was linked if there is none — and the
-     assigned product engineer needs to be engaged
+   - O2: A linked Jira issue (jira_links) or an Aha feature request mentioned
+     in the transcript has had no meaningful action for 6 months (182
+     calendar days) — measured from its last jira_integration or other
+     comment about it, or from when it was linked or first mentioned if there
+     is none — and the assigned product engineer or product owner needs to be
+     engaged
    - O3: Blocked on an internal dependency (another team, a release, a vendor)
      with no visible movement and no ETA to give the customer, and a
      re-engage of that party has already gone unanswered
