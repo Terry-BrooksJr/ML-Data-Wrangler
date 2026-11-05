@@ -89,7 +89,7 @@ packaging/build.sh
 ```
 
 It syncs a separate environment (`build/pkg-venv`) from `uv.lock` on Python
-3.10.21, since PyInstaller refuses the 3.10.0 that `.python-version` pins, and
+3.11.16, pinned so every build uses the same interpreter, and
 bundles the NLTK stopwords so the app works offline. Output is
 `dist/Lasso.app` on macOS (about 900 MB, mostly the spaCy model)
 or `dist/Lasso/` on Windows and Linux. PyInstaller doesn't

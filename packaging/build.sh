@@ -3,14 +3,14 @@
 #
 #   packaging/build.sh
 #
-# Uses its own virtualenv (build/pkg-venv), synced from uv.lock, on the latest
-# Python 3.10.x: PyInstaller refuses 3.10.0, which .python-version pins for
-# development. PyInstaller doesn't cross-compile, so run this on each OS you
+# Uses its own virtualenv (build/pkg-venv), synced from uv.lock, on a pinned
+# Python 3.11.x so each build uses the same interpreter (.python-version only
+# says 3.11). PyInstaller doesn't cross-compile, so run this on each OS you
 # ship for (macOS -> dist/Lasso.app, Windows/Linux -> dist/Lasso/).
 set -euo pipefail
 echo "Building Lasso desktop app..."
 cd "$(dirname "$0")/.."
-PYTHON_VERSION="${PYTHON_VERSION:-3.10.21}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.11.16}"
 export UV_PROJECT_ENVIRONMENT="$PWD/build/pkg-venv"
 
 uv sync --frozen --no-dev --group package --python "$PYTHON_VERSION"
