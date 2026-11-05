@@ -18,6 +18,7 @@ from decision_engine import (
     feedback,
     persistence,
     search,
+    staff,
     training_export,
     triage,
 )
@@ -55,7 +56,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from ui.utility import ThreadWorker, worker_thread
-from ui.widgets import Button, Card, fluent_icon, hint, LineEdit, ProgressBar, use_si_scrollbars
+from ui.widgets import (
+    Button,
+    Card,
+    ComboBox,
+    fluent_icon,
+    hint,
+    LineEdit,
+    ProgressBar,
+    use_si_scrollbars,
+)
 
 # Reading reviews only touches Mongo; classifying also needs the primary and
 # arbiter models. The secondary and confirmation models are optional: when
@@ -89,6 +99,7 @@ COLUMNS = [
     "Ticket",
     "Subject",
     "Classification",
+    "Owner",
     "Confidence",
     "Reviewed (UTC)",
     "Model",
@@ -102,6 +113,10 @@ REVIEW_ROW_LIMIT = 5000
 OPEN_CASE_ROW_LIMIT = 1000
 # The Decision column's text for each manual outcome; "pending" shows blank.
 DECISION_LABELS = {"good": "Correct", "bad": "Misclassified"}
+# The Decision filter's name for a review with no decision yet.
+NO_DECISION = "Pending"
+# The Owner column's text for a ticket with no assignee.
+UNASSIGNED = "Unassigned"
 CONNECTION_HINT = (
     "Could not reach MongoDB. Check that you are on the VPN, that its exit IP "
     "is on the Atlas IP access list, and that the cluster is not paused."
@@ -169,6 +184,7 @@ _ROW_TICKET_FIELDS = (
     REVIEW_ADDED_KEY,
     ADDED_REVIEWS_KEY,
     "reengage_attempts",
+    "assignee",
 )
 
 
@@ -460,7 +476,7 @@ def row_added(row: dict) -> bool:
 
 
 # What a review row carries from its ticket, besides the review itself.
-TICKET_STATE_FIELDS = ("outcomes", REVIEW_ADDED_KEY, ADDED_REVIEWS_KEY)
+TICKET_STATE_FIELDS = ("outcomes", REVIEW_ADDED_KEY, ADDED_REVIEWS_KEY, "assignee")
 
 
 def latest_outcome(row: dict) -> Optional[dict]:
@@ -475,6 +491,46 @@ def decision_label(row: dict) -> str:
     return DECISION_LABELS.get((latest_outcome(row) or {}).get("outcome"), "")
 
 
+def owner_label(row: dict) -> str:
+    """The ticket's assignee by roster name; its Zendesk user ID when not on
+    the roster, or UNASSIGNED when it has none."""
+    assignee = row.get("assignee")
+    if assignee in (None, ""):
+        return UNASSIGNED
+    person = staff.lookup(assignee)
+    return person.name if person is not None else str(assignee)
+
+
+# The Reviews filters: each one's title, and the value it compares on a row.
+FILTERS = {
+    "Classification": lambda row: str(row["review"].get("classification") or ""),
+    "Decision": lambda row: decision_label(row) or NO_DECISION,
+    "Owner": owner_label,
+    "Added to Zendesk": lambda row: "Yes" if row_added(row) else "No",
+}
+# Options each filter always lists, in this order; others found follow, sorted.
+FILTER_FIXED_OPTIONS = {
+    "Classification": CLASSIFICATIONS,
+    "Decision": (*DECISION_LABELS.values(), NO_DECISION),
+    "Added to Zendesk": ("Yes", "No"),
+}
+
+
+def filter_options(name: str, rows: List[dict]) -> List[str]:
+    """The values filter `name` offers: its fixed options, then any other
+    value a row has, sorted."""
+    fixed = list(FILTER_FIXED_OPTIONS.get(name, ()))
+    seen = {FILTERS[name](row) for row in rows} - set(fixed)
+    # Unassigned last: it is the odd one out among names.
+    return fixed + sorted(seen, key=lambda v: (v == UNASSIGNED, v.casefold()))
+
+
+def row_matches(row: dict, chosen: dict) -> bool:
+    """True when the row has every chosen filter value ({title: value});
+    a filter set to None (All) matches anything."""
+    return all(value is None or FILTERS[name](row) == value for name, value in chosen.items())
+
+
 def fully_handled(row: dict) -> bool:
     """True once a review has a decision and is added to Zendesk; the table
     greys these rows out."""
@@ -487,12 +543,18 @@ def awaiting_decision(row: dict) -> bool:
     return not decision_label(row) and not row_added(row)
 
 
-def step_awaiting(rows: List[dict], current: Optional[int], step: int) -> Optional[int]:
+def step_awaiting(
+    rows: List[dict],
+    current: Optional[int],
+    step: int,
+    shown: Callable[[dict], bool] = lambda row: True,
+) -> Optional[int]:
     """The index of the nearest row awaiting a decision, or None.
 
     Rows are newest review first, as recent_reviews returns them, so step 1
     moves to the next older review and step -1 to the next newer one. With
-    nothing selected, step 1 starts at the newest review.
+    nothing selected, step 1 starts at the newest review. Rows `shown`
+    rejects (filtered out of the table) are skipped.
     """
     if current is None:
         if step < 0:
@@ -500,7 +562,7 @@ def step_awaiting(rows: List[dict], current: Optional[int], step: int) -> Option
         current = -1
     index = current + step
     while 0 <= index < len(rows):
-        if awaiting_decision(rows[index]):
+        if awaiting_decision(rows[index]) and shown(rows[index]):
             return index
         index += step
     return None
@@ -862,7 +924,23 @@ class TriageTab(QWidget):
         embed_row.addWidget(self.embed_stop_button)
         review_card.body.addLayout(embed_row)
 
+        # Narrow the list; Next and Previous follow what is shown.
+        self.filter_combos = {}
+        filter_row = QHBoxLayout()
+        for name in FILTERS:
+            combo = ComboBox(name)
+            combo.addItem("All", None)
+            combo.currentIndexChanged.connect(self._apply_filters)
+            self.filter_combos[name] = combo
+            filter_row.addWidget(combo, stretch=1)
+        self.clear_filters_button = Button("Clear Filters")
+        self.clear_filters_button.clicked.connect(self.clear_filters)
+        filter_row.addWidget(self.clear_filters_button)
+        self.filter_label = hint("")
+
         reviews_card = Card("Reviews")
+        reviews_card.body.addLayout(filter_row)
+        reviews_card.body.addWidget(self.filter_label)
         reviews_card.body.addWidget(splitter)
         reviews_card.body.addLayout(tools_row)
 
@@ -1522,6 +1600,7 @@ class TriageTab(QWidget):
                 row.get("zendesk_id"),
                 row.get("subject"),
                 review.get("classification"),
+                owner_label(row),
                 review.get("confidence"),
                 f"{reviewed_at:%Y-%m-%d %H:%M}" if reviewed_at else "",
                 review.get("model_version"),
@@ -1551,9 +1630,13 @@ class TriageTab(QWidget):
         self.table.setColumnWidth(
             subject, min(self.table.columnWidth(subject), SUBJECT_MAX_WIDTH)
         )
+        self._fill_filter_options()
+        self._apply_filters()
         # Rows added during a batch keep the review being read selected.
         if keep:
             for table_row in range(self.table.rowCount()):
+                if self.table.isRowHidden(table_row):
+                    continue
                 if self.table.item(table_row, 0).data(REVIEW_ID_ROLE) == keep:
                     self.table.selectRow(table_row)
                     # Reselecting the same row emits no signal; show its new data.
@@ -1561,6 +1644,59 @@ class TriageTab(QWidget):
                     return
         self.detail.clear()
         self._enable_navigation()
+
+    def chosen_filters(self) -> dict:
+        """{filter title: chosen value, or None for All}."""
+        combos = getattr(self, "filter_combos", {})  # not yet built during __init__
+        return {name: combo.currentData() for name, combo in combos.items()}
+
+    def _fill_filter_options(self) -> None:
+        """Lists each filter's values from the loaded rows, keeping its choice."""
+        for name, combo in self.filter_combos.items():
+            chosen = combo.currentData()
+            options = filter_options(name, self._rows)
+            # A choice no loaded row has any more stays, matching nothing.
+            if chosen is not None and chosen not in options:
+                options.append(chosen)
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("All", None)
+            for value in options:
+                combo.addItem(value, value)
+            combo.setCurrentIndex(max(0, combo.findData(chosen)) if chosen is not None else 0)
+            combo.blockSignals(False)
+
+    def _apply_filters(self) -> None:
+        """Hides the rows the filters exclude; a hidden selection is cleared."""
+        chosen = self.chosen_filters()
+        shown = 0
+        for table_row in range(self.table.rowCount()):
+            row = self._rows[self.table.item(table_row, 0).data(QtCore.Qt.UserRole)]
+            visible = row_matches(row, chosen)
+            self.table.setRowHidden(table_row, not visible)
+            shown += visible
+        selected = self.table.selectedItems()
+        if selected and self.table.isRowHidden(selected[0].row()):
+            self.table.clearSelection()
+        filtering = any(value is not None for value in chosen.values())
+        self.filter_label.setText(
+            f"Showing {shown:,} of {self.table.rowCount():,} reviews." if filtering else ""
+        )
+        self.filter_label.setVisible(filtering)
+        self.clear_filters_button.setEnabled(filtering)
+        self._enable_navigation()
+
+    def clear_filters(self) -> None:
+        """Sets every filter back to All."""
+        for combo in self.filter_combos.values():
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self._apply_filters()
+
+    def _shown(self, row: dict) -> bool:
+        """Whether the filters let `row` show in the table."""
+        return row_matches(row, self.chosen_filters())
 
     def show_selected_review(self) -> None:
         """Shows the selected row's full review in the detail pane.
@@ -1774,14 +1910,16 @@ class TriageTab(QWidget):
         """
         current = self._selected_index()
         self.previous_button.setEnabled(
-            step_awaiting(self._rows, current, -1) is not None
+            step_awaiting(self._rows, current, -1, self._shown) is not None
         )
-        self.next_button.setEnabled(step_awaiting(self._rows, current, 1) is not None)
+        self.next_button.setEnabled(
+            step_awaiting(self._rows, current, 1, self._shown) is not None
+        )
 
     def select_awaiting(self, step: int) -> None:
         """Selects the nearest review awaiting a decision: step 1 is older,
         -1 newer."""
-        target = step_awaiting(self._rows, self._selected_index(), step)
+        target = step_awaiting(self._rows, self._selected_index(), step, self._shown)
         if target is None:
             return
         # The table may be sorted by any column; find the row holding target.
