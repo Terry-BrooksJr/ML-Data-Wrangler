@@ -677,6 +677,8 @@ def test_filters_hide_rows_and_steer_navigation(qapp, configured, stored):
     owner_column = triage_tab.COLUMNS.index("Owner")
     assert tab.table.item(visible[0], owner_column).text() == "Rich Shupe"
     assert tab.filter_label.text() == "Showing 1 of 3 reviews."
+    # isHidden, not isVisible: the tab is never shown, so isVisible is always False.
+    assert not tab.filter_label.isHidden()
     # Next goes straight to the only shown review, past newer hidden ones.
     tab.select_awaiting(1)
     assert tab._selected_row()["zendesk_id"] == "t-old"
@@ -697,7 +699,8 @@ def test_filters_hide_rows_and_steer_navigation(qapp, configured, stored):
 
     tab.clear_filters()
     assert not any(tab.table.isRowHidden(r) for r in range(3))
-    assert not tab.filter_label.isVisible()
+    assert tab.filter_label.isHidden()
+    assert tab.filter_label.text() == ""
 
 
 def test_next_and_previous_move_between_undecided_reviews(qapp, configured, stored):
