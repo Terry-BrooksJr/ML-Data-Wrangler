@@ -613,6 +613,93 @@ def test_step_awaiting_skips_decided_and_added_rows():
     assert triage_tab.step_awaiting(rows, 3, -1) == 0
 
 
+def test_owner_label_names_roster_staff():
+    assert triage_tab.owner_label({"assignee": "1085778551"}) == "Rich Shupe"
+    assert triage_tab.owner_label({"assignee": "999"}) == "999"
+    assert triage_tab.owner_label({"assignee": None}) == triage_tab.UNASSIGNED
+    assert triage_tab.owner_label({}) == triage_tab.UNASSIGNED
+
+
+def test_row_matches_every_chosen_filter():
+    row = {
+        "assignee": "1085778551",
+        "review": {"review_id": "a", "classification": "flag_solve"},
+        "outcomes": [{"review_id": "a", "outcome": "good"}],
+    }
+    assert triage_tab.row_matches(row, {name: None for name in triage_tab.FILTERS})
+    assert triage_tab.row_matches(
+        row,
+        {
+            "Classification": "flag_solve",
+            "Decision": "Correct",
+            "Owner": "Rich Shupe",
+            "Added to Zendesk": "No",
+        },
+    )
+    assert not triage_tab.row_matches(row, {"Decision": triage_tab.NO_DECISION})
+    assert not triage_tab.row_matches(row, {"Owner": "Chris Short"})
+    assert triage_tab.row_matches(
+        {"review": {"review_id": "b"}}, {"Decision": triage_tab.NO_DECISION}
+    )
+
+
+def test_filter_options_list_fixed_values_then_those_found():
+    rows = [
+        {"assignee": "999", "review": {"classification": "custom"}},
+        {"assignee": None, "review": {"classification": "on_track"}},
+        {"assignee": "1085778551", "review": {"classification": "on_track"}},
+    ]
+    assert triage_tab.filter_options("Owner", rows) == ["999", "Rich Shupe", "Unassigned"]
+    assert triage_tab.filter_options("Classification", rows) == [
+        *triage_tab.CLASSIFICATIONS,
+        "custom",
+    ]
+    assert triage_tab.filter_options("Decision", []) == ["Correct", "Misclassified", "Pending"]
+
+
+def test_filters_hide_rows_and_steer_navigation(qapp, configured, stored):
+    add_reviewed(stored, "t-old", review("on_track", 90, review_id="t-old"))
+    stored.update_one({"zendesk_id": "t-old"}, {"$set": {"assignee": "1085778551"}})
+    tab = make_tab(stored)
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    owner = tab.filter_combos["Owner"]
+    assert [owner.itemText(i) for i in range(owner.count())] == [
+        "All",
+        "Rich Shupe",
+        "Support Owner A",
+    ]
+    assert not tab.clear_filters_button.isEnabled()
+
+    owner.setCurrentIndex(owner.findData("Rich Shupe"))
+    visible = [r for r in range(tab.table.rowCount()) if not tab.table.isRowHidden(r)]
+    assert len(visible) == 1
+    owner_column = triage_tab.COLUMNS.index("Owner")
+    assert tab.table.item(visible[0], owner_column).text() == "Rich Shupe"
+    assert tab.filter_label.text() == "Showing 1 of 3 reviews."
+    # Next goes straight to the only shown review, past newer hidden ones.
+    tab.select_awaiting(1)
+    assert tab._selected_row()["zendesk_id"] == "t-old"
+    assert not tab.next_button.isEnabled() and not tab.previous_button.isEnabled()
+
+    # A refresh keeps the choice.
+    tab.refresh()
+    wait_until_idle(qapp, tab)
+    assert owner.currentData() == "Rich Shupe"
+    assert sum(not tab.table.isRowHidden(r) for r in range(3)) == 1
+
+    # Filtering the selected row out clears the selection.
+    tab.filter_combos["Classification"].setCurrentIndex(
+        tab.filter_combos["Classification"].findData("flag_solve")
+    )
+    assert all(tab.table.isRowHidden(r) for r in range(3))
+    assert tab._selected_row() is None
+
+    tab.clear_filters()
+    assert not any(tab.table.isRowHidden(r) for r in range(3))
+    assert not tab.filter_label.isVisible()
+
+
 def test_next_and_previous_move_between_undecided_reviews(qapp, configured, stored):
     add_reviewed(stored, "t-old", review("on_track", 90, review_id="t-old"))
     tab = make_tab(stored)
