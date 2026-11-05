@@ -128,11 +128,11 @@ httpx==0.28.1
     #   huggingface-hub
     #   langchain-core
     #   weasel
-httpx2==2.13.1 ; sys_platform == 'emscripten'
+httpx2==2.16.0 ; sys_platform == 'emscripten'
     # via
     #   anthropic
     #   langsmith
-httpx2==2.14.0 ; sys_platform != 'emscripten'
+httpx2==2.16.0 ; sys_platform != 'emscripten'
     # via
     #   anthropic
     #   langsmith
