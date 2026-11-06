@@ -2,6 +2,7 @@
 
 import copy
 import json
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -97,6 +98,272 @@ Assigned to
 12 December
 11/2/26, 9:13 AM LAPIPLAT-I-543 Future PDF Viewer support? | Aha!
 https://example.aha.io/ideas/ideas/LAPIPLAT-I-543?active_tab=history 1/1
+"""
+
+# The text pypdf reads from an Aha idea's main page printed to PDF (customer
+# details replaced). Its icons print as private-use characters.
+AHA_IDEA_PAGE = """Created by Allain Dollete in Enhancement Requests on Jul 28, 2026\uf0eb Idea LAPIPLAT-I-684
+Feedback Aide standalone - Feature request to support the ability to
+render playable media for sources
+Description
+Votes
+Totals
+Votes
+1
+Org…
+0
+In F…
+19
+Vote trend
+Opened on behalf of Jane Customer from Example Schools Ticket created from
+#30721
+Feature request to support the ability to render playable media through sources
+Slack conversation:
+https://example.slack.com/archives/C01/p1
+\uf336
+ \uf0f7
+ \ue561
+ th
+Status Scoping
+Workspace \uf37e Feedback Aide
+Created by Allain Dollete
+Assigned to
+ Monet Slinowsky
+Categories
+Themes No themes selected
+Product value \ue974 0
+Tags No tags selected
+Proxy votes 1 View in report
+Created by Organization Contacts Description
+jane.customer@example.com \u00a0 \u00a0
+Portals
+Idea visibility
+Admin message
+There is no admin message in the ideas portal listed below.
+Portals
+Time
+Votes
+
+Visibility in portals Visible to our employees
+Pinned idea \uf059 Yes, pin this idea
+Feedback Aide
+Ideas Portal
+Private portal
+Related
+Merged ideas 0
+There are no merged ideas.
+Similar ideas
+View\u00a0in\u00a0portal \uf08e \uf0c1
+Rejected
+Released
+Scoping
+Promoted
+Add support for a
+"renderSimpleFeatures()"
+public method that allows
+rendering simple features
+authored in any question
+metadata field
+1
+Feedback Aide queries 1
+Add support for a
+renderSimpleFeatures()
+public method that allows
+rendering simple features
+authored in any question
+metadata field, just like
+renderMath() works doing so
+with math today.
+1
+Knowledge Bank for
+Feedback Aide
+1
+\uf0eb QMCRTN-I-4
+\uf0eb LAPIPLAT-I-647
+\uf0eb BLD-I-697
+\uf0eb FA-I-5
+\uf0de  Reference # Name Votes Status
+People also voted for
+Linked records 0
+There are no linked records.
+Research
+Concepts
+Add notes, whiteboards, and prototypes to kick off the creative
+process.
+Promoted
+Released
+Released
+Promoted
+Released
+Released
+Support the ability to display
+alternate responses
+alongside correct answers
+2
+Feedback Aide Latex support 1
+Improve accessibility of File
+Upload
+1
+Process images in sources 1
+Unbundled (stateless)
+Feedback Aide in QM
+0
+Support stem with resources
+(Feedback Aide)
+5
+\uf0eb LAPIPLAT-I-68
+\uf0eb LAPIPLAT-I-442
+\uf0eb LAPIPLAT-I-514
+\uf0eb FA-I-29
+\uf0eb OD3-I-1811
+\uf0eb LAPIPLAT-I-299
+BrokenExpose Feedback Aide
+validation/scoring errors in Items
+API session data
+1\uf0eb BLD-I-685
+\uf61f
+\uf0de  Reference # Name Votes Status
+\uf0de  Reference # Name Votes Status
+Ideas
+Link to existing ideas submitted by customers and the team.\uf0eb
+"""
+
+# Another main page: merged into another idea, its related-ideas tables split
+# across the PDF's pages.
+AHA_MERGED_IDEA_PAGE = """Created by Samantha Redwin in Enhancement Requests on Jun 11, 2026\uf0eb Idea LAPIPLAT-I-662
+Add Video to Feedback Aide Sources
+Description
+Votes
+Totals
+Votes
+1
+Org…
+0
+Prox…
+0
+Vote trend
+Proxy votes View in report
+Dynamic elements such as video or audio players are generally not supported in
+Feedback Aide.
+Acme have specifically requested the addition of video sources.
+\uf336
+ \uf0f7
+ \ue4d2
+Time
+Votes
+\ue526 Merged into FA-I-21
+Status Parked
+Workspace \uf37e Feedback Aide
+Created by Samantha Redwin
+Assigned to
+ Monet Slinowsky
+Categories
+Themes No themes selected
+Product value \ue974 0
+Tags No tags selected
+There are no proxy votes for this idea.
+Portals
+Idea visibility
+Admin message
+There is no admin message in the ideas portal listed below.
+Portals
+Feedback Aide
+Ideas Portal
+Private portal
+Related
+Merged ideas 0
+There are no merged ideas.
+Visibility in portals Visible to our employees
+Pinned idea \uf059 Yes, pin this idea
+View\u00a0in\u00a0portal \uf08e \uf0c1
+Similar ideas
+People also voted for
+Scoping
+Scoping
+Released
+Promoted
+Released
+Parked
+Promoted
+Rejected
+Released
+Parked
+Enabling Audio in LongtextV2 1
+Feedback Aide standalone -
+Feature request to support
+the ability to render playable
+media for sources
+1
+Feedback Aide queries 1
+Add Playback Speed To
+Hosted Video Player
+1
+Support the ability to add
+close captions to simple
+feature videos
+1
+Add descriptive audio track
+support to video player
+3
+Improve dynamic content
+authoring
+11
+Support Programmatic Media
+Device Selection and Volume
+Control
+1
+Content moderation backend
+flag in Feedback Aide
+0
+Handle videos as sources 2
+\uf0eb LAPIPLAT-I-660
+\uf0eb LAPIPLAT-I-684
+\uf0eb LAPIPLAT-I-647
+\uf0eb LAPIPLAT-I-421
+\uf0eb LAPIPLAT-I-9
+\uf0eb LAPIPLAT-I-239
+\uf0eb LAPIPLAT-I-275
+\uf0eb LAPIPLAT-I-630
+\uf0eb FA-I-2
+\uf0eb FA-I-21
+Parked
+Parked
+Scoping
+Handle videos as sources 2
+Score images 3
+Support the conversion of
+short text to longtext
+1
+\uf0eb FA-I-21
+\uf0eb FA-I-31
+\uf0eb LAPIPLAT-I-659
+\uf0de  Reference # Name Votes Status
+\uf0de  Reference # Name Votes Status
+Linked records 0
+There are no linked records.
+Research
+Concepts
+Add notes, whiteboards, and prototypes to kick off the creative
+process.
+Ideas
+Link to existing ideas submitted by customers and the team.
+Perspectives
+Bring quantitative data to validate your plans.
+Aha! Discovery
+Conduct interviews to capture key insights
+Scoping
+Promoted
+Enabling Audio in LongtextV2 1
+IBHC as an MCP 1
+\uf0eb LAPIPLAT-I-660
+\uf0eb LAPIPLAT-I-661
+\uf61f
+\uf0eb
+\uf086
+\uf086
+TRY
+Try free
+\uf0de  Reference # Name Votes Status
 """
 
 
@@ -404,7 +671,144 @@ def test_aha_page_text_is_parsed():
     created = next(a for a in data["activity"] if a["action"] == "commented on")
     assert created["deleted_later"] is True
     assert data["activity_days"] == ["04 June", "12 December"]
+    assert data["page"] == "history" and "related_ideas" not in data
     assert "" not in json.dumps(data)
+
+
+def test_an_aha_idea_page_is_parsed():
+    data = evidence.extract(evidence.AHA, AHA_IDEA_PAGE).data
+    assert data["page"] == "idea"
+    assert data["reference"] == "LAPIPLAT-I-684"
+    # The title wraps onto a second line, and the page has no print footer.
+    assert data["title"] == (
+        "Feedback Aide standalone - Feature request to support the ability to "
+        "render playable media for sources"
+    )
+    assert data["status"] == "Scoping" and data["assigned_to"] == "Monet Slinowsky"
+    assert data["created_by"] == "Allain Dollete" and data["created_on"] == "Jul 28, 2026"
+    # The main page prints no link: it's built from the reference.
+    assert data["url"] == "https://questionmarkcorp.aha.io/ideas/ideas/LAPIPLAT-I-684"
+    assert data["zendesk_ticket"] == "30721"
+    assert (data["requested_by"], data["requested_by_org"]) == ("Jane Customer", "Example Schools")
+    assert data["workspace"] == "Feedback Aide"
+    assert data["categories"] is data["themes"] is data["tags"] is None
+    assert data["product_value"] == 0 and data["visibility"] == "Visible to our employees"
+    assert data["votes"] == 1 and data["vote_totals"] == {"Votes": 1, "Org": 0, "In F": 19}
+    assert data["merged_into"] is None
+    assert data["merged_ideas"] == 0 and data["linked_records"] == 0
+    assert data["comments"] == [] and data["workflow_changes"] == []
+    assert "History tab" in data["history"] and "activity_days" not in data
+    # The description stops at the sidebar: no other idea's status, and not
+    # the proxy voter's email.
+    assert data["description"].startswith("Opened on behalf of Jane Customer")
+    assert data["description"].endswith("https://example.slack.com/archives/C01/p1")
+    assert "Released" not in data["description"] and "Status" not in data["description"]
+    assert "jane.customer@example.com" not in json.dumps(data)
+    assert [(r["reference"], r["status"], r["votes"]) for r in data["related_ideas"]] == [
+        ("QMCRTN-I-4", "Rejected", 1),
+        ("LAPIPLAT-I-647", "Released", 1),
+        ("BLD-I-697", "Scoping", 1),
+        ("FA-I-5", "Promoted", 1),
+        ("LAPIPLAT-I-68", "Promoted", 2),
+        ("LAPIPLAT-I-442", "Released", 1),
+        ("LAPIPLAT-I-514", "Released", 1),
+        ("FA-I-29", "Promoted", 1),
+        ("OD3-I-1811", "Released", 0),
+        ("LAPIPLAT-I-299", "Released", 5),
+    ]
+    assert data["related_ideas"][1]["name"] == "Feedback Aide queries"
+    assert "none of them is this idea's status" in data["related_ideas_note"]
+    assert evidence.describe({"kind": evidence.AHA, "data": data}).endswith("(Scoping)")
+
+
+def test_an_aha_idea_merged_into_another_says_so():
+    data = evidence.extract(evidence.AHA, AHA_MERGED_IDEA_PAGE).data
+    assert (data["reference"], data["title"]) == ("LAPIPLAT-I-662", "Add Video to Feedback Aide Sources")
+    assert (data["status"], data["merged_into"]) == ("Parked", "FA-I-21")
+    assert data["url"] == "https://questionmarkcorp.aha.io/ideas/ideas/LAPIPLAT-I-662"
+    assert data["description"] == (
+        "Dynamic elements such as video or audio players are generally not supported in\n"
+        "Feedback Aide.\nAcme have specifically requested the addition of video sources."
+    )
+    assert data["zendesk_ticket"] is None and data["requested_by"] is None
+    related = {r["reference"]: r for r in data["related_ideas"]}
+    # The idea it was merged into, listed in two tables, appears once.
+    assert related["FA-I-21"] == {
+        "reference": "FA-I-21", "name": "Handle videos as sources", "status": "Parked", "votes": 2
+    }
+    assert related["LAPIPLAT-I-684"]["status"] == "Scoping"
+    assert related["LAPIPLAT-I-275"]["votes"] == 11
+    # The table continued on the PDF's second page.
+    assert related["LAPIPLAT-I-661"]["name"] == "IBHC as an MCP"
+    assert len(related) == 13 and "LAPIPLAT-I-662" not in related
+    assert evidence.describe({"kind": evidence.AHA, "data": data}) == (
+        "Aha LAPIPLAT-I-662: Add Video to Feedback Aide Sources (Parked, merged into FA-I-21)"
+    )
+
+
+def test_an_aha_feature_without_a_printed_link_gets_a_feature_link():
+    text = AHA_MERGED_IDEA_PAGE.replace("Idea LAPIPLAT-I-662", "Feature FA-100")
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["reference"] == "FA-100"
+    assert data["url"] == "https://questionmarkcorp.aha.io/features/FA-100"
+
+
+def test_related_ideas_whose_columns_dont_pair_up_are_left_out():
+    # One status missing from the first table: its rows can't be paired, so
+    # they're left out rather than given a wrong status.
+    text = AHA_IDEA_PAGE.replace("Rejected\nReleased\nScoping\nPromoted\n", "Released\nScoping\nPromoted\n")
+    related = {r["reference"]: r for r in evidence.extract(evidence.AHA, text).data["related_ideas"]}
+    assert "QMCRTN-I-4" not in related and "FA-I-5" not in related
+    assert related["LAPIPLAT-I-299"]["status"] == "Released"
+
+
+def test_aha_statuses_may_carry_punctuation():
+    text = AHA_IDEA_PAGE.replace("Rejected\nReleased\nScoping\nPromoted\n", "Won’t do\nReleased\nScoping\nPromoted\n")
+    related = {r["reference"]: r for r in evidence.extract(evidence.AHA, text).data["related_ideas"]}
+    assert related["QMCRTN-I-4"]["status"] == "Won’t do"
+
+
+def test_only_the_tables_references_are_related_ideas():
+    # A reference on a line of its own in the description isn't a table row.
+    text = AHA_IDEA_PAGE.replace("#30721\n", "#30721\nFA-I-999\n")
+    data = evidence.extract(evidence.AHA, text).data
+    assert "FA-I-999" in data["description"]
+    assert "FA-I-999" not in {r["reference"] for r in data["related_ideas"]}
+
+
+def test_an_aha_description_keeps_lines_that_look_like_the_sidebar():
+    text = AHA_MERGED_IDEA_PAGE.replace(
+        "Acme have specifically requested the addition of video sources.\n",
+        "Acme have specifically requested the addition of video sources.\n"
+        "Status of the request: urgent\nMerged into LAPIPLAT-I-1 last year, then split out\nOK\n",
+    )
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["description"].endswith(
+        "Status of the request: urgent\nMerged into LAPIPLAT-I-1 last year, then split out\nOK"
+    )
+    assert data["merged_into"] == "FA-I-21"
+
+
+def test_a_description_mentioning_a_merge_isnt_one():
+    text = AHA_IDEA_PAGE.replace("#30721\n", "#30721\nMerged into FA-I-7\n")
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["merged_into"] is None and "Merged into FA-I-7" in data["description"]
+
+
+def test_a_long_wrapped_aha_title_is_kept_whole():
+    text = AHA_MERGED_IDEA_PAGE.replace(
+        "Add Video to Feedback Aide Sources\n", "Add\nVideo\nto\nFeedback\nAide\nSources\n"
+    )
+    assert evidence.extract(evidence.AHA, text).data["title"] == "Add Video to Feedback Aide Sources"
+
+
+def test_many_reference_blocks_parse_quickly():
+    blocks = "".join(f"Parked\nIdea {n} 1\nFA-I-{n}\nnote\n" for n in range(20000))
+    text = AHA_IDEA_PAGE.replace("Similar ideas\n", "Similar ideas\n" + blocks)
+    started = time.monotonic()
+    related = evidence.extract(evidence.AHA, text).data["related_ideas"]
+    assert time.monotonic() - started < 5
+    assert len(related) == evidence.MAX_TABLE_BLOCKS
 
 
 def test_a_linked_jira_key_isnt_taken_for_the_aha_item():
