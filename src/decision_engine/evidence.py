@@ -5,9 +5,13 @@ Two kinds, from a file or pasted text:
   jira-rss.xsd (rss > channel > item). Parsed with defusedxml, so entity
   expansion and external entities in a hostile file are refused.
 - aha: an Aha! idea or feature, as its page prints to PDF or copies as text
-  (the History tab: Aha has no clean export). The page's day headings come
-  apart from its activity entries in the text, so each entry keeps its time
-  and order but not its date.
+  (Aha has no clean export). Two pages are read:
+  - the History tab: comments, workflow changes and activity. Its day
+    headings come apart from its activity entries in the text, so each entry
+    keeps its time and order but not its date.
+  - the idea's main page: its description, the sidebar's fields (status,
+    workspace, what it was merged into, linked records), the Zendesk ticket
+    it was opened from, and the statuses of related ideas.
 
 extract() returns only the fields a reviewer or the arbiter needs; anything
 that can't be parsed is rejected with the reason, rather than stored half
@@ -82,6 +86,26 @@ _AHA_HEADER = re.compile(
 # The browser's print footer: "<REF> <title> | Aha!".
 _AHA_FOOTER = re.compile(rf"\b({_REF}) [^\n]+? \| Aha!\s*$", re.MULTILINE)
 _AHA_WORKFLOW = re.compile(r"Workflow status\s*(?P<old>.+?)\s*→\s*(?P<new>.+?)(?:\s+Assigned to\b|$)", re.MULTILINE)
+# The idea's main page: its vote box ends at "Vote trend", and its own
+# description follows.
+_AHA_VOTE_TREND = re.compile(r"^Vote trend\s*$", re.MULTILINE)
+_AHA_MERGED_INTO = re.compile(rf"\bMerged into ({_REF})\b")
+# Support's wording when it opens an idea for a customer.
+_AHA_REQUESTER = re.compile(
+    r"Opened on behalf of (?P<name>.+?) from (?P<org>.+?)\s+Ticket created from"
+)
+_AHA_TICKET = re.compile(r"Ticket created from\s*#(\d+)\b")
+# The related-ideas tables (Similar ideas, People also voted for) come out of
+# the PDF a column at a time: each row's status, then each row's name ending
+# in its vote count, then each row's reference on a line of its own.
+_AHA_REF_LINE = re.compile(rf"^({_REF})$")
+_AHA_NAME_END = re.compile(r"^(?:(?P<rest>.*\S)\s+)?(?P<votes>\d+)$")
+_AHA_STATUS = re.compile(r"^[A-Z][A-Za-z]*(?: [A-Za-z]+){0,2}$")
+# Lines near the tables that a status line could be mistaken for.
+_AHA_PAGE_LABELS = {
+    "Similar ideas", "People also voted for", "Related", "Portals", "Research",
+    "Concepts", "Ideas", "Perspectives", "Linked records", "Merged ideas",
+}
 _AHA_DAY = re.compile(r"^\s*(\d{1,2} (?:January|February|March|April|May|June|July|August|"
                       r"September|October|November|December))\s*$", re.MULTILINE)
 
@@ -516,6 +540,154 @@ def _last_value_after(text: str, label: str) -> Optional[str]:
     return matches[-1].strip() if matches else None
 
 
+def _idea_page_title(text: str, reference: str) -> Optional[str]:
+    """The main page's title: the lines between its header ("Created by ...
+    Idea <REF>") and "Description", since a long title wraps."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if reference in line and line.lstrip().startswith("Created by "):
+            title = []
+            for following in lines[i + 1 : i + 6]:
+                if following.strip() == "Description":
+                    return " ".join(title) or None
+                if following.strip():
+                    title.append(following.strip())
+            return None
+    return None
+
+
+def _vote_totals(text: str) -> dict:
+    """The main page's vote box, label to count: {"Votes": 1, "Org": 0,
+    "In F": 19}. Aha truncates its labels."""
+    box = re.search(
+        r"^Description\s*\nVotes\s*\nTotals\s*\n(?P<box>.*?)^Vote trend\s*$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not box:
+        return {}
+    lines = [line.strip() for line in box["box"].splitlines() if line.strip()]
+    return {
+        label.rstrip("…").strip(): int(value)
+        for label, value in zip(lines[::2], lines[1::2])
+        if value.isdigit()
+    }
+
+
+def _idea_page_description(text: str) -> str:
+    """The main page's description: after the vote box, up to the vote
+    chart's axis labels or the sidebar."""
+    rest = text[_AHA_VOTE_TREND.search(text).end() :]
+    rest = re.sub(r"\A\s*Proxy votes View in report[ \t]*\n", "", rest)
+    end = re.search(r"^\s*(?:Time\s*\nVotes\s*$|Merged into\b|Status\s)", rest, re.MULTILINE)
+    lines = [line.rstrip() for line in (rest[: end.start()] if end else rest).splitlines()]
+    # The rank's superscript ("19th") leaves a stray "th" behind.
+    while lines and len(lines[-1].strip()) <= 2:
+        lines.pop()
+    return re.sub(r"\n\s*\n(?:\s*\n)+", "\n\n", "\n".join(lines)).strip()
+
+
+def _sidebar(text: str, label: str) -> Optional[str]:
+    """A sidebar field's value on its label's line, or None; Aha's "No
+    themes selected" and the like count as none."""
+    match = re.search(rf"^{label}[ \t]+(\S.*?)\s*$", text, re.MULTILINE)
+    if not match or re.fullmatch(r"No \w+ selected", match.group(1)):
+        return None
+    return match.group(1)
+
+
+def _count_after(text: str, label: str) -> Optional[int]:
+    match = re.search(rf"^{label}\s+(\d+)\s*$", text, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def _table_names(lines: List[str]) -> Optional[list]:
+    """(name, votes) for each row, when lines are exactly whole names: each
+    name's last line ends with its vote count, or is the count alone."""
+    names, current = [], []
+    for line in lines:
+        end = _AHA_NAME_END.match(line)
+        if end:
+            if end["rest"]:
+                current.append(end["rest"])
+            if not current:
+                return None
+            names.append((" ".join(current), int(end["votes"])))
+            current = []
+        else:
+            current.append(line)
+    return None if current else names
+
+
+def _table_rows(before: List[str], count: int) -> Optional[list]:
+    """(status, name, votes) for the `count` rows whose references follow
+    `before`, or None unless exactly one reading fits: `count` status lines,
+    then `count` whole names."""
+    readings = []
+    for start in range(len(before) - count, count - 1, -1):
+        statuses = before[start - count : start]
+        if not all(_AHA_STATUS.match(s) and s not in _AHA_PAGE_LABELS for s in statuses):
+            continue
+        names = _table_names(before[start:])
+        if names is not None and len(names) == count:
+            readings.append([(s, n, v) for s, (n, v) in zip(statuses, names)])
+        if start < len(before) - 40:  # a table's names never run this long
+            break
+    return readings[0] if len(readings) == 1 else None
+
+
+def _related_ideas(text: str, reference: str) -> list:
+    """The ideas in the main page's Similar ideas and People also voted for
+    tables, with their status where the columns can be paired up exactly;
+    the page doesn't say which table each came from."""
+    lines = [line.strip() for line in text.splitlines()]
+    related, i = {}, 0
+    while i < len(lines):
+        if not _AHA_REF_LINE.match(lines[i]):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and _AHA_REF_LINE.match(lines[j]):
+            j += 1
+        refs = lines[i:j]
+        rows = _table_rows([line for line in lines[:i] if line], len(refs))
+        for n, ref in enumerate(refs):
+            status, name, votes = rows[n] if rows else (None, None, None)
+            if ref != reference and (ref not in related or related[ref]["status"] is None):
+                related[ref] = {"reference": ref, "name": name, "status": status, "votes": votes}
+        i = j
+    return list(related.values())
+
+
+def _idea_page_fields(text: str, reference: str) -> dict:
+    """What the main page adds to the fields both pages share."""
+    requester = _AHA_REQUESTER.search(text)
+    ticket = _AHA_TICKET.search(text)
+    merged_into = _AHA_MERGED_INTO.search(text)
+    totals = _vote_totals(text)
+    return {
+        "description": _idea_page_description(text),
+        "merged_into": merged_into.group(1) if merged_into else None,
+        "zendesk_ticket": ticket.group(1) if ticket else None,
+        "requested_by": requester["name"].strip() if requester else None,
+        "requested_by_org": requester["org"].strip() if requester else None,
+        "workspace": _sidebar(text, "Workspace"),
+        "categories": _sidebar(text, "Categories"),
+        "themes": _sidebar(text, "Themes"),
+        "tags": _sidebar(text, "Tags"),
+        "product_value": _count_after(text, "Product value"),
+        "visibility": _sidebar(text, "Visibility in portals"),
+        "vote_totals": totals,
+        "votes": totals.get("Votes"),
+        "merged_ideas": _count_after(text, "Merged ideas"),
+        "linked_records": _count_after(text, "Linked records"),
+        "related_ideas": _related_ideas(text, reference),
+        "related_ideas_note": "Other ideas Aha lists beside this one (similar ones, "
+        "or ones the same people voted for), each with its own status: none of "
+        "them is this idea's status or outcome.",
+    }
+
+
 def parse_aha(text: str) -> dict:
     """The fields of an Aha idea or feature page, printed to PDF or copied.
 
@@ -532,7 +704,8 @@ def parse_aha(text: str) -> dict:
     text = re.sub(r"[\ue000-\uf8ff]", "", text.replace("\r\n", "\n"))
     headers = list(_AHA_ACTIVITY.finditer(text))
     reference = _aha_reference(text, headers)
-    title = _aha_title(text, reference)
+    idea_page = not headers and _AHA_VOTE_TREND.search(text) is not None
+    title = (idea_page and _idea_page_title(text, reference)) or _aha_title(text, reference)
     if not title:
         raise EvidenceError(f"Found {reference}, but not its title.")
 
@@ -600,7 +773,8 @@ def parse_aha(text: str) -> dict:
             entry["workflow_status"] = f"{change['from']} → {change['to']}"
         activity.append(entry)
 
-    return {
+    data = {
+        "page": "idea" if idea_page else "history",
         "reference": reference,
         "title": title,
         "url": url,
@@ -619,6 +793,14 @@ def parse_aha(text: str) -> dict:
         "activity_dates": "Each entry has its time only: the page's day headings "
         "don't stay with their entries when it's printed or copied.",
     }
+    if idea_page:
+        data.update(_idea_page_fields(text, reference))
+        del data["activity_days"], data["activity_dates"]
+        data["history"] = (
+            "This is the idea's main page: its comments and workflow history are "
+            "on its History tab, which isn't included here."
+        )
+    return data
 
 
 # --- entry point ------------------------------------------------------------------
@@ -660,4 +842,7 @@ def describe(entry: dict) -> str:
             for i in data.get("issues") or []
         ]
         return "Jira " + "; ".join(issues)
-    return f"Aha {data.get('reference')}: {data.get('title')} ({data.get('status') or 'status unknown'})"
+    state = data.get("status") or "status unknown"
+    if data.get("merged_into"):
+        state += f", merged into {data['merged_into']}"
+    return f"Aha {data.get('reference')}: {data.get('title')} ({state})"
