@@ -93,7 +93,12 @@ _AHA_WORKFLOW = re.compile(r"Workflow status\s*(?P<old>.+?)\s*→\s*(?P<new>.+?)
 # The idea's main page: its vote box ends at "Vote trend", and its own
 # description follows.
 _AHA_VOTE_TREND = re.compile(r"^Vote trend\s*$", re.MULTILINE)
-_AHA_MERGED_INTO = re.compile(rf"\bMerged into ({_REF})\b")
+# The sidebar starts at its Status line, with Workspace under it.
+_AHA_SIDEBAR = re.compile(r"^[ \t]*Status [^\n]*\n[ \t]*Workspace\b", re.MULTILINE)
+# What can sit between the description and the sidebar: the vote chart's axis
+# labels, the merge notice, and the rank's superscript ("19th" leaves "th").
+_AHA_ABOVE_SIDEBAR = re.compile(rf"^[ \t]*(?:Time|Votes|Merged into {_REF}|th|st|nd|rd)?[ \t]*$")
+_AHA_MERGED_INTO = re.compile(rf"^[ \t]*Merged into ({_REF})[ \t]*$", re.MULTILINE)
 # Support's wording when it opens an idea for a customer.
 _AHA_REQUESTER = re.compile(
     r"Opened on behalf of (?P<name>.+?) from (?P<org>.+?)\s+Ticket created from"
@@ -104,8 +109,12 @@ _AHA_TICKET = re.compile(r"Ticket created from\s*#(\d+)\b")
 # in its vote count, then each row's reference on a line of its own.
 _AHA_REF_LINE = re.compile(rf"^({_REF})$")
 _AHA_NAME_END = re.compile(r"^(?:(?P<rest>.*\S)\s+)?(?P<votes>\d+)$")
-_AHA_STATUS = re.compile(r"^[A-Z][A-Za-z]*(?: [A-Za-z]+){0,2}$")
+# A status: up to three words, with the punctuation statuses use ("Won't do").
+_AHA_STATUS = re.compile(r"^[A-Z][A-Za-z’'&/.-]*(?: [A-Za-z’'&/.-]+){0,2}$")
 # Lines near the tables that a status line could be mistaken for.
+# A related-ideas table shows a few dozen rows; a page has a few tables.
+MAX_TABLE_ROWS = 50
+MAX_TABLE_BLOCKS = 20
 _AHA_PAGE_LABELS = {
     "Similar ideas", "People also voted for", "Related", "Portals", "Research",
     "Concepts", "Ideas", "Perspectives", "Linked records", "Merged ideas",
@@ -551,7 +560,7 @@ def _idea_page_title(text: str, reference: str) -> Optional[str]:
     for i, line in enumerate(lines):
         if reference in line and line.lstrip().startswith("Created by "):
             title = []
-            for following in lines[i + 1 : i + 6]:
+            for following in lines[i + 1 : i + 21]:
                 if following.strip() == "Description":
                     return " ".join(title) or None
                 if following.strip():
@@ -578,17 +587,29 @@ def _vote_totals(text: str) -> dict:
     }
 
 
-def _idea_page_description(text: str) -> str:
-    """The main page's description: after the vote box, up to the vote
-    chart's axis labels or the sidebar."""
+def _idea_page_description(text: str) -> tuple:
+    """(description, what sits between it and the sidebar) on the main page.
+
+    The description follows the vote box and runs to the sidebar's Status
+    line; only the chart's axis labels, the merge notice and the rank's
+    stray superscript are taken off its end, so a description line that
+    starts "Status" or is short stays in it. Without that sidebar, it stops
+    at the first of those."""
     rest = text[_AHA_VOTE_TREND.search(text).end() :]
     rest = re.sub(r"\A\s*Proxy votes View in report[ \t]*\n", "", rest)
-    end = re.search(r"^\s*(?:Time\s*\nVotes\s*$|Merged into\b|Status\s)", rest, re.MULTILINE)
-    lines = [line.rstrip() for line in (rest[: end.start()] if end else rest).splitlines()]
-    # The rank's superscript ("19th") leaves a stray "th" behind.
-    while lines and len(lines[-1].strip()) <= 2:
-        lines.pop()
-    return re.sub(r"\n\s*\n(?:\s*\n)+", "\n\n", "\n".join(lines)).strip()
+    sidebar = _AHA_SIDEBAR.search(rest)
+    if sidebar:
+        lines = rest[: sidebar.start()].split("\n")
+    else:
+        end = re.search(r"^\s*(?:Time\s*\nVotes\s*$|Merged into\b|Status\s)", rest, re.MULTILINE)
+        lines = (rest[: end.start()] if end else rest).split("\n")
+    tail = []
+    while lines and _AHA_ABOVE_SIDEBAR.match(lines[-1]):
+        tail.insert(0, lines.pop())
+    if not sidebar and end:
+        tail.append(rest[end.start() : end.start() + 200])
+    description = "\n".join(line.rstrip() for line in lines)
+    return re.sub(r"\n\s*\n(?:\s*\n)+", "\n\n", description).strip(), "\n".join(tail)
 
 
 def _sidebar(text: str, label: str) -> Optional[str]:
@@ -627,7 +648,7 @@ def _table_rows(before: List[str], count: int) -> Optional[list]:
     """(status, name, votes) for the `count` rows whose references follow
     `before`, or None unless exactly one reading fits: `count` status lines,
     then `count` whole names."""
-    readings = []
+    readings, longest = [], 6 * count + 10  # names wrap onto a few lines each
     for start in range(len(before) - count, count - 1, -1):
         statuses = before[start - count : start]
         if not all(_AHA_STATUS.match(s) and s not in _AHA_PAGE_LABELS for s in statuses):
@@ -635,29 +656,38 @@ def _table_rows(before: List[str], count: int) -> Optional[list]:
         names = _table_names(before[start:])
         if names is not None and len(names) == count:
             readings.append([(s, n, v) for s, (n, v) in zip(statuses, names)])
-        if start < len(before) - 40:  # a table's names never run this long
+        if start < len(before) - longest:
             break
     return readings[0] if len(readings) == 1 else None
 
 
 def _related_ideas(text: str, reference: str) -> list:
     """The ideas in the main page's Similar ideas and People also voted for
-    tables, with their status where the columns can be paired up exactly;
-    the page doesn't say which table each came from."""
-    lines = [line.strip() for line in text.splitlines()]
-    related, i = {}, 0
-    while i < len(lines):
+    tables, from where the first of them starts. A block of references is
+    kept only when its statuses and names pair up with it exactly, so a
+    reference elsewhere on the page (a linked record, a description's
+    mention) isn't presented as a related idea. The page doesn't say which
+    table each came from."""
+    heading = re.search(r"^[ \t]*(?:Similar ideas|People also voted for)[ \t]*$", text, re.MULTILINE)
+    if not heading:
+        return []
+    lines = [line.strip() for line in text[heading.end() :].splitlines() if line.strip()]
+    related, i, blocks = {}, 0, 0
+    while i < len(lines) and blocks < MAX_TABLE_BLOCKS:
         if not _AHA_REF_LINE.match(lines[i]):
             i += 1
             continue
         j = i
         while j < len(lines) and _AHA_REF_LINE.match(lines[j]):
             j += 1
-        refs = lines[i:j]
-        rows = _table_rows([line for line in lines[:i] if line], len(refs))
-        for n, ref in enumerate(refs):
-            status, name, votes = rows[n] if rows else (None, None, None)
-            if ref != reference and (ref not in related or related[ref]["status"] is None):
+        blocks += 1
+        count = j - i
+        rows = None
+        if count <= MAX_TABLE_ROWS:
+            # Only the lines a block's statuses and names can fill.
+            rows = _table_rows(lines[max(0, i - (7 * count + 10)) : i], count)
+        for ref, (status, name, votes) in zip(lines[i:j], rows or []):
+            if ref != reference and ref not in related:
                 related[ref] = {"reference": ref, "name": name, "status": status, "votes": votes}
         i = j
     return list(related.values())
@@ -665,12 +695,15 @@ def _related_ideas(text: str, reference: str) -> list:
 
 def _idea_page_fields(text: str, reference: str) -> dict:
     """What the main page adds to the fields both pages share."""
-    requester = _AHA_REQUESTER.search(text)
-    ticket = _AHA_TICKET.search(text)
-    merged_into = _AHA_MERGED_INTO.search(text)
+    description, above_sidebar = _idea_page_description(text)
+    # Support's wording is in the description; the merge notice sits just
+    # above the sidebar, so a description that mentions a merge isn't one.
+    requester = _AHA_REQUESTER.search(description)
+    ticket = _AHA_TICKET.search(description)
+    merged_into = _AHA_MERGED_INTO.search(above_sidebar)
     totals = _vote_totals(text)
     return {
-        "description": _idea_page_description(text),
+        "description": description,
         "merged_into": merged_into.group(1) if merged_into else None,
         "zendesk_ticket": ticket.group(1) if ticket else None,
         "requested_by": requester["name"].strip() if requester else None,

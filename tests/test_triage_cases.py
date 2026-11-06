@@ -2,6 +2,7 @@
 
 import copy
 import json
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -752,14 +753,62 @@ def test_an_aha_feature_without_a_printed_link_gets_a_feature_link():
     assert data["url"] == "https://questionmarkcorp.aha.io/features/FA-100"
 
 
-def test_related_ideas_whose_columns_dont_pair_up_have_no_status():
+def test_related_ideas_whose_columns_dont_pair_up_are_left_out():
     # One status missing from the first table: its rows can't be paired, so
-    # none of them gets a status or name rather than a wrong one.
+    # they're left out rather than given a wrong status.
     text = AHA_IDEA_PAGE.replace("Rejected\nReleased\nScoping\nPromoted\n", "Released\nScoping\nPromoted\n")
     related = {r["reference"]: r for r in evidence.extract(evidence.AHA, text).data["related_ideas"]}
-    assert related["QMCRTN-I-4"] == {"reference": "QMCRTN-I-4", "name": None, "status": None, "votes": None}
-    assert related["FA-I-5"]["status"] is None
+    assert "QMCRTN-I-4" not in related and "FA-I-5" not in related
     assert related["LAPIPLAT-I-299"]["status"] == "Released"
+
+
+def test_aha_statuses_may_carry_punctuation():
+    text = AHA_IDEA_PAGE.replace("Rejected\nReleased\nScoping\nPromoted\n", "Won’t do\nReleased\nScoping\nPromoted\n")
+    related = {r["reference"]: r for r in evidence.extract(evidence.AHA, text).data["related_ideas"]}
+    assert related["QMCRTN-I-4"]["status"] == "Won’t do"
+
+
+def test_only_the_tables_references_are_related_ideas():
+    # A reference on a line of its own in the description isn't a table row.
+    text = AHA_IDEA_PAGE.replace("#30721\n", "#30721\nFA-I-999\n")
+    data = evidence.extract(evidence.AHA, text).data
+    assert "FA-I-999" in data["description"]
+    assert "FA-I-999" not in {r["reference"] for r in data["related_ideas"]}
+
+
+def test_an_aha_description_keeps_lines_that_look_like_the_sidebar():
+    text = AHA_MERGED_IDEA_PAGE.replace(
+        "Acme have specifically requested the addition of video sources.\n",
+        "Acme have specifically requested the addition of video sources.\n"
+        "Status of the request: urgent\nMerged into LAPIPLAT-I-1 last year, then split out\nOK\n",
+    )
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["description"].endswith(
+        "Status of the request: urgent\nMerged into LAPIPLAT-I-1 last year, then split out\nOK"
+    )
+    assert data["merged_into"] == "FA-I-21"
+
+
+def test_a_description_mentioning_a_merge_isnt_one():
+    text = AHA_IDEA_PAGE.replace("#30721\n", "#30721\nMerged into FA-I-7\n")
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["merged_into"] is None and "Merged into FA-I-7" in data["description"]
+
+
+def test_a_long_wrapped_aha_title_is_kept_whole():
+    text = AHA_MERGED_IDEA_PAGE.replace(
+        "Add Video to Feedback Aide Sources\n", "Add\nVideo\nto\nFeedback\nAide\nSources\n"
+    )
+    assert evidence.extract(evidence.AHA, text).data["title"] == "Add Video to Feedback Aide Sources"
+
+
+def test_many_reference_blocks_parse_quickly():
+    blocks = "".join(f"Parked\nIdea {n} 1\nFA-I-{n}\nnote\n" for n in range(20000))
+    text = AHA_IDEA_PAGE.replace("Similar ideas\n", "Similar ideas\n" + blocks)
+    started = time.monotonic()
+    related = evidence.extract(evidence.AHA, text).data["related_ideas"]
+    assert time.monotonic() - started < 5
+    assert len(related) == evidence.MAX_TABLE_BLOCKS
 
 
 def test_a_linked_jira_key_isnt_taken_for_the_aha_item():
