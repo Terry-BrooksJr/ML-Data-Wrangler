@@ -72,9 +72,10 @@ _ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
 # page names it (_aha_reference), never from its free text.
 _REF = r"[A-Z][A-Z0-9]+-(?:I-)?\d+"
 _AHA_URL = re.compile(r"https://[\w.-]+\.aha\.io/\S+")
-# An idea's link, for a page that doesn't print one (the main page): ideas
-# only, since features have links of another shape.
+# An item's link, for a page that doesn't print one (the main page): ideas
+# (PROJ-I-123) and features (PROJ-123) live at different paths.
 AHA_IDEA_URL = "https://questionmarkcorp.aha.io/ideas/ideas/{reference}"
+AHA_FEATURE_URL = "https://questionmarkcorp.aha.io/features/{reference}"
 _AHA_ACTIVITY = re.compile(
     r"^(?P<time>\d{1,2}:\d{2}\s?[ap]m)\s*(?P<actor>.+?) "
     r"(?P<action>created internal comment on|deleted comment on|commented on|"
@@ -720,8 +721,8 @@ def parse_aha(text: str) -> dict:
     # may link other Aha items, including PROJ-I-5430 beside PROJ-I-543.
     own = re.compile(rf"/{re.escape(reference)}(?:[/?#]|$)")
     url = next((u.group(0) for u in _AHA_URL.finditer(text) if own.search(u.group(0))), None)
-    if url is None and "-I-" in reference:
-        url = AHA_IDEA_URL.format(reference=reference)
+    if url is None:
+        url = (AHA_IDEA_URL if "-I-" in reference else AHA_FEATURE_URL).format(reference=reference)
     votes = re.search(r"\bVotes\s*(\d+)", text)
     score = re.search(r"\bScore\s*(\d+)", text)
 

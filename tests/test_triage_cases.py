@@ -745,11 +745,11 @@ def test_an_aha_idea_merged_into_another_says_so():
     )
 
 
-def test_an_aha_feature_without_a_printed_link_gets_none():
-    # Features' links have another shape, so none is made up for them.
-    text = AHA_MERGED_IDEA_PAGE.replace("Idea LAPIPLAT-I-662", "Feature LAPIPLAT-662")
+def test_an_aha_feature_without_a_printed_link_gets_a_feature_link():
+    text = AHA_MERGED_IDEA_PAGE.replace("Idea LAPIPLAT-I-662", "Feature FA-100")
     data = evidence.extract(evidence.AHA, text).data
-    assert data["reference"] == "LAPIPLAT-662" and data["url"] is None
+    assert data["reference"] == "FA-100"
+    assert data["url"] == "https://questionmarkcorp.aha.io/features/FA-100"
 
 
 def test_related_ideas_whose_columns_dont_pair_up_have_no_status():
