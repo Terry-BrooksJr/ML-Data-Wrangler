@@ -685,6 +685,8 @@ def test_an_aha_idea_page_is_parsed():
     )
     assert data["status"] == "Scoping" and data["assigned_to"] == "Monet Slinowsky"
     assert data["created_by"] == "Allain Dollete" and data["created_on"] == "Jul 28, 2026"
+    # The main page prints no link: it's built from the reference.
+    assert data["url"] == "https://questionmarkcorp.aha.io/ideas/ideas/LAPIPLAT-I-684"
     assert data["zendesk_ticket"] == "30721"
     assert (data["requested_by"], data["requested_by_org"]) == ("Jane Customer", "Example Schools")
     assert data["workspace"] == "Feedback Aide"
@@ -722,6 +724,7 @@ def test_an_aha_idea_merged_into_another_says_so():
     data = evidence.extract(evidence.AHA, AHA_MERGED_IDEA_PAGE).data
     assert (data["reference"], data["title"]) == ("LAPIPLAT-I-662", "Add Video to Feedback Aide Sources")
     assert (data["status"], data["merged_into"]) == ("Parked", "FA-I-21")
+    assert data["url"] == "https://questionmarkcorp.aha.io/ideas/ideas/LAPIPLAT-I-662"
     assert data["description"] == (
         "Dynamic elements such as video or audio players are generally not supported in\n"
         "Feedback Aide.\nAcme have specifically requested the addition of video sources."
@@ -740,6 +743,13 @@ def test_an_aha_idea_merged_into_another_says_so():
     assert evidence.describe({"kind": evidence.AHA, "data": data}) == (
         "Aha LAPIPLAT-I-662: Add Video to Feedback Aide Sources (Parked, merged into FA-I-21)"
     )
+
+
+def test_an_aha_feature_without_a_printed_link_gets_none():
+    # Features' links have another shape, so none is made up for them.
+    text = AHA_MERGED_IDEA_PAGE.replace("Idea LAPIPLAT-I-662", "Feature LAPIPLAT-662")
+    data = evidence.extract(evidence.AHA, text).data
+    assert data["reference"] == "LAPIPLAT-662" and data["url"] is None
 
 
 def test_related_ideas_whose_columns_dont_pair_up_have_no_status():
